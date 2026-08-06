@@ -9,8 +9,7 @@ Sprechererkennung, TOP-Zuordnung, Zusammenfassung und Protokollerstellung aus
 Audioaufnahmen kommunaler Sitzungen.
 
 Dieses Repository ist ein weiterentwickelter Fork der ursprünglichen
-Protokollierungsassistenz. Die Weiterentwicklung erfolgt durch
-**Keule-Services** und die **Stadt Doberlug-Kirchhain**.
+Protokollierungsassistenz. Die Weiterentwicklung wird durch die **Stadt Doberlug-Kirchhain** vorangetrieben.
 
 <p align="center">
   <img src="app/frontend/public/logos/Keule-Logo.png" alt="Keule-Services Logo" height="64">
