@@ -537,6 +537,14 @@ docker build -f app/backend/Dockerfile.gpu --build-arg PRECACHE_MODELS=0 -t ki-p
 Wenn Modelle im Image vorinstalliert werden sollen, `PRECACHE_MODELS=1` setzen
 und `HF_TOKEN` als BuildKit-Secret bereitstellen.
 
+Für NVIDIA-Blackwell-GPUs (z. B. RTX 50xx, B100/B200) `Dockerfile.gpu-blackwell`
+verwenden, da `Dockerfile.gpu` PyTorch-Wheels ohne Blackwell-Kernel (CUDA 12.6)
+installiert:
+
+```bash
+docker build -f app/backend/Dockerfile.gpu-blackwell --build-arg PRECACHE_MODELS=0 -t ki-protokollierung-backend:gpu-blackwell-local ./app/backend
+```
+
 ## API-Auszug
 
 | Endpoint | Methode | Zweck |

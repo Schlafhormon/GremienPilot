@@ -1,0 +1,97 @@
+# syntax=docker/dockerfile:1.7
+# Backend Dockerfile for GPU deployment on NVIDIA Blackwell GPUs (e.g. RTX 50xx,
+# B100/B200) with optional pre-bundled ML models.
+# Requires: NVIDIA Blackwell GPU, NVIDIA driver >= 570, NVIDIA Container Toolkit
+#
+# Why a separate file from Dockerfile.gpu:
+# Blackwell (compute capability 10.0/12.0) needs CUDA >= 12.8 and PyTorch wheels
+# built against CUDA 12.8. The default PyPI torch wheels used by Dockerfile.gpu
+# are built against CUDA 12.6 and do not contain Blackwell (sm_100/sm_120)
+# kernels, so they fail (or silently fall back to CPU) on Blackwell cards.
+#
+# Build with pre-cached models:
+#   DOCKER_BUILDKIT=1 docker build -f Dockerfile.gpu-blackwell --secret id=hf_token,env=HF_TOKEN -t backend:gpu-blackwell .
+# Build without pre-cached models (HF_TOKEN required at runtime for diarization):
+#   DOCKER_BUILDKIT=1 docker build -f Dockerfile.gpu-blackwell --build-arg PRECACHE_MODELS=0 -t backend:gpu-blackwell .
+# Run: docker run --gpus all -p 8010:8010 backend:gpu-blackwell
+
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+# Install Python 3.10 and system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3.10-venv \
+    python3-pip \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python3
+
+# Upgrade pip
+RUN python -m pip install --no-cache-dir --upgrade pip
+
+# Install uv for package management
+RUN pip install --no-cache-dir uv
+
+# Install PyTorch/torchaudio from the CUDA 12.8 wheel index first so the
+# Blackwell-enabled build is used instead of the default PyPI (CUDA 12.6) one.
+# Versions must stay within the range pinned in pyproject.toml.
+ENV UV_NO_CACHE=1
+RUN uv pip install --system \
+    "torch>=2.7.0,<2.8.0" "torchaudio>=2.7.0,<2.8.0" \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Copy project files
+COPY pyproject.toml uv.lock ./
+COPY *.py ./
+
+# Install remaining dependencies. torch/torchaudio already satisfy the
+# constraints above, so uv will not reinstall them from the default index.
+RUN uv pip install --system -e .
+
+# Create runtime directories after editable install so setuptools package
+# discovery does not treat them as Python packages.
+RUN mkdir -p uploads data
+
+# Install nvidia-cudnn-cu12 for WhisperX GPU support
+# This provides the cuDNN libraries needed for faster-whisper
+RUN pip install --no-cache-dir nvidia-cudnn-cu12
+
+# Set LD_LIBRARY_PATH for cuDNN libraries
+# This is required for WhisperX/faster-whisper to find CUDA libraries
+# See: https://github.com/m-bain/whisperX/issues/902
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+# Set cache directories inside the container
+ENV HF_HOME=/app/.cache/huggingface
+ENV TORCH_HOME=/app/.cache/torch
+
+# Download all ML models at build time when enabled. The HuggingFace token is
+# provided via a BuildKit secret and is never persisted as an ARG, ENV or layer.
+ARG PRECACHE_MODELS=1
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ "${PRECACHE_MODELS}" = "1" ]; then \
+      if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi; \
+      python -c "from transcribe import load_models; load_models()"; \
+    else \
+      echo "Skipping model pre-cache; provide HF_TOKEN at runtime if diarization requires it."; \
+    fi
+
+# Set flag indicating models are pre-cached (runtime won't require HF_TOKEN)
+ENV MODELS_PRECACHED=${PRECACHE_MODELS}
+
+# Expose port
+EXPOSE 8010
+
+# Health check with reduced start_period since models are pre-loaded
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
+    CMD curl -f http://localhost:8010/health || exit 1
+
+# Run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8010"]
