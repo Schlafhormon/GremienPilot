@@ -45,8 +45,10 @@ Gleichzeitige Beratung mehrerer TOPs in einer Zeile lässt sich damit nicht
 verlustfrei abbilden und bleibt bei mehrdeutiger Evidenz unzugeordnet.
 
 `agenda_detection.py` übernimmt die heuristischen Bereiche unverändert, auch bei
-LLM-Ausfall. LLM-Ergebnisse für bekannte Agenden werden nach Titelidentität und
-Transkriptposition validiert, nicht nach ihrer Listenposition. Fehlende Grenzen
+LLM-Ausfall. LLM-Ergebnisse für bekannte Agenden werden über aufruflokale IDs
+(bei älteren Antworten über eindeutige Titel) und Transkriptposition validiert.
+Die Regeln für Verwerfen, Evidenz und unsichere Heuristikergänzungen stehen in
+[LLM-Segmentvalidierung](llm-segmentvalidierung.md). Fehlende Grenzen
 werden nicht interpoliert; widersprüchliche Sprechakte können durch eine hohe
 LLM-Confidence nicht zu sicheren Aufrufen werden. Ohne bekannte Agenda werden
 identische wiederholte Titel zusammengeführt. Der zusätzliche Pipeline-Fallback

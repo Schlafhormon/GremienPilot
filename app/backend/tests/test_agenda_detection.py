@@ -1,3 +1,5 @@
+import json
+
 from agenda_detection import (
     DEFAULT_AGENDA_DETECTION_PROMPT,
     build_agenda_detection_system_prompt,
@@ -232,7 +234,7 @@ def test_explicit_decision_overrides_default_without_content_side_effects(
     monkeypatch, fake_openai_module, known_tops, server_default, decision, context,
 ):
     monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_USE_LLM", server_default)
-    fake_openai_module.content = '{"tops":[{"top_title":"Haushalt","start_index":0,"end_index":0}]}'
+    fake_openai_module.content = '{"tops":[{"top_title":"Haushalt","start_index":0,"end_index":0,"evidence_index":0,"evidence_text":"TOP 1 Haushalt."}]}'
     transcript = [TranscriptUtterance("MOD", "TOP 1 Haushalt.")]
     result = (segment_known_agenda(transcript, ["Haushalt"], use_llm=decision, **context)
               if known_tops else detect_agenda_from_transcript(transcript, use_llm=decision, **context))
@@ -429,3 +431,229 @@ def test_known_llm_conflicting_identity_does_not_select_arbitrary_topic(fake_ope
     result = segment_known_agenda([TranscriptUtterance('A', 'Diskussion.')], ['2 Haushalt', '3 Schulbau'], use_llm=True)
     assert result.assignments == [None]
     assert result.segments == []
+
+
+def known_llm_result(fake, tops, lines, segments):
+    fake.content = json.dumps({'tops': segments})
+    return segment_known_agenda(
+        [TranscriptUtterance('MOD', line) for line in lines], tops, use_llm=True,
+    )
+
+
+@pytest.mark.parametrize('with_ids', [False, True])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_omitted_household_never_receives_school_boundaries(fake_openai_module, with_ids, reverse):
+    segments = [
+        {'top_title': 'Begrüßung', 'start_index': 0, 'end_index': 1},
+        {'top_title': 'Schulbau', 'start_index': 4, 'end_index': 5},
+    ]
+    if with_ids:
+        segments[0]['top_id'] = 'agenda:0'
+        segments[1]['top_id'] = 'agenda:2'
+    if reverse:
+        segments.reverse()
+    result = known_llm_result(fake_openai_module, ['Begrüßung', 'Haushalt', 'Schulbau'],
+                              ['Allgemeine Diskussion.'] * 6, segments)
+    assert result.assignments == [0, 0, None, None, 2, 2]
+    assert [s.top_title for s in result.segments] == ['Begrüßung', 'Schulbau']
+    assert all(s.uncertain for s in result.segments)
+
+
+@pytest.mark.parametrize('identity', [
+    {'top_id': 'agenda:99', 'top_title': 'Haushalt'},
+    {'top_id': 'agenda:0', 'top_title': 'Schulbau'},
+    {'top_id': None, 'top_title': 'Haushalt'},
+    {'top_id': 0, 'top_title': 'Haushalt'},
+    {'top_title': 'TOP 99 Haushalt'},
+    {'top_title': '[Nichtöffentlich] Haushalt'},
+    {'top_title': 'Haushaltsberatung'},
+])
+def test_invalid_identity_cannot_be_rescued_by_position_or_title(fake_openai_module, identity):
+    result = known_llm_result(fake_openai_module, ['Haushalt', 'Schulbau'], ['Diskussion.'],
+                              [{**identity, 'start_index': 0, 'end_index': 0}])
+    assert result.assignments == [None]
+    assert 'invalid_identity' in result.llm.validation_reasons
+
+
+@pytest.mark.parametrize('tops', [
+    ['Haushalt', 'Haushalt'], ['Haushalt', '2 Haushalt'],
+    ['2.1 Haushalt', '2.2 Haushalt'],
+    ['[Öffentlich] 2.1 Haushalt', '[Nichtöffentlich] 2.1 Haushalt'],
+])
+def test_legacy_title_must_not_hide_ambiguity(fake_openai_module, tops):
+    result = known_llm_result(fake_openai_module, tops, ['Diskussion.'],
+                              [{'top_title': 'Haushalt', 'start_index': 0, 'end_index': 0}])
+    assert result.assignments == [None]
+    assert 'invalid_identity' in result.llm.validation_reasons
+
+
+def test_explicit_id_resolves_duplicate_titles_but_does_not_prove_content(fake_openai_module):
+    result = known_llm_result(fake_openai_module, ['Haushalt', 'Haushalt'], ['Kommen wir zum Haushalt.'],
+                              [{'top_id': 'agenda:1', 'top_title': 'Haushalt', 'start_index': 0,
+                                'end_index': 0, 'confidence': 0.99, 'evidence_index': 0,
+                                'evidence_text': 'Kommen wir zum Haushalt.'}])
+    assert result.assignments == [1]
+    assert result.segments[0].uncertain
+    assert result.segments[0].confidence <= 0.5
+
+
+@pytest.mark.parametrize('field', ['start_index', 'end_index'])
+@pytest.mark.parametrize('value', [None, True, False, 0.5, 1.0, '0', -1, 99, float('inf')])
+def test_invalid_bounds_are_rejected_without_clamping(fake_openai_module, field, value):
+    raw = {'top_id': 'agenda:0', 'top_title': 'Haushalt', 'start_index': 0, 'end_index': 1}
+    raw[field] = value
+    result = known_llm_result(fake_openai_module, ['Haushalt'], ['Diskussion.'] * 2, [raw])
+    assert result.assignments == [None, None]
+    assert 'invalid_bounds' in result.llm.validation_reasons
+
+
+@pytest.mark.parametrize('bounds', [{'start_index': 1, 'end_index': 0}, {'start_index': 0}, {'end_index': 1}])
+def test_missing_or_reversed_bounds_are_not_interpolated(fake_openai_module, bounds):
+    result = known_llm_result(fake_openai_module, ['Haushalt'], ['Diskussion.'] * 2,
+                              [{'top_id': 'agenda:0', **bounds}])
+    assert result.assignments == [None, None]
+    assert 'invalid_bounds' in result.llm.validation_reasons
+
+
+@pytest.mark.parametrize('right', [(0, 2), (1, 1), (2, 3)])
+@pytest.mark.parametrize('same_top', [False, True])
+def test_all_overlapping_proposals_are_rejected(fake_openai_module, right, same_top):
+    result = known_llm_result(fake_openai_module, ['Haushalt', 'Schulbau'], ['Diskussion.'] * 4, [
+        {'top_id': 'agenda:0', 'start_index': 0, 'end_index': 2},
+        {'top_id': 'agenda:0' if same_top else 'agenda:1', 'start_index': right[0], 'end_index': right[1]},
+    ])
+    assert result.assignments == [None] * 4
+    assert 'overlapping_segments' in result.llm.validation_reasons
+
+
+def test_reordered_ids_and_disjoint_revisits_keep_gaps(fake_openai_module):
+    result = known_llm_result(fake_openai_module, ['2.1 Haushalt', '3 Schulbau'], ['Diskussion.'] * 6, [
+        {'top_id': 'agenda:1', 'start_index': 5, 'end_index': 5},
+        {'top_id': 'agenda:0', 'start_index': 2, 'end_index': 3},
+        {'top_id': 'agenda:1', 'start_index': 0, 'end_index': 0},
+        {'top_id': 'agenda:99', 'start_index': 1, 'end_index': 4},
+    ])
+    assert result.assignments == [1, None, 0, 0, None, 1]
+
+
+@pytest.mark.parametrize('evidence', [
+    {}, {'evidence_text': 'Erfundener Beleg', 'evidence_index': 0},
+    {'evidence_text': 'Kommen wir zum Haushalt.', 'evidence_index': 2},
+    {'evidence_text': 'Kommen wir zum Haushalt.', 'evidence_index': True},
+    {'evidence_text': 'Kommen wir zum Haushalt.', 'evidence_index': '0'},
+    {'evidence_text': 'Andere Zeile.', 'evidence_index': 0},
+    {'evidence_text': 'Andere Zeile.'},
+])
+def test_unverified_evidence_is_cleared_and_never_certain(fake_openai_module, evidence):
+    result = known_llm_result(fake_openai_module, ['Haushalt'],
+                              ['Kommen wir zum Haushalt.', 'Andere Zeile.'],
+                              [{'top_id': 'agenda:0', 'start_index': 0, 'end_index': 0,
+                                'confidence': 0.99, **evidence}])
+    segment = result.segments[0]
+    assert segment.evidence_text is None
+    assert segment.evidence_index is None
+    assert segment.uncertain and segment.confidence <= 0.5
+    assert 'unverified_evidence' in result.llm.validation_reasons
+    assert result.llm.warnings
+
+
+@pytest.mark.parametrize('indexed', [False, True])
+def test_grounded_unambiguous_call_can_be_accepted(fake_openai_module, indexed):
+    raw = {'top_id': 'agenda:1', 'top_title': '[Öffentlich] 02.10 Schulbau',
+           'start_index': 0, 'end_index': 0, 'confidence': 0.95,
+           'evidence_text': 'Kommen wir zu TOP 2.10 Schulbau im öffentlichen Teil.'}
+    if indexed:
+        raw['evidence_index'] = 0
+    result = known_llm_result(fake_openai_module,
+                              ['1 Haushalt', '[Öffentlich] 02.10 Schulbau'], [raw['evidence_text']], [raw])
+    assert result.assignments == [1]
+    assert not result.segments[0].uncertain
+    assert result.segments[0].evidence_index == 0
+    assert result.segments[0].top_title == '[Öffentlich] 02.10 Schulbau'
+    assert result.llm.validation_reasons == []
+
+
+def test_quote_must_not_hide_preview_context(fake_openai_module):
+    result = known_llm_result(fake_openai_module, ['2 Haushalt'],
+                              ['Später kommen wir zu TOP 2 Haushalt.'],
+                              [{'top_id': 'agenda:0', 'start_index': 0, 'end_index': 0,
+                                'confidence': 0.99, 'evidence_index': 0,
+                                'evidence_text': 'kommen wir zu TOP 2 Haushalt.'}])
+    assert result.segments[0].uncertain
+    assert result.segments[0].confidence <= 0.5
+
+
+def test_conflicting_current_call_rejects_wrong_id_and_uses_independent_fallback(fake_openai_module):
+    result = known_llm_result(fake_openai_module, ['2 Haushalt', '3 Schulbau'],
+                              ['Kommen wir zu TOP 3 Schulbau.'],
+                              [{'top_id': 'agenda:0', 'start_index': 0, 'end_index': 0,
+                                'confidence': 0.99, 'evidence_index': 0,
+                                'evidence_text': 'Kommen wir zu TOP 3 Schulbau.'}])
+    assert result.assignments == [1]
+    assert result.segments[0].uncertain
+    assert 'contradictory_evidence' in result.llm.validation_reasons
+    assert 'heuristic_supplement' in result.llm.validation_reasons
+
+
+def test_missing_top_is_only_supplemented_with_independent_range(fake_openai_module):
+    result = known_llm_result(fake_openai_module, ['Begrüßung', 'Haushalt', 'Schulbau'], [
+        'Kommen wir zur Begrüßung.', 'Danke.', 'Kommen wir zum Haushalt.', 'Beratung.',
+        'Kommen wir zum Schulbau.', 'Beratung.',
+    ], [
+        {'top_id': 'agenda:0', 'start_index': 0, 'end_index': 1},
+        {'top_id': 'agenda:2', 'start_index': 4, 'end_index': 5},
+    ])
+    assert result.assignments == [0, 0, 1, 1, 2, 2]
+    replacement = result.segments[1]
+    assert replacement.evidence_index == 2
+    assert replacement.uncertain and replacement.confidence <= 0.5
+    assert 'heuristische Ergänzung' in replacement.reason
+
+
+def test_prompt_uses_request_ids_independent_of_original_numbering(fake_openai_module):
+    known_llm_result(fake_openai_module, ['[Öffentlich] 02.10 Schule', '[Nichtöffentlich] 02.10 Schule'],
+                     ['Diskussion.'], [])
+    request = fake_openai_module.instances[0].calls[0]
+    prompt = request['messages'][1]['content']
+    assert '"top_id": "agenda:0", "top_title": "[Öffentlich] 02.10 Schule"' in prompt
+    assert '"top_id": "agenda:1", "top_title": "[Nichtöffentlich] 02.10 Schule"' in prompt
+    assert '"evidence_index"' in request['messages'][0]['content']
+
+
+def test_fallback_does_not_clip_ranges_to_fill_gaps(fake_openai_module):
+    result = known_llm_result(fake_openai_module, ['Haushalt', 'Schulbau'], [
+        'Kommen wir zum Haushalt.', 'Diskussion.', 'Diskussion.',
+    ], [{'top_id': 'agenda:1', 'start_index': 2, 'end_index': 2}])
+    # Heuristic Haushalt spans 0–2 and conflicts with an accepted LLM proposal.
+    assert result.assignments == [None, None, 1]
+    assert 'heuristic_supplement' not in result.llm.validation_reasons
+
+
+def test_interior_topic_change_prevents_certain_range(fake_openai_module):
+    result = known_llm_result(fake_openai_module, ['2 Haushalt', '3 Schulbau'], [
+        'Kommen wir zu TOP 2 Haushalt.', 'Kommen wir zu TOP 3 Schulbau.',
+    ], [{'top_id': 'agenda:0', 'start_index': 0, 'end_index': 1, 'confidence': 0.99,
+         'evidence_index': 0, 'evidence_text': 'Kommen wir zu TOP 2 Haushalt.'}])
+    assert result.segments[0].uncertain
+    assert result.segments[0].confidence <= 0.5
+    assert 'weak_boundary_evidence' in result.llm.validation_reasons
+
+
+@pytest.mark.parametrize('confidence', [float('nan'), float('inf'), -float('inf')])
+def test_nonfinite_confidence_never_becomes_certain(fake_openai_module, confidence):
+    result = known_llm_result(fake_openai_module, ['Haushalt'], ['Kommen wir zum Haushalt.'], [
+        {'top_id': 'agenda:0', 'start_index': 0, 'end_index': 0, 'confidence': confidence,
+         'evidence_index': 0, 'evidence_text': 'Kommen wir zum Haushalt.'},
+    ])
+    assert result.segments[0].uncertain
+    assert result.segments[0].confidence == 0.55
+
+
+def test_legacy_evidence_requires_unique_line_within_range(fake_openai_module):
+    result = known_llm_result(fake_openai_module, ['Haushalt'], ['Kommen wir zum Haushalt.'] * 2, [
+        {'top_id': 'agenda:0', 'start_index': 0, 'end_index': 1, 'confidence': 0.99,
+         'evidence_text': 'Kommen wir zum Haushalt.'},
+    ])
+    assert result.segments[0].evidence_index is None
+    assert result.segments[0].evidence_text is None
+    assert result.segments[0].uncertain

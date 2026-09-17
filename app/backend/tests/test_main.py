@@ -84,7 +84,11 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         files["pdf"] = ("agenda.pdf", b"%PDF-1.4", "application/pdf")
         fake_openai_module.responses.append('{"tops": ["Haushalt"], "metadata": {}}')
     fake_openai_module.responses.extend([
-        '{"tops": [{"top_title": "Haushalt", "start_index": 0, "end_index": 0, "confidence": 0.9}]}',
+        json.dumps({"tops": [{
+            **({"top_id": "agenda:0"} if agenda_source != "transcript" else {}),
+            "top_title": "Haushalt", "start_index": 0, "end_index": 0,
+            "confidence": 0.9, "evidence_index": 0, "evidence_text": "TOP 1 Haushalt.",
+        }]}),
         json.dumps({"discussion": ["Der Haushalt wurde beraten."], "decisions": [], "votes": [],
                     "action_items": [], "open_points": [], "uncertainties": []}),
     ])
@@ -1800,3 +1804,27 @@ def test_pipeline_known_fallback_keeps_absence_of_evidence_visible(monkeypatch):
 
     monkeypatch.setattr(main, 'suggest_assignments', fail)
     assert main.fallback_agenda(transcript, tops)[1] == [None]
+
+
+@pytest.mark.parametrize('top_id,expected', [('agenda:1', 1), ('agenda:99', None)])
+def test_agenda_api_preserves_identity_and_validation_diagnostics(fake_openai_module, top_id, expected):
+    fake_openai_module.content = json.dumps({'tops': [{
+        'top_id': top_id, 'top_title': 'Schulbau', 'start_index': 0, 'end_index': 0,
+        'confidence': 0.99, 'evidence_text': 'SECRET invented quotation', 'evidence_index': 0,
+    }]})
+    response = TestClient(main.app).post('/api/agenda-detection', json={
+        'transcript': [{'speaker': 'A', 'text': 'Allgemeine Diskussion.', 'start': 0, 'end': 1}],
+        'tops': ['Haushalt', 'Schulbau'], 'use_llm': True,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data['tops'] == ['Haushalt', 'Schulbau']
+    assert data['assignments'] == [expected]
+    assert data['llm']['validation_reasons']
+    assert data['warnings']
+    assert data['llm']['status'] == 'success'  # Transport success is separate from validation.
+    assert 'SECRET' not in response.text
+    if expected is not None:
+        assert data['segments'][0]['uncertain']
+        assert data['segments'][0]['evidence_index'] is None
+        assert data['segments'][0]['evidence_text'] is None

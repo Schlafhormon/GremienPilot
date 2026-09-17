@@ -63,11 +63,13 @@ Gib ausschliesslich valides JSON im folgenden Format zurueck:
 {
   "tops": [
     {
+      "top_id": "agenda:0",
       "top_title": "Originalnummer und Titel, z.B. 2.1. Schulbau",
       "start_index": 0,
       "end_index": 4,
       "confidence": 0.0,
-      "evidence_text": "kurzer Beleg aus dem Transkript",
+      "evidence_index": 0,
+      "evidence_text": "wörtlicher Beleg aus dieser Transkriptzeile",
       "uncertain": false
     }
   ]
@@ -80,7 +82,12 @@ Regeln:
 - Bei bekanntem Abschnitt Titel mit [Öffentlich] oder [Nichtöffentlich] beginnen.
 - Listenindizes sind keine TOP-Nummern. Wiederholte Nummern sind ohne eindeutigen Abschnitt mehrdeutig.
 - Mehrdeutige Nummernverweise und mehrere TOP-Verweise in einer Zeile sind uncertain=true.
-- Bekannte TOPs über ihren Originaltitel identifizieren, niemals über die Position in der Antwort.
+- Bei bekannter Agenda top_id exakt aus der TOP-Liste kopieren; sie ist keine TOP-Nummer.
+- top_title muss zum Originaltitel dieser ID passen; niemals über die Antwortposition zuordnen.
+- Ohne bekannte Agenda top_id weglassen.
+- start_index und end_index sind inklusive, beide als ganze JSON-Zahlen erforderlich.
+- evidence_index muss innerhalb des Segments liegen; evidence_text wörtlich aus dieser Zeile kopieren.
+- Eine ID belegt nur die Identität, nicht die inhaltliche Richtigkeit der Grenzen.
 - Vorgezogene oder wiederaufgenommene TOPs dürfen in anderer Reihenfolge und mehrfach vorkommen.
 - Ohne Evidenz TOPs auslassen und Transkriptzeilen unzugeordnet lassen; keine Grenzen interpolieren.
 - Vorschauen, Rückverweise, Negationen und zitierte Aufrufe sind keine aktuellen Aufrufe.
@@ -112,16 +119,23 @@ class AgendaLLMUsage:
     attempted_calls: int = 0
     failed_calls: int = 0
     failure_reasons: list[str] = field(default_factory=list)
+    validation_reasons: list[str] = field(default_factory=list)
 
     @property
     def warnings(self) -> list[str]:
-        if not self.failed_calls:
-            return []
-        return [
-            f"TOP-Erkennung: {self.failed_calls} von {self.attempted_calls} LLM-Aufrufen "
-            f"fehlgeschlagen ({', '.join(self.failure_reasons)}). "
-            "Heuristische Ersatzverarbeitung verwendet; bitte TOP-Zuordnung prüfen."
-        ]
+        warnings = []
+        if self.failed_calls:
+            warnings.append(
+                f"TOP-Erkennung: {self.failed_calls} von {self.attempted_calls} LLM-Aufrufen "
+                f"fehlgeschlagen ({', '.join(self.failure_reasons)}). "
+                "Heuristische Ersatzverarbeitung verwendet; bitte TOP-Zuordnung prüfen."
+            )
+        if self.validation_reasons:
+            warnings.append(
+                "TOP-Erkennung: LLM-Segmente nur eingeschränkt übernommen "
+                f"({', '.join(self.validation_reasons)}). Bitte TOP-Zuordnung prüfen."
+            )
+        return warnings
 
 
 def _llm_usage(use_llm: bool | None) -> AgendaLLMUsage:
@@ -162,6 +176,10 @@ class _RawSegment:
     uncertain: bool
     reason: str
     transition_type: str
+    top_id: str | None = None
+    id_provided: bool = False
+    evidence_index: int | None = None
+    evidence_index_provided: bool = False
 
 
 def detect_agenda_from_transcript(
@@ -239,10 +257,11 @@ def segment_known_agenda(
 
     if llm_segments:
         segments, repaired = _validate_known_segments(
-            len(transcript),
+            transcript,
             valid_tops,
             llm_segments,
             heuristic_segments,
+            issues=usage.validation_reasons,
         )
         strategy = "known_agenda_heuristic_llm_repaired" if repaired else "known_agenda_heuristic_llm"
     else:
@@ -505,7 +524,10 @@ def _detect_with_llm(
     )
     try:
         raw_response = _llm_message_text(response.choices[0].message)
-        return _parse_llm_segments(raw_response)
+        segments = _parse_llm_segments(raw_response)
+        # Unknown agendas still require a title; ID-only entries are meaningful
+        # solely against the supplied known agenda.
+        return segments if tops is not None else [segment for segment in segments if segment.top_title]
     except Exception as exc:
         raise _InvalidLLMResponse() from exc
 
@@ -533,7 +555,9 @@ def _build_llm_user_prompt(
     )
     heuristic_json = [
         {
+            **({"top_id": f"agenda:{segment.top_index}"} if tops else {}),
             "top_title": segment.top_title,
+            "evidence_index": segment.evidence_index,
             "start_index": segment.start_index,
             "end_index": segment.end_index,
             "confidence": segment.confidence,
@@ -544,7 +568,11 @@ def _build_llm_user_prompt(
     ]
 
     if tops:
-        agenda = "\n".join(f"Listenindex {index}: {top}" for index, top in enumerate(tops))
+        # Request-local references, independent of persisted session IDs and TOP numbers.
+        agenda = json.dumps([
+            {"top_id": f"agenda:{index}", "top_title": top}
+            for index, top in enumerate(tops)
+        ], ensure_ascii=False)
         compact_note = (
             "Das Transkript ist auf relevante Kontextfenster gekuerzt; "
             "die angezeigten Indizes bleiben die originalen Transkriptindizes. "
@@ -554,7 +582,7 @@ def _build_llm_user_prompt(
         task = (
             "Bekannte TOP-Liste. Pruefe und verbessere die Segmentgrenzen. "
             f"{compact_note}"
-            "Gib belegte Segmente in Transkriptreihenfolge mit dem Originaltitel zurück. "
+            "Gib belegte Segmente in Transkriptreihenfolge mit top_id und dem Originaltitel zurück. "
             "TOPs dürfen fehlen oder mehrfach auftreten; Lücken sind erlaubt.\n\n"
             f"TOPs:\n{agenda}"
         )
@@ -633,19 +661,20 @@ def _compact_known_agenda_indices(
 def _parse_llm_segments(response_text: str) -> list[_RawSegment]:
     payload = _extract_json_payload(response_text)
     if isinstance(payload, dict):
-        raw_items = payload.get("tops") or payload.get("segments") or []
+        raw_items = payload.get("tops", payload.get("segments", []))
     elif isinstance(payload, list):
         raw_items = payload
     else:
-        raw_items = []
+        raise ValueError("Expected segment list")
+    if not isinstance(raw_items, list):
+        raise ValueError("Expected segment list")
 
     segments: list[_RawSegment] = []
     for item in raw_items:
         if not isinstance(item, dict):
-            continue
-        title = str(item.get("top_title") or item.get("title") or "").strip()
-        if not title:
-            continue
+            raise ValueError("Expected segment object")
+        title = item.get("top_title", item.get("title", ""))
+        title = title.strip() if isinstance(title, str) else ""
         segments.append(
             _RawSegment(
                 top_title=title,
@@ -656,6 +685,10 @@ def _parse_llm_segments(response_text: str) -> list[_RawSegment]:
                 uncertain=bool(item.get("uncertain", False)),
                 reason="LLM-Erkennung mit strukturierter Ausgabe.",
                 transition_type="llm",
+                top_id=item.get("top_id") if isinstance(item.get("top_id"), str) else None,
+                id_provided="top_id" in item,
+                evidence_index=_coerce_int(item.get("evidence_index")),
+                evidence_index_provided="evidence_index" in item,
             )
         )
     return segments
@@ -783,57 +816,131 @@ def _validate_unknown_segments(
     )
 
 
+def _known_title_matches(title: str, tops: list[str]) -> list[int]:
+    """Legacy labels must match exactly after normalization, never fuzzily.
+
+    Supplied numbers and sections must match; even an exact full label cannot
+    hide another candidate with the same title and unspecified metadata.
+    """
+    label = parse_agenda_label(title)
+    if not label.title:
+        return []
+    return [
+        i for i, top in enumerate(tops)
+        if normalize_text((known := parse_agenda_label(top)).title) == normalize_text(label.title)
+        and (label.number_key is None or label.number_key == known.number_key)
+        and (label.section is None or label.section == known.section)
+    ]
+
+
 def _validate_known_segments(
-    transcript_length: int,
+    transcript: list[TranscriptUtterance],
     tops: list[str],
     raw_segments: list[_RawSegment],
     heuristic_segments: list[AssignmentSegment],
+    *,
+    issues: list[str] | None = None,
 ) -> tuple[list[AssignmentSegment], bool]:
-    if transcript_length <= 0:
-        return [], False
+    """Validate identities before boundaries; never interpolate or clip LLM ranges.
 
-    # Resolve identity from labels, never from a segment's position in the list.
-    # Missing agenda items remain missing; repeated titles may form several ranges.
-    mapped: list[tuple[_RawSegment, int]] = []
-    repaired = False
+    All overlapping proposals are rejected, with no response-order winner.
+    Independent heuristic supplements retain their identity and complete range.
+    A grounded quotation proves provenance, not semantic correctness.
+    """
+    issues = issues if issues is not None else []
+
+    def note(code: str) -> None:
+        if code not in issues:
+            issues.append(code)
+
+    mapped: list[AssignmentSegment] = []
+    identities = {f"agenda:{i}": i for i in range(len(tops))}
     for raw in raw_segments:
-        exact = [i for i, top in enumerate(tops) if normalize_text(top) == normalize_text(raw.top_title)]
-        label = parse_agenda_label(raw.top_title)
-        title = normalize_text(label.title)
-        matches = exact or [
-            i for i, top in enumerate(tops)
-            if normalize_text((known := parse_agenda_label(top)).title) == title
-            and (label.number_key is None or known.number_key is None or label.number_key == known.number_key)
-            and (label.section is None or known.section is None or label.section == known.section)
-        ]
-        if (len(matches) != 1 or raw.start_index is None
-                or not 0 <= raw.start_index < transcript_length):
-            repaired = True
+        matches = _known_title_matches(raw.top_title, tops)
+        if raw.id_provided:
+            top_index = identities.get(raw.top_id)
+            # Never rescue a bad ID using its title. Supplied titles must agree.
+            if top_index is None or (raw.top_title and top_index not in matches):
+                note("invalid_identity")
+                continue
+        elif len(matches) == 1:
+            top_index = matches[0]
+        else:
+            note("invalid_identity")
             continue
-        mapped.append((raw, matches[0]))
-    if not mapped:
-        return [replace(segment, uncertain=True, confidence=min(segment.confidence, 0.5))
-                for segment in heuristic_segments], True
-    mapped.sort(key=lambda item: item[0].start_index)
-    segments: list[AssignmentSegment] = []
-    for position, (raw, top_index) in enumerate(mapped):
-        start = raw.start_index
-        next_start = mapped[position + 1][0].start_index if position + 1 < len(mapped) else transcript_length
-        if sum(candidate.start_index == start for candidate, _ in mapped) > 1:
-            repaired = True
+        start, end = raw.start_index, raw.end_index
+        if start is None or end is None or not 0 <= start <= end < len(transcript):
+            note("invalid_bounds")
             continue
-        end = next_start - 1 if raw.end_index is None else max(start, min(raw.end_index, next_start - 1))
-        changed = raw.end_index is not None and end != raw.end_index
-        repaired |= changed
-        segments.append(AssignmentSegment(
+
+        # Only a literal excerpt from a single line inside the range is grounded.
+        evidence_index = raw.evidence_index
+        quote = raw.evidence_text
+        if not raw.evidence_index_provided and quote:
+            hits = [i for i in range(start, end + 1) if quote in transcript[i].text]
+            evidence_index = hits[0] if len(hits) == 1 else None
+        grounded = bool(
+            quote and evidence_index is not None and start <= evidence_index <= end
+            and quote in transcript[evidence_index].text
+        )
+        if not grounded:
+            note("unverified_evidence")
+            evidence_index, quote = None, None
+        # Use full lines so an excerpt cannot hide negation or a conflicting TOP.
+        support = [i for i in {start, evidence_index} if i is not None]
+        supported_topics = {
+            line: [i for i, top in enumerate(tops)
+                   if score_line_for_top(transcript[line], top, i, tops)[0] >= 0.7]
+            for line in range(start, end + 1)
+        }
+        if any(len(supported_topics[line]) == 1 and top_index not in supported_topics[line]
+               for line in support):
+            note("contradictory_evidence")
+            continue
+        strong = (
+            grounded
+            and all(supported_topics[line] == [top_index] for line in support)
+            and not any(targets and targets != [top_index] for targets in supported_topics.values())
+        )
+        if not strong:
+            note("weak_boundary_evidence")
+        mapped.append(AssignmentSegment(
             top_index=top_index, top_title=tops[top_index], start_index=start, end_index=end,
-            confidence=min(raw.confidence, 0.5) if changed else raw.confidence,
-            uncertain=raw.uncertain or changed or raw.confidence < 0.7,
-            transition_type=raw.transition_type,
-            reason=raw.reason + (" Grenzen wurden repariert." if changed else ""),
-            evidence_index=start, evidence_text=raw.evidence_text,
+            confidence=min(raw.confidence, 0.5) if not strong else raw.confidence,
+            uncertain=raw.uncertain or not strong or raw.confidence < 0.7,
+            transition_type="llm" if strong else "inferred",
+            reason=raw.reason + (" Grenzen inhaltlich nicht eindeutig belegt; Zuordnung prüfen." if not strong else ""),
+            evidence_index=evidence_index, evidence_text=quote,
         ))
-    return segments, repaired
+
+    # Reject every member of an overlap, including duplicate ranges for one TOP.
+    # Disjoint revisits of the same identity are valid.
+    conflicts: set[int] = set()
+    for i, left in enumerate(mapped):
+        for j in range(i + 1, len(mapped)):
+            right = mapped[j]
+            if left.start_index <= right.end_index and right.start_index <= left.end_index:
+                conflicts.update((i, j))
+    if conflicts:
+        note("overlapping_segments")
+    segments = [segment for i, segment in enumerate(mapped) if i not in conflicts]
+
+    # Only supplement identities absent from accepted LLM segments. Never extend
+    # an accepted range into a gap, or clip a fallback to make it fit.
+    accepted_ids = {segment.top_index for segment in segments}
+    for fallback in heuristic_segments:
+        if fallback.top_index in accepted_ids or any(
+            fallback.start_index <= segment.end_index and segment.start_index <= fallback.end_index
+            for segment in segments
+        ):
+            continue
+        segments.append(replace(
+            fallback, uncertain=True, confidence=min(fallback.confidence, 0.5),
+            reason="Unabhängige heuristische Ergänzung; LLM-Zuordnung fehlt oder wurde verworfen.",
+        ))
+        note("heuristic_supplement")
+    segments.sort(key=lambda segment: segment.start_index)
+    return segments, bool(issues)
 
 
 def _materialize_ordered_segments(
@@ -958,25 +1065,22 @@ def _segment_to_raw(
 
 
 def _coerce_int(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    # Never truncate fractions, parse strings, or treat booleans as indices.
+    return value if type(value) is int else None
 
 
 def _coerce_confidence(value: Any, *, default: float) -> float:
     if value is None or isinstance(value, bool):
         return default
     try:
-        return max(0.0, min(1.0, float(value)))
-    except (TypeError, ValueError):
+        number = float(value)
+        return max(0.0, min(1.0, number)) if math.isfinite(number) else default
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
 def _coerce_optional_text(value: Any) -> str | None:
-    if value is None:
+    if not isinstance(value, str):
         return None
-    text = str(value).strip()
+    text = value.strip()
     return text or None

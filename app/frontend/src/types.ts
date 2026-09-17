@@ -338,6 +338,7 @@ export interface AgendaLLMUsage {
   attempted_calls: number;
   failed_calls: number;
   failure_reasons: string[];
+  validation_reasons?: string[];
 }
 
 export interface AgendaDetectionResponse {

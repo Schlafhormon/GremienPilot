@@ -1278,6 +1278,7 @@ class AgendaLLMUsageResponse(BaseModel):
     attempted_calls: int
     failed_calls: int
     failure_reasons: List[str] = Field(default_factory=list)
+    validation_reasons: List[str] = Field(default_factory=list)
 
 
 class AgendaDetectionResponse(BaseModel):
