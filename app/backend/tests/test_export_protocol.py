@@ -60,8 +60,9 @@ def test_txt_export_contains_metadata_agenda_sections_and_appendix():
     content = response.text
     assert "Gremium: Hauptausschuss" in content
     assert "Teilnehmer: Alice Beispiel, Bob Beispiel" in content
-    assert "1. Begrüßung" in content
-    assert "TOP 2: Haushalt" in content
+    assert "Begrüßung" in content
+    assert "1. Begrüßung" not in content
+    assert "Haushalt" in content
     assert "Beschluss:" in content
     assert "- Der Haushalt wurde empfohlen." in content
     assert "Abstimmung:" in content
@@ -88,8 +89,8 @@ def test_txt_export_can_group_full_transcript_by_top():
     assert response.status_code == 200
     content = response.text
     assert "Transkript:" in content
-    assert "TOP 1: Begrüßung" in content
-    assert "TOP 2: Haushalt" in content
+    assert "Begrüßung" in content
+    assert "Haushalt" in content
     assert "TOP: TOP" not in content
     assert "[0:00] Alice: Ich eröffne die Sitzung." in content
     assert "[0:03] Bob: Der Haushalt wird beraten." in content
@@ -133,7 +134,7 @@ def test_docx_export_has_expected_document_structure():
     assert "Tagesordnung" in paragraphs
     assert "Begrüßung" in paragraphs
     assert "1. Begrüßung" not in paragraphs
-    assert "TOP 2: Haushalt" in paragraphs
+    assert "Haushalt" in paragraphs
     assert "Beschluss" in paragraphs
     assert "Der Haushalt wurde empfohlen." in paragraphs
     assert "Anhang" in paragraphs
@@ -165,3 +166,16 @@ def test_export_rejects_unknown_format():
         response = client.post("/api/export", json=payload)
 
     assert response.status_code == 400
+
+
+def test_export_preserves_original_numbers_sections_and_unnumbered_legacy_titles():
+    tops = ['[Öffentlich] 2.1 Schulbau', '[Nichtöffentlich] 2.1 Vergabe', '7 Anfragen', 'Alttitel']
+    payload = {**EXPORT_PAYLOAD, 'tops': tops, 'summaries': {str(i): 'Diskussion:\nBeraten.' for i in range(4)}}
+    client = TestClient(main.app)
+    text = client.post('/api/export', json=payload).text
+    assert all(top in text for top in tops)
+    assert 'TOP 1:' not in text
+    assert '1. [Öffentlich]' not in text
+    response = client.post('/api/export', json={**payload, 'format': 'docx'})
+    paragraphs = [paragraph.text for paragraph in Document(BytesIO(response.content)).paragraphs]
+    assert all(top in paragraphs for top in tops)

@@ -13,11 +13,11 @@ Configuration via environment variables:
 import logging
 import os
 import re
-import unicodedata
 import json
 from dataclasses import dataclass, field
 from typing import Optional
 
+from agenda_labels import label_from_json, parse_agenda_label, section_heading, with_section
 from summarize import get_llm_config
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,9 @@ Extrahiere aus der Einladung alle eigentlichen TOPs aus öffentlichem und nicht�
 Ignoriere Abschnittsüberschriften wie "TOP I. Öffentlicher Teil" und "TOP II. Nichtöffentlicher Teil" als eigene TOPs.
 Ignoriere Bullet-Unterpunkte wie "- Fäkalienentsorgungssatzung - FES".
 Entferne Zusatzinfos wie "BE:", "Beschlussvorlage:", "Antrag:" oder "Drucksache:".
-Jeder TOP kommt auf eine eigene Zeile im Format: 1. Titel"""
+Erhalte die Originalnummer inklusive Unterpunkten und Lücken; erfinde keine Nummern.
+Jeder TOP kommt auf eine eigene Zeile im Format: 2.1. Titel (ohne Nummer, falls unbekannt).
+Stelle bei bekanntem Abschnitt [Öffentlich] oder [Nichtöffentlich] voran."""
 
 DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT = """Du bist ein Extraktor. Antworte ohne Denken, ohne Erklärung, nur mit validem JSON.
 Extrahiere aus der Einladung:
@@ -49,11 +51,15 @@ Regeln:
 - Ignoriere Abschnittsüberschriften wie "TOP I. Öffentlicher Teil" und "TOP II. Nichtöffentlicher Teil" als eigene TOPs.
 - Ignoriere Bullet-Unterpunkte wie "- Fäkalienentsorgungssatzung - FES".
 - Entferne Zusatzinfos wie "BE:", "Beschlussvorlage:", "Antrag:" oder "Drucksache:".
+- Erhalte Originalnummern als Strings inklusive Unterpunkten, führenden Nullen und Lücken.
+- Nummern niemals aus Listenpositionen erzeugen. Unbekannte Nummer: null.
+- section ist public, nonpublic oder null. Wiederholte Nummern bleiben separate TOPs.
+- Nummerierte Unterpunkte sind eigene TOPs.
 - Lass unbekannte Metadatenfelder als leere Strings.
 
 JSON-Schema:
 {
-  "tops": ["Titel ohne Nummerierung"],
+  "tops": [{"number": "2.1", "title": "Titel", "section": "public"}],
   "metadata": {
     "committee": "Gremium",
     "date": "YYYY-MM-DD",
@@ -261,13 +267,13 @@ def extract_tops_heuristically_from_text(pdf_text: str) -> list[str]:
     except StopIteration:
         start_index = 0
 
-    item_pattern = re.compile(r"^(\d{1,3})\s+(.+)$")
     stop_pattern = re.compile(
         r"^(?:Seite\s+\d+\s+von\s+\d+|Uwe\s+Roland|Ausschussvorsitzender|"
         r"Beleg:|ressawbA|dnu|-knirT|rüf|sessuhcssuA|sed|gnuztiS|"
         r"\.\d+|nov|\d+)$",
         flags=re.IGNORECASE,
     )
+    section: str | None = None
     current: list[str] | None = None
     items: list[str] = []
 
@@ -277,12 +283,13 @@ def extract_tops_heuristically_from_text(pdf_text: str) -> list[str]:
             return
         title = re.sub(r"\s+", " ", " ".join(current)).strip()
         if title and not is_agenda_section_heading(title):
-            items.append(title)
+            items.append(with_section(title, section))
         current = None
 
     for line in lines[start_index:]:
         if is_agenda_section_heading(line):
             flush_current()
+            section = section_heading(line)
             continue
         if line.startswith(("-", "–", "•", "*")):
             continue
@@ -292,10 +299,10 @@ def extract_tops_heuristically_from_text(pdf_text: str) -> list[str]:
             flush_current()
             continue
 
-        item_match = item_pattern.match(line)
-        if item_match:
+        item = parse_agenda_label(line)
+        if item.original_number is not None:
             flush_current()
-            current = [item_match.group(2).strip()]
+            current = [line]
             continue
 
         if current is not None:
@@ -417,64 +424,27 @@ TOPs:"""
 
 
 def parse_tops_response(response_text: str) -> list[str]:
-    """
-    Parse the LLM response into a list of TOP titles.
-
-    Handles various numbering formats:
-    - "1. Title"
-    - "1.1. Title"
-    - "I. Title"
-    - "II. Title"
-
-    Args:
-        response_text: Raw LLM response text
-
-    Returns:
-        List of TOP titles (with numbering stripped)
-    """
+    """Parse standard lists without discarding original numbering or scope."""
     tops = []
-    lines = response_text.strip().split("\n")
-
-    # Regex patterns for different numbering styles
-    # Matches: "1.", "1.1.", "1.2.3.", "I.", "II.", etc.
-    numbering_pattern = re.compile(
-        r"^\s*(?:"
-        r"(\d+\.)+|"  # Arabic numerals: 1., 1.1., 1.2.3.
-        r"(\d{1,3})\s+|"  # Arabic numerals without punctuation: 01 Title
-        r"([IVX]+\.)|"  # Roman numerals: I., II., III., IV.
-        r"(\d+\))|"  # Parenthetical: 1), 2)
-        r"([a-z]\))"  # Letter: a), b)
-        r")\s*"
-    )
-
-    for line in lines:
+    section = None
+    for line in response_text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
-        if is_agenda_section_heading(line):
+        heading = section_heading(line)
+        if heading:
+            section = heading
             continue
-
-        # Check if line starts with numbering
-        match = numbering_pattern.match(line)
-        if match:
-            # Extract the title after the numbering
-            title = line[match.end():].strip()
-            if title and not is_agenda_section_heading(title):
-                tops.append(title)
-        elif line and not line.startswith(("●", "•", "-", "*", "–")):
-            # Include non-numbered lines that aren't bullet points
-            # (in case LLM returns titles without numbers)
-            # But only if they look like titles (not too short, not metadata)
-            if (
-                len(line) > 5
-                and not is_agenda_section_heading(line)
-                and not any(
-                    skip in line.lower()
-                    for skip in ["beschlussvorlage", "antrag:", "drucksache", "seite"]
-                )
-            ):
-                tops.append(line)
-
+        if line.startswith(("●", "•", "-", "*", "–")):
+            continue
+        label = parse_agenda_label(line)
+        if label.original_number is not None:
+            if label.title:
+                tops.append(with_section(line, section))
+        elif len(line) > 5 and not any(
+            skip in line.lower() for skip in ["beschlussvorlage", "antrag:", "drucksache", "seite"]
+        ):
+            tops.append(with_section(line, section))
     return tops
 
 
@@ -514,25 +484,34 @@ def parse_agenda_data_response(
         if fallback_text
         else PdfSessionMetadata()
     )
-    if not payload:
-        return PdfAgendaExtractionResult(
-            tops=parse_tops_response(response_text) or fallback_tops,
-            metadata=fallback_metadata,
-        )
-
-    raw_tops = payload.get("tops") or payload.get("agenda") or []
+    raw_tops = (payload.get("tops") or payload.get("agenda") or []) if payload else response_text
     if isinstance(raw_tops, list):
-        numbered_response = "\n".join(
-            f"{index + 1}. {str(item).strip()}"
-            for index, item in enumerate(raw_tops)
-            if str(item).strip()
-        )
-        tops = parse_tops_response(numbered_response)
+        # Structured arrays are already item boundaries; never enumerate them
+        # into invented agenda numbers or discard short unnumbered titles.
+        tops = []
+        section = None
+        for item in raw_tops:
+            label = label_from_json(item)
+            if not label:
+                continue
+            heading = section_heading(label)
+            if heading:
+                section = heading
+            else:
+                tops.append(with_section(label, section))
     else:
         tops = parse_tops_response(str(raw_tops))
 
+    by_title: dict[str, list[str]] = {}
+    for fallback in fallback_tops:
+        by_title.setdefault(parse_agenda_label(fallback).title.casefold(), []).append(fallback)
+    tops = [
+        matches[0] if len(matches := by_title.get(parse_agenda_label(top).title.casefold(), [])) == 1
+        else top for top in tops
+    ]
+
     metadata = merge_metadata(
-        normalize_metadata(payload.get("metadata") or payload),
+        normalize_metadata((payload.get("metadata") or payload) if payload else None),
         fallback_metadata,
     )
     if len(fallback_tops) > len(tops):
@@ -542,20 +521,7 @@ def parse_agenda_data_response(
 
 def is_agenda_section_heading(value: str) -> bool:
     """Return true for agenda section labels, not actual agenda items."""
-    normalized = unicodedata.normalize("NFKD", value.lower().replace("ß", "ss"))
-    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
-    text = re.sub(r"[^a-z0-9]+", " ", ascii_text).strip()
-    text = re.sub(r"^(?:top\s*)?(?:[ivx]+|\d+)\s+", "", text).strip()
-    return text in {
-        "offentlicher teil",
-        "offentliche teil",
-        "oeffentlicher teil",
-        "oeffentliche teil",
-        "nichtoffentlicher teil",
-        "nichtoffentliche teil",
-        "nichtoeffentlicher teil",
-        "nichtoeffentliche teil",
-    }
+    return section_heading(value) is not None
 
 
 def extract_tops_from_pdf(

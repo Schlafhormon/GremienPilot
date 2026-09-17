@@ -652,6 +652,11 @@ export default function UploadStep({
           </div>
         </div>
 
+        <p className="text-sm text-gray-600 mb-3">
+          Originalnummer mit eingeben, z. B. 2.1 Schulbau. Bei wiederholten Nummern
+          den Abschnitt voranstellen: [Öffentlich] oder [Nichtöffentlich]. Ohne
+          Nummer erfolgt die Zuordnung anhand des Inhalts.
+        </p>
         {/* TOPs List */}
         {!shouldShowManualTops ? (
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
@@ -665,12 +670,13 @@ export default function UploadStep({
             </div>
           ) : tops.map((top, index) => (
             <div key={index} className="flex items-center gap-3">
-              <span className="text-gray-500 font-medium w-8 text-right">{index + 1}.</span>
+              <span className="text-gray-500 text-sm">TOP</span>
               <input
                 type="text"
                 value={top}
                 onChange={(e) => updateTop(index, e.target.value)}
-                placeholder={`TOP ${index + 1} eingeben...`}
+                aria-label={`Tagesordnungseintrag ${index + 1}`}
+                placeholder="Nummer und Titel, z. B. 2.1 Schulbau"
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
               <button

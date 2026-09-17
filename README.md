@@ -593,6 +593,11 @@ installiert:
 docker build -f app/backend/Dockerfile.gpu-blackwell --build-arg PRECACHE_MODELS=0 -t ki-protokollierung-backend:gpu-blackwell-local ./app/backend
 ```
 
+## TOP-Nummern und Unterpunkte
+
+TOPs behalten Originalnummern, Unterpunkte und Sitzungsabschnitte. Details zu
+Kompatibilität und unterstützten Verweisen: [TOP-Nummerierung](docs/top-nummerierung.md).
+
 ## API-Auszug
 
 | Endpoint | Methode | Zweck |

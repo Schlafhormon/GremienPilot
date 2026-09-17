@@ -21,15 +21,15 @@ from extract_tops import (
     [
         (
             "1. Begruessung\n2. Haushalt 2026\n2.1. Investitionen",
-            ["Begruessung", "Haushalt 2026", "Investitionen"],
+            ["1. Begruessung", "2. Haushalt 2026", "2.1. Investitionen"],
         ),
         (
             "I. Oeffentlicher Teil\nII. Nichtoeffentlicher Teil\n1) Verschiedenes",
-            ["Verschiedenes"],
+            ["[Nichtöffentlich] 1) Verschiedenes"],
         ),
         (
             "TOP I. Öffentlicher Teil\n01 Eröffnung\nTOP II. Nichtöffentlicher Teil\n02 Bestätigung",
-            ["Eröffnung", "Bestätigung"],
+            ["[Öffentlich] 01 Eröffnung", "[Nichtöffentlich] 02 Bestätigung"],
         ),
         (
             "Beschlussvorlage: 123/2026\nUnnummerierter TOP\n- nur ein Unterpunkt",
@@ -50,7 +50,7 @@ def test_extract_tops_from_text_uses_openai_client_and_parses_response(fake_open
         system_prompt="Nur TOPs extrahieren",
     )
 
-    assert tops == ["Genehmigung der Niederschrift", "Haushalt"]
+    assert tops == ["1. Genehmigung der Niederschrift", "2. Haushalt"]
 
     client = fake_openai_module.instances[0]
     assert client.kwargs["base_url"]
@@ -154,9 +154,9 @@ def test_parse_agenda_data_response_falls_back_to_pdf_tops_when_json_tops_are_em
     )
 
     assert result.tops == [
-        "Eröffnung der Sitzung",
-        "Einwohnerfragestunde",
-        "Bestätigung der Tagesordnung",
+        "[Öffentlich] 01 Eröffnung der Sitzung",
+        "[Öffentlich] 02 Einwohnerfragestunde",
+        "[Nichtöffentlich] 01 Bestätigung der Tagesordnung",
     ]
 
 
@@ -191,6 +191,8 @@ def test_extract_agenda_data_from_text_uses_structured_prompt(fake_openai_module
 
 def test_extract_session_metadata_from_test_pdf():
     pdf_path = Path(__file__).resolve().parents[3] / "Testsdata" / "6.ATA TOPS.pdf"
+    if not pdf_path.exists():
+        pytest.skip("Optionale lokale PDF-Testdatei nicht vorhanden")
     pdf_text = extract_text_from_pdf(str(pdf_path))
 
     metadata = extract_session_metadata_from_text(pdf_text)
@@ -203,11 +205,14 @@ def test_extract_session_metadata_from_test_pdf():
 
 def test_extract_tops_heuristically_from_test_pdf():
     pdf_path = Path(__file__).resolve().parents[3] / "Testsdata" / "6.ATA TOPS.pdf"
+    if not pdf_path.exists():
+        pytest.skip("Optionale lokale PDF-Testdatei nicht vorhanden")
     pdf_text = extract_text_from_pdf(str(pdf_path))
 
     tops = extract_tops_heuristically_from_text(pdf_text)
 
-    assert tops == [
+    from agenda_labels import parse_agenda_label
+    assert [parse_agenda_label(top).title for top in tops] == [
         "Eröffnung der Sitzung, Feststellung der ordnungsgemäßen Ladung und Bestätigung der Tagesordnung",
         "Entscheidung über eventuelle Einwendungen gegen die Niederschrift der öffentlichen Ausschusssitzung am 19.01.2026",
         "Verpflichtung Herr Krull",

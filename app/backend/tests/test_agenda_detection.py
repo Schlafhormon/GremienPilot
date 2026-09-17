@@ -18,7 +18,7 @@ def test_segment_known_agenda_detects_clear_top_announcements():
         TranscriptUtterance("MOD", "Als nächstes rufe ich TOP 3 Schulbau auf."),
         TranscriptUtterance("C", "Beim Schulbau geht es um die Grundschule."),
     ]
-    tops = ["Begrüßung", "Haushalt 2026", "Schulbau"]
+    tops = ["1. Begrüßung", "2. Haushalt 2026", "3. Schulbau"]
 
     result = segment_known_agenda(transcript, tops)
 
@@ -42,11 +42,11 @@ def test_detect_agenda_from_transcript_without_known_tops():
 
     result = detect_agenda_from_transcript(transcript)
 
-    assert result.tops == ["Haushalt 2026", "Schulbau"]
+    assert result.tops == ["TOP 1 Haushalt 2026", "TOP 2 Schulbau"]
     assert result.assignments == [0, 0, 1, 1]
     assert [(segment.top_title, segment.start_index, segment.end_index) for segment in result.segments] == [
-        ("Haushalt 2026", 0, 1),
-        ("Schulbau", 2, 3),
+        ("TOP 1 Haushalt 2026", 0, 1),
+        ("TOP 2 Schulbau", 2, 3),
     ]
     assert result.strategy == "heuristic_transcript_fallback"
 
@@ -132,7 +132,7 @@ def test_llm_reasoning_field_is_used_when_content_is_empty(fake_openai_module):
     result = detect_agenda_from_transcript(transcript, model="test-model", use_llm=True)
 
     assert result.strategy == "heuristic_transcript_llm"
-    assert result.tops == ["Haushalt"]
+    assert result.tops == ["TOP 1 Haushalt"]
     assert result.assignments == [0, 0]
 
 
@@ -145,7 +145,7 @@ def test_fallback_without_llm_returns_reviewable_assignments():
 
     result = detect_agenda_from_transcript(transcript)
 
-    assert result.tops == ["Genehmigung der Niederschrift", "Verschiedenes"]
+    assert result.tops == ["TOP 1 Genehmigung der Niederschrift", "TOP 2 Verschiedenes"]
     assert result.assignments == [0, 0, 1]
     assert result.strategy == "heuristic_transcript_fallback"
 
@@ -180,7 +180,7 @@ def test_unknown_agenda_llm_detection_chunks_long_transcripts(
         transcript, model="test-model", use_llm=True, system_prompt=frontend_summary_prompt,
     )
 
-    assert result.tops == ["Haushalt", "Schulbau"]
+    assert result.tops == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
     assert result.assignments == [0, 0, 1, 1]
     assert [(segment.start_index, segment.end_index) for segment in result.segments] == [
         (0, 1),
@@ -289,7 +289,7 @@ def test_chunk_failures_remain_visible_and_reviewable(monkeypatch, fake_openai_m
         TranscriptUtterance("MOD", "TOP 1 Haushalt."),
         TranscriptUtterance("MOD", "TOP 2 Schulbau."),
     ], use_llm=True)
-    assert result.tops == ["Haushalt", "Schulbau"]
+    assert result.tops == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
     assert result.assignments == [0, 1]
     assert result.llm.status == ("fallback" if all_fail else "partial_fallback")
     assert result.llm.attempted_calls == 2
@@ -304,3 +304,33 @@ def test_empty_transcript_does_not_attempt_llm(fake_openai_module):
     assert result.llm.status == "skipped"
     assert result.llm.attempted_calls == 0
     assert not fake_openai_module.instances
+
+
+@pytest.mark.parametrize('use_llm', [False, True])
+def test_repeated_numbers_cannot_become_certain_via_llm(fake_openai_module, use_llm):
+    tops = ['[Öffentlich] 2.1 Schulbau', '[Nichtöffentlich] 2.1 Vergabe']
+    transcript = [TranscriptUtterance('MOD', text) for text in [
+        'TOP 2.1 Schulbau', 'Beratung', 'TOP 2.1 Vergabe', 'Beratung',
+    ]]
+    fake_openai_module.content = '''{"tops":[
+        {"top_title":"Schulbau","start_index":0,"end_index":1,"confidence":0.99},
+        {"top_title":"Vergabe","start_index":2,"end_index":3,"confidence":0.99}
+    ]}'''
+    result = segment_known_agenda(transcript, tops, use_llm=use_llm)
+    assert result.tops == tops
+    assert all(segment.uncertain for segment in result.segments)
+    assert all(segment.confidence <= 0.5 for segment in result.segments)
+
+
+@pytest.mark.parametrize('announcement,label', [
+    ('TOP 3.1 Schulbau', 'TOP 3.1 Schulbau'),
+    ('Tagesordnungspunkt zwei Schulbau', 'TOP 2 Schulbau'),
+    ('TOP 02.10 Schulbau', 'TOP 02.10 Schulbau'),
+])
+def test_transcript_detection_keeps_number_with_or_without_llm(fake_openai_module, announcement, label):
+    transcript = [TranscriptUtterance('MOD', announcement)]
+    fake_openai_module.content = '{"tops":[{"top_title":"Schulbau","start_index":0,"end_index":0,"confidence":0.9}]}'
+    for use_llm in (False, True):
+        result = detect_agenda_from_transcript(transcript, use_llm=use_llm)
+        assert result.tops == [label]
+        assert not result.segments[0].uncertain

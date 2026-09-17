@@ -14,6 +14,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Iterable
 
+from agenda_labels import parse_agenda_label, reference_targets
+
 
 TRANSITION_PATTERNS = [
     r"\btagesordnungspunkt\b",
@@ -148,12 +150,9 @@ def token_set(value: str) -> set[str]:
     return {compact_token(token) for token in tokenize(value)}
 
 
-def extract_agenda_number(top: str, fallback: int) -> int:
-    normalized = normalize_text(top)
-    match = re.match(r"^(?:top\s*)?(\d+)(?:[\).\s:-]|$)", normalized)
-    if match:
-        return int(match.group(1))
-    return fallback
+def extract_agenda_number(top: str, fallback: int | None = None) -> str | None:
+    """Original number key; the legacy fallback argument is intentionally ignored."""
+    return parse_agenda_label(top).number_key
 
 
 def has_transition_phrase(text: str) -> bool:
@@ -161,13 +160,11 @@ def has_transition_phrase(text: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in TRANSITION_PATTERNS)
 
 
-def references_top_number(text: str, number: int) -> bool:
-    normalized = normalize_text(text)
-    return bool(
-        re.search(rf"\btop\s*{number}\b", normalized)
-        or re.search(rf"\btagesordnungspunkt\s*{number}\b", normalized)
-        or re.search(rf"\bpunkt\s*{number}\b", normalized)
-    )
+def references_top_number(text: str, number: str | int | None) -> bool:
+    if number is None:
+        return False
+    has_reference, targets = reference_targets(text, [f"TOP {number}"])
+    return has_reference and targets == {0}
 
 
 def speaker_transition_counts(transcript: list[TranscriptUtterance]) -> dict[str, int]:
@@ -200,15 +197,22 @@ def score_line_for_top(
     top: str,
     top_index: int,
     moderator_speakers: set[str],
+    tops: list[str] | None = None,
 ) -> tuple[float, str, str]:
-    top_number = extract_agenda_number(top, top_index + 1)
+    top_number = extract_agenda_number(top)
     line_tokens = token_set(line.text)
-    top_tokens = token_set(top)
+    top_tokens = token_set(parse_agenda_label(top).title)
     overlap = keyword_overlap_score(line_tokens, top_tokens)
     transition = has_transition_phrase(line.text)
     moderator_bonus = 0.08 if line.speaker in moderator_speakers else 0.0
 
-    if references_top_number(line.text, top_number):
+    has_reference, targets = reference_targets(line.text, tops if tops is not None else [top])
+    target_index = top_index if tops is not None else 0
+    if has_reference and targets != {target_index}:
+        # An ambiguous or contradictory number must not become a strong keyword hit.
+        return 0.0, "none", "TOP-Verweis ist mehrdeutig oder passt nicht zum TOP."
+
+    if has_reference:
         confidence = min(0.98, 0.82 + moderator_bonus + (0.08 if transition else 0.0))
         return (
             confidence,
@@ -252,6 +256,7 @@ def find_boundary_for_top(
             tops[top_index],
             top_index,
             moderator_speakers,
+            tops,
         )
         if confidence <= 0:
             continue
@@ -347,14 +352,17 @@ def suggest_assignments(
         )
 
     moderator_speakers = likely_moderator_speakers(transcript)
+    first_has_reference, first_targets = reference_targets(transcript[0].text, valid_tops)
+    first_ambiguous = first_has_reference and first_targets != {0}
     boundaries: list[BoundaryCandidate] = [
         BoundaryCandidate(
             top_index=0,
             start_index=0,
-            confidence=0.6,
-            uncertain=False,
+            confidence=0.35 if first_ambiguous else 0.6,
+            uncertain=first_ambiguous,
             transition_type="inferred",
-            reason="Erster TOP beginnt am Anfang des Transkripts.",
+            reason=("Mehrdeutiger oder unbekannter TOP-Verweis am Transkriptanfang; Zuordnung prüfen."
+                    if first_ambiguous else "Erster TOP beginnt am Anfang des Transkripts."),
             evidence_index=0,
             evidence_text=transcript[0].text,
         )

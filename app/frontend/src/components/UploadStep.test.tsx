@@ -186,3 +186,14 @@ describe('UploadStep', () => {
     expect(setRememberSpeakers).toHaveBeenCalledWith(true);
   });
 });
+
+it('keeps original numbers and sections in manual input without positional numbering', () => {
+  const setTops = vi.fn();
+  const tops = ['2 Haushalt', '[Öffentlich] 2.1 Schulbau', '[Nichtöffentlich] 2.1 Vergabe', '7 Anfragen'];
+  renderUploadStep({ tops, setTops });
+  tops.forEach((top) => expect(screen.getByDisplayValue(top)).toBeInTheDocument());
+  fireEvent.change(screen.getByLabelText('Tagesordnungseintrag 2'), {
+    target: { value: '[Öffentlich] 2.2 Schulbau' },
+  });
+  expect(setTops).toHaveBeenCalledWith(['2 Haushalt', '[Öffentlich] 2.2 Schulbau', '[Nichtöffentlich] 2.1 Vergabe', '7 Anfragen']);
+});

@@ -196,7 +196,7 @@ export default function AssignmentStep({
   const addTop = () => {
     const insertionIndex = Math.min(selectedTop + 1, tops.length);
     const newTops = [...tops];
-    newTops.splice(insertionIndex, 0, `TOP ${insertionIndex + 1}`);
+    newTops.splice(insertionIndex, 0, 'Neuer Tagesordnungspunkt');
     const newTopIds = [...stableTopIds];
     newTopIds.splice(insertionIndex, 0, createStableId());
     const newAssignments = assignments.map((assignment) => {
@@ -633,7 +633,7 @@ export default function AssignmentStep({
                         <div className="flex items-center gap-2">
                           <span className={`w-2.5 h-2.5 rounded-full ${color.dot}`} />
                           <span className="font-medium text-sm text-gray-900 truncate">
-                            TOP {segment.top_index + 1}: {segment.top_title}
+                            {segment.top_title}
                           </span>
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
@@ -839,9 +839,9 @@ export default function AssignmentStep({
                     <div className="flex-1 min-w-0">
                       <div
                         className="font-medium text-sm truncate"
-                        title={top || `TOP ${index + 1}`}
+                        title={top || 'Unbenannter Tagesordnungspunkt'}
                       >
-                        {index + 1}. {top || `TOP ${index + 1}`}
+                        {top || 'Unbenannter Tagesordnungspunkt'}
                       </div>
                       <div className="text-xs text-gray-500 mt-1">
                         {counts[index]} Zeilen

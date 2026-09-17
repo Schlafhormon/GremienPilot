@@ -112,8 +112,9 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         for scoped_key, custom_prompt in scoped.items():
             assert (custom_prompt in prompt) == (prompt_mode.startswith("scoped_") and key == scoped_key)
     assert "0: MOD" in calls[-2]["messages"][1]["content"]
-    assert "TOP: Haushalt" in calls[-1]["messages"][1]["content"]
-    assert result["session"]["tops"] == ["Haushalt"]
+    expected_top = "TOP 1 Haushalt" if agenda_source == "transcript" else "Haushalt"
+    assert f"TOP: {expected_top}" in calls[-1]["messages"][1]["content"]
+    assert result["session"]["tops"] == [expected_top]
     assert result["session"]["assignments"] == [0]
     assert result["agenda_detection"]["strategy"] == (
         "heuristic_transcript_llm" if agenda_source == "transcript" else "known_agenda_heuristic_llm"
@@ -615,7 +616,7 @@ def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["tops"] == ["Haushalt", "Schulbau"]
+    assert data["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
     assert data["assignments"] == [0, 0, 1]
     assert data["segments"][0]["evidence_text"] == "Kommen wir zu TOP 1 Haushalt."
     assert data["strategy"] == "heuristic_transcript_fallback"
@@ -658,9 +659,9 @@ def test_agenda_detection_endpoint_splits_mid_utterance_top_transition():
             "/api/agenda-detection",
             json={
                     "tops": [
-                        "Eröffnung",
-                        "Protokoll der letzten Sitzung",
-                        "Verpflichtung Herr Krull",
+                        "1. Eröffnung",
+                        "2. Protokoll der letzten Sitzung",
+                        "3. Verpflichtung Herr Krull",
                     ],
                 "transcript": [
                     {
@@ -1747,3 +1748,39 @@ def test_pipeline_llm_policy_and_persisted_fallback(
         assert result["agenda_detection"]["warnings"]
         assert any("timeout" in warning for warning in result["warnings"])
     assert "SECRET" not in str(result)
+
+
+def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path, monkeypatch, fake_openai_module):
+    from io import BytesIO
+    from reportlab.pdfgen.canvas import Canvas
+
+    configure_test_app(tmp_path, monkeypatch)
+    pdf = BytesIO()
+    canvas = Canvas(pdf)
+    for i, line in enumerate(['Tagesordnung', 'Öffentlicher Teil', '2 Haushalt', '2.1 Schulbau', '7 Anfragen', 'Nichtöffentlicher Teil', '2 Vergabe']):
+        canvas.drawString(50, 750 - i * 25, line)
+    canvas.save()
+    fake_openai_module.content = '''{"tops":[
+        {"number":"2","title":"Haushalt","section":"public"},
+        {"number":"2.1","title":"Schulbau","section":"public"},
+        {"number":"7","title":"Anfragen","section":"public"},
+        {"number":"2","title":"Vergabe","section":"nonpublic"}
+    ]}'''
+    client = TestClient(main.app)
+    response = client.post('/api/extract-tops', files={'pdf': ('agenda.pdf', pdf.getvalue(), 'application/pdf')})
+    assert response.status_code == 200
+    tops = response.json()['tops']
+    assert tops == ['[Öffentlich] 2 Haushalt', '[Öffentlich] 2.1 Schulbau', '[Öffentlich] 7 Anfragen', '[Nichtöffentlich] 2 Vergabe']
+    response = client.post('/api/agenda-detection', json={
+        'tops': tops, 'use_llm': False,
+        'transcript': [{'speaker': 'MOD', 'text': text, 'start': i, 'end': i+1} for i, text in enumerate([
+            'TOP 2 öffentlich Haushalt', 'Beratung', 'TOP 2.1 Schulbau', 'Beratung',
+            'TOP sieben Anfragen', 'Beratung', 'TOP 2 Vergabe', 'Beratung',
+        ])],
+    })
+    assert response.status_code == 200
+    result = response.json()
+    assert result['tops'] == tops
+    assert not result['segments'][1]['uncertain']
+    assert not result['segments'][2]['uncertain']
+    assert result['segments'][3]['uncertain']

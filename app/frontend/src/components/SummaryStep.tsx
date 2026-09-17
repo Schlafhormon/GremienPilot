@@ -405,9 +405,9 @@ export default function SummaryStep({
                     <div className="flex-1 min-w-0">
                       <div
                         className="font-medium text-sm truncate"
-                        title={top || `TOP ${index + 1}`}
+                        title={top || 'Unbenannter Tagesordnungspunkt'}
                       >
-                        {index + 1}. {top || `TOP ${index + 1}`}
+                        {top || 'Unbenannter Tagesordnungspunkt'}
                       </div>
                     </div>
                   </div>
@@ -423,7 +423,7 @@ export default function SummaryStep({
           <div className="flex-1 bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
             <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
               <h3 className="font-medium text-gray-900">
-                {hasTops ? `TOP ${selectedTop + 1}: ${tops[selectedTop]}` : 'Gesamtes Gespräch'}
+                {hasTops ? tops[selectedTop] : 'Gesamtes Gespräch'}
               </h3>
               <div className="flex gap-2">
                 {editingTop === selectedSummaryIndex ? (
@@ -675,7 +675,7 @@ export default function SummaryStep({
               TOP-Zusammenfassung wirklich neu generieren?
             </h3>
             <p className="mt-3 text-sm text-gray-700">
-              Es wird ausschließlich {hasTops ? `TOP ${regenerationCandidate + 1}` : 'das Gesamtgespräch'} verarbeitet.
+              Es wird ausschließlich {hasTops ? tops[regenerationCandidate] : 'das Gesamtgespräch'} verarbeitet.
               Im CPU-Modus kann dies mehrere Stunden dauern und erhebliche Serverleistung beanspruchen.
               Prüfen Sie vorher, ob die vorhandene Zusammenfassung nicht bereits ausreicht.
             </p>

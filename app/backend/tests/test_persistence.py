@@ -632,3 +632,35 @@ def test_interrupted_summary_job_restores_previous_top_status(tmp_path, monkeypa
     job = persistence.load_summary_job("summary-job")
     assert restored["summary_states"][0]["status"] == "review_required"
     assert job["status"] == "failed"
+
+
+def test_agenda_labels_and_stable_ids_survive_api_edit_reorder_and_reload(tmp_path, monkeypatch):
+    monkeypatch.setenv('PERSISTENCE_DB_PATH', str(tmp_path / 'agenda.sqlite3'))
+    persistence.init_db()
+    tops = ['Alte Sitzung ohne Nummer', '[Öffentlich] 02.1 Schulbau', '[Nichtöffentlich] 02.1 Vergabe', '7 Anfragen']
+    ids = ['legacy-id', 'public-id', 'private-id', 'questions-id']
+    persistence.save_session('agenda-roundtrip', {
+        'tops': tops, 'top_ids': ids, 'assignments': [1, 2],
+        'transcript': [
+            {'speaker': 'MOD', 'text': 'Schulbau', 'start': 0, 'end': 1},
+            {'speaker': 'MOD', 'text': 'Vergabe', 'start': 1, 'end': 2},
+        ],
+    })
+    client = TestClient(main.app)
+    loaded = client.get('/api/sessions/agenda-roundtrip').json()
+    assert loaded['tops'] == tops
+    assert loaded['top_ids'] == ids
+    order = [3, 2, 1, 0]
+    updated_tops = [tops[i] for i in order]
+    updated_tops[2] = '[Öffentlich] 02.1 Schulbau geändert'
+    response = client.put('/api/sessions/agenda-roundtrip', json={
+        'revision': loaded['revision'], 'tops': updated_tops,
+        'top_ids': [ids[i] for i in order], 'transcript': loaded['transcript'],
+        'assignments': [2, 1],
+    })
+    assert response.status_code == 200
+    persistence.init_db()
+    stored = persistence.load_session('agenda-roundtrip')
+    assert stored['tops'] == updated_tops
+    assert stored['top_ids'] == [ids[i] for i in order]
+    assert stored['assignments'] == [2, 1]

@@ -171,7 +171,7 @@ def build_protocol_document(
     speaker_names = speaker_names or {}
     appendix = appendix or ProtocolAppendix()
 
-    agenda = [top.strip() or f"TOP {index + 1}" for index, top in enumerate(tops)]
+    agenda = [top.strip() or "Unbenannter Tagesordnungspunkt" for top in tops]
     protocol_tops: list[ProtocolTop] = []
 
     for index, title in enumerate(agenda):
@@ -232,12 +232,12 @@ def render_txt(document: ProtocolDocument) -> str:
     lines.append("")
     lines.append("Tagesordnung")
     lines.append("-" * 60)
-    for index, top in enumerate(document.agenda, start=1):
-        lines.append(f"{index}. {top}")
+    for top in document.agenda:
+        lines.append(top)
     lines.append("")
 
     for top in document.tops:
-        lines.append(f"TOP {top.index}: {top.title}")
+        lines.append(top.title)
         lines.append("-" * 60)
         _append_text_section(lines, "Diskussion", top.discussion)
         _append_text_section(lines, "Beschluss", top.decisions)
@@ -279,10 +279,10 @@ def render_docx(document: ProtocolDocument) -> bytes:
 
     doc.add_heading("Tagesordnung", level=1)
     for agenda_item in document.agenda:
-        doc.add_paragraph(agenda_item, style="List Number")
+        doc.add_paragraph(agenda_item, style="List Bullet")
 
     for top in document.tops:
-        doc.add_heading(f"TOP {top.index}: {top.title}", level=1)
+        doc.add_heading(top.title, level=1)
         _add_docx_section(doc, "Diskussion", top.discussion)
         _add_docx_section(doc, "Beschluss", top.decisions)
         _add_docx_section(doc, "Abstimmung", top.votes)
@@ -336,10 +336,10 @@ def render_pdf(document: ProtocolDocument) -> bytes:
         )
     )
     story.extend([table, Spacer(1, 10), Paragraph("Tagesordnung", styles["SectionTitle"])])
-    story.append(_pdf_list([f"{index}. {top}" for index, top in enumerate(document.agenda, start=1)], styles["BodyText"]))
+    story.append(_pdf_list(document.agenda, styles["BodyText"]))
 
     for top in document.tops:
-        story.append(Paragraph(_pdf_text(f"TOP {top.index}: {top.title}"), styles["TopTitle"]))
+        story.append(Paragraph(_pdf_text(top.title), styles["TopTitle"]))
         _append_pdf_section(story, styles, "Diskussion", top.discussion)
         _append_pdf_section(story, styles, "Beschluss", top.decisions)
         _append_pdf_section(story, styles, "Abstimmung", top.votes)
@@ -453,7 +453,7 @@ def _transcript_groups(document: ProtocolDocument) -> list[tuple[str, list[Trans
     def group_title(top_index: int | None) -> str:
         if top_index is None or top_index < 0 or top_index >= len(document.agenda):
             return "Ohne TOP-Zuordnung"
-        return f"TOP {top_index + 1}: {document.agenda[top_index]}"
+        return document.agenda[top_index]
 
     for line_index, line in enumerate(document.transcript):
         top_index = (

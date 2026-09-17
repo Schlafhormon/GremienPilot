@@ -259,7 +259,7 @@ describe('AssignmentStep', () => {
     const setAssignments = vi.fn();
     renderAssignmentStep({ assignments: [0, 0], setAssignments });
 
-    await user.click(screen.getByRole('button', { name: /2\. Haushalt/i }));
+    await user.click(screen.getByRole('button', { name: /Haushalt/i }));
     await user.click(screen.getByText('Wir beraten den Haushalt'));
     await user.click(screen.getByRole('button', { name: /grenze ab hier setzen/i }));
 
@@ -283,15 +283,15 @@ describe('AssignmentStep', () => {
     expect(setTops).toHaveBeenCalledWith(['Eroeffnung', 'Haushalt', 'Schulbau']);
 
     await user.click(screen.getByRole('button', { name: /top hinzufügen/i }));
-    expect(setTops).toHaveBeenLastCalledWith(['Begruessung', 'TOP 2', 'Haushalt', 'Schulbau']);
+    expect(setTops).toHaveBeenLastCalledWith(['Begruessung', 'Neuer Tagesordnungspunkt', 'Haushalt', 'Schulbau']);
     expect(setAssignments).toHaveBeenLastCalledWith([0, 2]);
 
-    await user.click(screen.getByRole('button', { name: /2\. Haushalt/i }));
+    await user.click(screen.getByRole('button', { name: /Haushalt/i }));
     await user.click(screen.getByRole('button', { name: /top löschen/i }));
     expect(setTops).toHaveBeenLastCalledWith(['Begruessung', 'Schulbau']);
     expect(setAssignments).toHaveBeenLastCalledWith([0, null]);
 
-    await user.click(screen.getByRole('button', { name: /2\. Haushalt/i }));
+    await user.click(screen.getByRole('button', { name: /Haushalt/i }));
     await user.click(screen.getByRole('button', { name: /top zusammenlegen/i }));
     expect(setTops).toHaveBeenLastCalledWith(['Begruessung / Haushalt', 'Schulbau']);
     expect(setAssignments).toHaveBeenLastCalledWith([0, 0]);

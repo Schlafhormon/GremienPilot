@@ -25,6 +25,7 @@ from assignment_suggestions import (
     normalize_text,
     suggest_assignments,
 )
+from agenda_labels import agenda_references, reference_sections, reference_targets, with_section
 from summarize import get_llm_config
 
 
@@ -61,7 +62,7 @@ Gib ausschliesslich valides JSON im folgenden Format zurueck:
 {
   "tops": [
     {
-      "top_title": "Titel ohne TOP-Nummer",
+      "top_title": "Originalnummer und Titel, z.B. 2.1. Schulbau",
       "start_index": 0,
       "end_index": 4,
       "confidence": 0.0,
@@ -74,6 +75,10 @@ Gib ausschliesslich valides JSON im folgenden Format zurueck:
 Regeln:
 - Indizes sind 0-basiert und beziehen sich auf die Transkriptzeilen.
 - TOPs muessen in Transkriptreihenfolge stehen.
+- Erhalte explizite Originalnummern einschließlich Unterpunkten. Erfinde keine Nummern.
+- Bei bekanntem Abschnitt Titel mit [Öffentlich] oder [Nichtöffentlich] beginnen.
+- Listenindizes sind keine TOP-Nummern. Wiederholte Nummern sind ohne eindeutigen Abschnitt mehrdeutig.
+- Mehrdeutige Nummernverweise und mehrere TOP-Verweise in einer Zeile sind uncertain=true.
 - Segmente duerfen sich nicht ueberlappen.
 - Markiere geschaetzte oder schwache Grenzen mit uncertain=true.
 - Nutze Moderationssignale wie "kommen wir zu", "rufe ich auf", "naechster Punkt" und explizite TOP-Zahlen."""
@@ -193,6 +198,13 @@ def detect_agenda_from_transcript(
         if repaired:
             strategy += "_repaired"
 
+    segments = [
+        replace(segment, top_title=announcement[0])
+        if (announcement := _parse_heuristic_top_announcement(transcript[segment.start_index].text))
+        and announcement[1] else segment
+        for segment in segments
+    ]
+    segments = _guard_number_evidence(transcript, [segment.top_title for segment in segments], segments)
     return _result_from_segments(len(transcript), segments, strategy, usage=usage)
 
 
@@ -242,7 +254,26 @@ def segment_known_agenda(
         if repaired:
             strategy += "_repaired"
 
+    segments = _guard_number_evidence(transcript, valid_tops, segments)
     return _result_from_segments(len(transcript), segments, strategy, tops=valid_tops, usage=usage)
+
+
+def _guard_number_evidence(
+    transcript: list[TranscriptUtterance], tops: list[str], segments: list[AssignmentSegment],
+) -> list[AssignmentSegment]:
+    """The optional LLM cannot promote ambiguous references to certain hits."""
+    guarded = []
+    for segment in segments:
+        evidence = [transcript[segment.start_index].text, segment.evidence_text or ""]
+        if any(has_ref and targets != {segment.top_index}
+               for has_ref, targets in (reference_targets(text, tops) for text in evidence)):
+            segment = replace(
+                segment, uncertain=True, confidence=min(segment.confidence, 0.5),
+                transition_type="inferred",
+                reason="TOP-Verweis ist mehrdeutig, unbekannt oder widersprüchlich; Zuordnung prüfen.",
+            )
+        guarded.append(segment)
+    return guarded
 
 
 def _result_from_segments(
@@ -506,7 +537,7 @@ def _build_llm_user_prompt(
     ]
 
     if tops:
-        agenda = "\n".join(f"{index}: {top}" for index, top in enumerate(tops))
+        agenda = "\n".join(f"Listenindex {index}: {top}" for index, top in enumerate(tops))
         compact_note = (
             "Das Transkript ist auf relevante Kontextfenster gekuerzt; "
             "die angezeigten Indizes bleiben die originalen Transkriptindizes. "
@@ -690,15 +721,19 @@ def _parse_heuristic_top_announcement(text: str) -> tuple[str, bool] | None:
     if not has_transition_phrase(text):
         return None
 
-    explicit_match = re.search(
-        r"\b(?:top|tagesordnungspunkt|punkt)\s*(\d+(?:\.\d+)*)\b[\s).:-]*(?P<title>.*)$",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if explicit_match:
-        title = _clean_detected_title(explicit_match.group("title"))
-        number = explicit_match.group(1)
-        return (title or f"TOP {number}", True)
+    refs = agenda_references(text)
+    if refs:
+        if len(refs) != 1 or refs[0].number is None:
+            return None
+        ref = refs[0]
+        title = _clean_detected_title(text[ref.end:])
+        label = f"TOP {ref.original_number}" + (f" {title}" if title else "")
+        sections = reference_sections(text)
+        if len(sections) == 1:
+            label = with_section(label, next(iter(sections)))
+        if reference_targets(text, [label])[1] != {0}:
+            return None
+        return label, True
 
     transition_match = re.search(
         r"(?:kommen\s+wir\s+(?:zu|zum|zur)|komme\s+ich\s+(?:zu|zum|zur)|"
