@@ -4662,9 +4662,12 @@ async def assignment_suggestions_endpoint(request: AssignmentSuggestionsRequest)
 
 
 @app.post("/api/agenda-detection", response_model=AgendaDetectionResponse)
-async def agenda_detection_endpoint(request: AgendaDetectionRequest):
+def agenda_detection_endpoint(request: AgendaDetectionRequest):
     """
     Detect reviewable TOPs and transcript segments.
+
+    This synchronous endpoint runs in FastAPI's thread pool: model requests and
+    CPU-bound detection must not block autosaves, health checks or cancellation.
 
     If TOPs are supplied, only boundaries are detected/refined. Without TOPs,
     the endpoint detects agenda titles from transcript transition signals and

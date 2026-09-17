@@ -262,7 +262,13 @@ function hasReviewUncertainty(
     return true;
   }
 
-  if (hasAgendaUncertainty(agendaDetection)) {
+  const proposals = session.agenda_proposals;
+  const detection = agendaDetection ?? proposals?.result;
+  if (transcriptLength > 0 && session.tops.length > 0 && !session.skipped_assignment &&
+      !proposalsAreValid(proposals, session.tops, session.top_ids ?? [], session.transcript ?? [])) {
+    return true;
+  }
+  if (hasAgendaUncertainty(detection) || (detection?.warnings?.length ?? 0) > 0) {
     return true;
   }
 
@@ -530,13 +536,16 @@ export default function App() {
       speakerNames,
       summaryReviews,
       summaries,
-      summaryStates,
       effectiveSummaryStates,
       topIds,
       tops,
       transcript,
     ]
   );
+  const currentPayloadRef = useRef('');
+  useEffect(() => {
+    currentPayloadRef.current = serializeSessionPayload(buildSessionPayload());
+  }, [buildSessionPayload]);
 
   const applySession = useCallback((session: SessionResponse | SessionDraft) => {
     const nextSessionId = session.session_id ?? null;
@@ -814,9 +823,13 @@ export default function App() {
           setSessionRevision(nextRevision);
           setTopIds((current) => JSON.stringify(current) === JSON.stringify(payload.top_ids)
             ? savedSession.top_ids ?? current : current);
-          setSummaries(normalizeSummaries(savedSession.summaries));
-          setSummaryReviews(normalizeSummaryReviews(savedSession.summary_reviews));
-          setSummaryStates(normalizeSummaryStates(savedSession.summary_states));
+          // A delayed save must not put old positional summaries back after
+          // TOP insertion/deletion, speaker renaming or further manual edits.
+          if (currentPayloadRef.current === serializedPayload) {
+            setSummaries(normalizeSummaries(savedSession.summaries));
+            setSummaryReviews(normalizeSummaryReviews(savedSession.summary_reviews));
+            setSummaryStates(normalizeSummaryStates(savedSession.summary_states));
+          }
           lastSavedPayloadRef.current = serializedPayload;
           setSessionId(savedSession.session_id);
           activeSessionIdRef.current = savedSession.session_id;
@@ -1515,7 +1528,8 @@ export default function App() {
         <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span>{pipelineNotice}</span>
-            {directProtocolAvailable && hasFreshSummariesInState && (
+            {directProtocolAvailable && hasFreshSummariesInState &&
+              agendaDetection && !agendaDetectionStale && !hasAgendaUncertainty(agendaDetection) && (
               <button
                 type="button"
                 onClick={handleDirectProtocol}

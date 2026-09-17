@@ -124,6 +124,14 @@ def test_structured_number_is_not_overridden_by_numeric_title():
     assert parse_agenda_label(result.tops[0]).title == '2026 Haushalt'
 
 
+def test_pdf_title_recovery_does_not_overwrite_explicit_number_or_section():
+    result = parse_agenda_data_response('''{"tops":[
+        {"number":"2","title":"Anfragen","section":"public"},
+        {"number":"3","title":"Anfragen","section":"nonpublic"}
+    ]}''', 'Tagesordnung\nÖffentlicher Teil\n2 Anfragen')
+    assert result.tops == ['[Öffentlich] 2 Anfragen', '[Nichtöffentlich] 3. Anfragen']
+
+
 @pytest.mark.parametrize('spelling', ['nichtöffentlich', 'nicht öffentlich', 'nicht-öffentlich', 'nicht oeffentlich'])
 def test_negative_scope_is_not_mistaken_for_public_scope(spelling):
     tops = ['[Öffentlich] 2 Haushalt', '[Nichtöffentlich] 2 Vergabe']

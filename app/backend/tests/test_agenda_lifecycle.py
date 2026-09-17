@@ -1,6 +1,8 @@
 """Exercise actual HTTP persistence, legacy reads, and positional detector contracts."""
 import copy
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 
@@ -117,3 +119,29 @@ def test_explicit_detection_preserves_edited_line_identity_and_structure(tmp_pat
     assert result['transcript'] == transcript
     assert len(result['assignments']) == 1
     assert all(segment['start_index'] == segment['end_index'] == 0 for segment in result['segments'])
+
+
+def test_slow_detection_does_not_block_health_or_session_requests(tmp_path, monkeypatch):
+    monkeypatch.setenv('PERSISTENCE_DB_PATH', str(tmp_path / 'sessions.sqlite3'))
+    persistence.init_db()
+    entered, release = threading.Event(), threading.Event()
+    original = main.segment_known_agenda
+
+    def slow_detection(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(main, 'segment_known_agenda', slow_detection)
+    with TestClient(main.app) as client, ThreadPoolExecutor(max_workers=2) as executor:
+        request = executor.submit(client.post, '/api/agenda-detection', json={
+            'tops': ['1 Haushalt'], 'use_llm': False,
+            'transcript': [{'speaker': 'M', 'text': 'TOP 1 Haushalt.', 'start': 0, 'end': 1}],
+        })
+        try:
+            assert entered.wait(timeout=2)
+            health = executor.submit(client.get, '/health')
+            assert health.result(timeout=2).status_code == 200
+        finally:
+            release.set()
+        assert request.result(timeout=2).status_code == 200

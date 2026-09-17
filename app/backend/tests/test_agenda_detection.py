@@ -334,7 +334,86 @@ def test_transcript_detection_keeps_number_with_or_without_llm(fake_openai_modul
     for use_llm in (False, True):
         result = detect_agenda_from_transcript(transcript, use_llm=use_llm)
         assert result.tops == [label]
-        assert result.segments[0].uncertain is (not use_llm)
+        # A model confidence alone does not supply the missing evidence quote.
+        assert result.segments[0].uncertain
+
+
+def test_unknown_agenda_number_only_revisit_keeps_original_topic():
+    result = detect_agenda_from_transcript([
+        TranscriptUtterance('MOD', text) for text in [
+            'Kommen wir zu TOP 1 Haushalt.', 'Beratung.',
+            'Kommen wir zu TOP 2 Schulbau.', 'Beratung.',
+            'Kommen wir wieder zu TOP 1.', 'Beratung.',
+        ]
+    ], use_llm=False)
+    assert result.tops == ['TOP 1 Haushalt', 'TOP 2 Schulbau']
+    assert result.assignments == [0, 0, 1, 1, 0, 0]
+
+
+@pytest.mark.parametrize('title', ['TOP 1', '1.'])
+def test_known_number_only_title_is_a_valid_identity(fake_openai_module, title):
+    result = known_llm_result(fake_openai_module, [title], ['Kommen wir zu TOP 1.'], [{
+        'top_id': 'agenda:0', 'top_title': title, 'start_index': 0, 'end_index': 0,
+        'confidence': 0.9, 'evidence_index': 0, 'evidence_text': 'Kommen wir zu TOP 1.',
+    }])
+    assert result.assignments == [0]
+    assert not result.segments[0].uncertain
+    assert not result.llm.validation_reasons
+
+
+@pytest.mark.parametrize('interruption', [
+    'Wir unterbrechen die Beratung.', 'Kommen wir zu TOP 99.',
+    'Kommen wir zum unbekannten Thema.', 'Kommen wir zu TOP 1 und TOP 2.',
+])
+def test_interior_unresolved_call_or_stop_prevents_safe_llm_range(fake_openai_module, interruption):
+    result = known_llm_result(fake_openai_module, ['1 Haushalt', '2 Schulbau'], [
+        'Kommen wir zu TOP 1 Haushalt.', interruption, 'Weitere Wortmeldung.',
+    ], [{'top_id': 'agenda:0', 'start_index': 0, 'end_index': 2, 'confidence': 0.95,
+         'evidence_index': 0, 'evidence_text': 'Kommen wir zu TOP 1 Haushalt.'}])
+    assert result.segments[0].uncertain
+    assert result.segments[0].confidence <= 0.5
+
+
+@pytest.mark.parametrize('bounds', [
+    {'start_index': -1, 'end_index': 1}, {'start_index': 0, 'end_index': 100},
+    {'start_index': 0}, {'start_index': True, 'end_index': 1},
+])
+def test_unknown_agenda_does_not_invent_or_clip_invalid_ranges(fake_openai_module, bounds):
+    fake_openai_module.content = json.dumps({'tops': [{'top_title': 'Haushalt', **bounds, 'confidence': 0.99}]})
+    result = detect_agenda_from_transcript([TranscriptUtterance('A', 'Diskussion.')] * 2, use_llm=True)
+    assert result.assignments == [None, None]
+    assert 'invalid_bounds' in result.llm.validation_reasons
+
+
+def test_unknown_agenda_clears_hallucinated_evidence(fake_openai_module):
+    fake_openai_module.content = json.dumps({'tops': [{
+        'top_title': 'Haushalt', 'start_index': 0, 'end_index': 0,
+        'confidence': 0.99, 'evidence_index': 0, 'evidence_text': 'Erfundener Aufruf.',
+    }]})
+    result = detect_agenda_from_transcript([TranscriptUtterance('A', 'Diskussion.')], use_llm=True)
+    assert result.segments[0].uncertain
+    assert result.segments[0].evidence_index is None
+    assert result.segments[0].evidence_text is None
+    assert result.llm.warnings
+
+
+def test_chunk_evidence_keeps_global_index_and_bounds_stay_local(fake_openai_module, monkeypatch):
+    monkeypatch.setattr(agenda_detection, 'AGENDA_DETECTION_CHUNK_LINES', 2)
+    monkeypatch.setattr(agenda_detection, 'AGENDA_DETECTION_CHUNK_OVERLAP_LINES', 0)
+    fake_openai_module.responses = [
+        json.dumps({'tops': [{'top_title': 'Falscher Bereich', 'start_index': 0, 'end_index': 3}]}),
+        json.dumps({'tops': [{'top_title': '2 Schulbau', 'start_index': 0, 'end_index': 1,
+                             'confidence': 0.9, 'evidence_index': 0,
+                             'evidence_text': 'Kommen wir zu TOP 2 Schulbau.'}]}),
+    ]
+    result = detect_agenda_from_transcript([TranscriptUtterance('M', text) for text in [
+        'Diskussion.', 'Weitere Diskussion.', 'Kommen wir zu TOP 2 Schulbau.', 'Beratung.',
+    ]], use_llm=True)
+    assert result.assignments == [None, None, 0, 0]
+    assert result.segments[0].evidence_index == 2
+    assert result.segments[0].evidence_text == 'Kommen wir zu TOP 2 Schulbau.'
+    assert not result.segments[0].uncertain
+    assert 'invalid_bounds' in result.llm.validation_reasons
 
 
 @pytest.mark.parametrize('failure', [None, TimeoutError('offline'), 'not json'])

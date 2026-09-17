@@ -505,10 +505,18 @@ def parse_agenda_data_response(
     by_title: dict[str, list[str]] = {}
     for fallback in fallback_tops:
         by_title.setdefault(parse_agenda_label(fallback).title.casefold(), []).append(fallback)
-    tops = [
-        matches[0] if len(matches := by_title.get(parse_agenda_label(top).title.casefold(), [])) == 1
-        else top for top in tops
-    ]
+    recovered_tops = []
+    for top in tops:
+        label = parse_agenda_label(top)
+        matches = [
+            candidate for candidate in by_title.get(label.title.casefold(), [])
+            if (label.number_key is None or parse_agenda_label(candidate).number_key == label.number_key)
+            and (label.section is None or parse_agenda_label(candidate).section == label.section)
+        ]
+        # A unique title can supply missing metadata, never overwrite an
+        # explicitly different number or public/nonpublic section.
+        recovered_tops.append(matches[0] if len(matches) == 1 else top)
+    tops = recovered_tops
 
     metadata = merge_metadata(
         normalize_metadata((payload.get("metadata") or payload) if payload else None),

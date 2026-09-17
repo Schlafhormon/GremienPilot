@@ -45,8 +45,12 @@ fortgeschrieben.
 
 Mehrdeutige Verweise werden auch durch Titelabgleich oder LLM-Verfeinerung nicht
 zu sicheren Treffern. Geschätzte Grenzen bleiben mit `uncertain=true` markiert.
-Die Segmentierung nimmt eine geordnete Behandlung der TOPs an; Rückverweise können
-wie Ankündigungen aussehen. PDF-Layout und Modellantworten können unvollständig sein.
+Die Segmentierung folgt erkannten Aufrufen und erlaubt geänderte Reihenfolgen
+sowie Wiederaufnahmen. Rückverweise und Vorschauen werden konservativ behandelt;
+unangekündigte Themenwechsel bleiben eine Grenze. PDF-Layout und Modellantworten
+können unvollständig sein. Die PDF-Nachbearbeitung ergänzt Nummern und Abschnitte
+nur bei kompatiblen Angaben; ein gleicher Titel überschreibt keine ausdrücklich
+abweichende Nummer oder einen anderen Abschnitt.
 
 Bewusst keine explizite Nummernauflösung für `2a`, `2/1`, `2,1`, `2 . 1`,
 `zwei Punkt eins`, Ordinalzahlen (`zweiter`), römische oder Buchstabenverweise,

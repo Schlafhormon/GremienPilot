@@ -206,9 +206,10 @@ def detect_agenda_from_transcript(
 
     if llm_segments:
         segments, repaired = _validate_unknown_segments(
-            len(transcript),
+            transcript,
             llm_segments,
             fallback_segments=heuristic_segments,
+            issues=usage.validation_reasons,
         )
         strategy = "heuristic_transcript_llm_repaired" if repaired else "heuristic_transcript_llm"
     else:
@@ -217,12 +218,6 @@ def detect_agenda_from_transcript(
         if repaired:
             strategy += "_repaired"
 
-    segments = [
-        replace(segment, top_title=announcement[0])
-        if (announcement := _parse_heuristic_top_announcement(transcript[segment.start_index].text))
-        and announcement[1] else segment
-        for segment in segments
-    ]
     # Repeated announcements of the same detected label share an identity.
     detected_tops = list(dict.fromkeys(segment.top_title for segment in segments))
     segments = [replace(segment, top_index=detected_tops.index(segment.top_title)) for segment in segments]
@@ -439,8 +434,8 @@ def _offset_raw_segments(
     offset: int,
 ) -> list[_RawSegment]:
     return [
-        _RawSegment(
-            top_title=segment.top_title,
+        replace(
+            segment,
             start_index=(
                 segment.start_index + offset
                 if segment.start_index is not None
@@ -449,11 +444,7 @@ def _offset_raw_segments(
             end_index=(
                 segment.end_index + offset if segment.end_index is not None else None
             ),
-            confidence=segment.confidence,
-            evidence_text=segment.evidence_text,
-            uncertain=segment.uncertain,
-            reason=segment.reason,
-            transition_type=segment.transition_type,
+            evidence_index=(segment.evidence_index + offset if segment.evidence_index is not None else None),
         )
         for segment in segments
     ]
@@ -476,6 +467,12 @@ def _detect_unknown_agenda_with_llm_chunks(
             ),
             model=model, system_prompt=system_prompt,
         )
+        valid_segments = [segment for segment in segments
+                          if segment.start_index is not None and segment.end_index is not None
+                          and 0 <= segment.start_index <= segment.end_index < len(chunk)]
+        if len(valid_segments) != len(segments) and "invalid_bounds" not in usage.validation_reasons:
+            usage.validation_reasons.append("invalid_bounds")
+        segments = valid_segments
         if not segments:
             segments = [
                 replace(
@@ -487,7 +484,8 @@ def _detect_unknown_agenda_with_llm_chunks(
                 )
             ]
         detected.extend(_offset_raw_segments(segments, offset=chunk_start))
-    return [] if usage.failed_calls == usage.attempted_calls else detected
+    # Identical proposals from overlapping context windows are one observation.
+    return [] if usage.failed_calls == usage.attempted_calls else list(dict.fromkeys(detected))
 
 
 def _detect_with_llm(
@@ -724,10 +722,11 @@ def _extract_json_payload(response_text: str) -> Any:
 def _heuristic_detect_unknown_agenda(
     transcript: list[TranscriptUtterance],
 ) -> list[AssignmentSegment]:
-    titles = list(dict.fromkeys(
+    labels = [
         parsed[0] for line in transcript
         if (parsed := _parse_heuristic_top_announcement(line.text)) is not None
-    ))
+    ]
+    titles = list(dict.fromkeys(_canonical_unknown_labels(labels).values()))
     segments = suggest_assignments(transcript, titles).segments
     return [
         replace(segment, confidence=min(segment.confidence, 0.65), uncertain=True,
@@ -781,39 +780,61 @@ def _clean_detected_title(value: str) -> str:
     return title
 
 
+def _canonical_unknown_labels(labels: list[str]) -> dict[str, str]:
+    """Reconcile spelling and omitted metadata, never conflicting identities.
+
+    A later "TOP 1" can refer back to "TOP 1 Haushalt". Different named
+    topics sharing a number remain separate and therefore ambiguous.
+    """
+    unique = list(dict.fromkeys(labels))
+    parsed = {value: parse_agenda_label(value) for value in unique}
+    mapping: dict[str, str] = {}
+    for value, label in parsed.items():
+        candidates = [other for other, known in parsed.items()
+                      if known.number_key == label.number_key and known.section == label.section
+                      and (not label.title or normalize_text(known.title) == normalize_text(label.title))]
+        named = [other for other in candidates if parsed[other].title]
+        if len({normalize_text(parsed[other].title) for other in named}) == 1:
+            mapping[value] = named[0]
+        else:
+            mapping[value] = candidates[0] if not named and candidates else value
+    # A unique fully labelled title may enrich an unnumbered model response.
+    for value, label in parsed.items():
+        if label.number_key is not None or not label.title:
+            continue
+        candidates = list(dict.fromkeys(mapping[other] for other, known in parsed.items()
+                          if known.number_key is not None
+                          and normalize_text(known.title) == normalize_text(label.title)
+                          and (label.section is None or label.section == known.section)))
+        if len(candidates) == 1:
+            mapping[value] = candidates[0]
+    return mapping
+
+
 def _validate_unknown_segments(
-    transcript_length: int,
+    transcript: list[TranscriptUtterance],
     raw_segments: list[_RawSegment],
     *,
     fallback_segments: list[AssignmentSegment],
+    issues: list[str],
 ) -> tuple[list[AssignmentSegment], bool]:
-    if transcript_length <= 0:
-        return [], False
+    """Free detection obeys the same bounds and evidence rules as known TOPs.
 
-    candidates = list(raw_segments)
-    if not candidates:
-        candidates = [_segment_to_raw(segment) for segment in fallback_segments]
-
-    candidates = [
-        candidate for candidate in candidates if candidate.top_title.strip()
-    ]
-    candidates.sort(key=lambda item: item.start_index if item.start_index is not None else transcript_length)
-
-    deduped: list[_RawSegment] = []
-    seen_starts: set[int] = set()
-    for candidate in candidates:
-        start = candidate.start_index
-        if start is not None and start in seen_starts:
-            continue
-        if start is not None:
-            seen_starts.add(start)
-        deduped.append(candidate)
-
-    return _materialize_ordered_segments(
-        transcript_length,
-        deduped,
-        heuristic_fallbacks=_match_fallback_segments(deduped, fallback_segments),
+    Temporary identities only associate the returned labels. They do not prove
+    that a topic occurred. Heuristic evidence is validated independently.
+    """
+    mapping = _canonical_unknown_labels(
+        [segment.top_title for segment in fallback_segments]
+        + [raw.top_title for raw in raw_segments if raw.top_title]
     )
+    tops = list(dict.fromkeys(mapping.values()))
+    raw_with_ids = [replace(raw, top_title=mapping[raw.top_title],
+                           top_id=f"agenda:{tops.index(mapping[raw.top_title])}", id_provided=True)
+                    for raw in raw_segments if raw.top_title]
+    fallbacks = [replace(segment, top_title=mapping[segment.top_title],
+                         top_index=tops.index(mapping[segment.top_title]))
+                 for segment in fallback_segments]
+    return _validate_known_segments(transcript, tops, raw_with_ids, fallbacks, issues=issues)
 
 
 def _known_title_matches(title: str, tops: list[str]) -> list[int]:
@@ -823,7 +844,7 @@ def _known_title_matches(title: str, tops: list[str]) -> list[int]:
     hide another candidate with the same title and unspecified metadata.
     """
     label = parse_agenda_label(title)
-    if not label.title:
+    if not label.title and label.number_key is None:
         return []
     return [
         i for i, top in enumerate(tops)
@@ -901,6 +922,14 @@ def _validate_known_segments(
             grounded
             and all(supported_topics[line] == [top_index] for line in support)
             and not any(targets and targets != [top_index] for targets in supported_topics.values())
+            and not any(
+                (transition_kind(transcript[line].text) in {"call", "heading", "mixed"}
+                 and supported_topics[line] != [top_index])
+                or (transition_kind(transcript[line].text) == "stop"
+                    and not (reference_targets(transcript[line].text, tops)[1]
+                             and top_index not in reference_targets(transcript[line].text, tops)[1]))
+                for line in range(start, end + 1)
+            )
         )
         if not strong:
             note("weak_boundary_evidence")
@@ -943,110 +972,6 @@ def _validate_known_segments(
     return segments, bool(issues)
 
 
-def _materialize_ordered_segments(
-    transcript_length: int,
-    raw_segments: list[_RawSegment],
-    *,
-    heuristic_fallbacks: list[AssignmentSegment | None],
-) -> tuple[list[AssignmentSegment], bool]:
-    repaired = False
-    starts: list[int] = []
-    prepared: list[tuple[_RawSegment, AssignmentSegment | None]] = []
-
-    for index, raw in enumerate(raw_segments):
-        if len(starts) >= transcript_length:
-            repaired = True
-            break
-
-        fallback = heuristic_fallbacks[index] if index < len(heuristic_fallbacks) else None
-        fallback_start = fallback.start_index if fallback else None
-        start = raw.start_index if raw.start_index is not None else fallback_start
-        if start is None:
-            repaired = True
-            continue
-
-        minimum_start = starts[-1] + 1 if starts else 0
-        if fallback_start is not None and (
-            start < minimum_start or start < 0 or start >= transcript_length
-        ):
-            if fallback_start >= minimum_start:
-                start = fallback_start
-
-        original_start = start
-        start = max(0, min(int(start), transcript_length - 1))
-        if start < minimum_start:
-            start = minimum_start
-        if start != original_start:
-            repaired = True
-        if start >= transcript_length:
-            repaired = True
-            break
-
-        starts.append(start)
-        prepared.append((raw, fallback))
-
-    segments: list[AssignmentSegment] = []
-    for index, ((raw, fallback), start) in enumerate(zip(prepared, starts)):
-        next_start = starts[index + 1] if index + 1 < len(starts) else transcript_length
-        max_end = max(start, next_start - 1)
-        raw_end = raw.end_index if raw.end_index is not None else (fallback.end_index if fallback else None)
-        original_end = raw_end
-        if raw_end is None:
-            end = max_end
-        else:
-            end = max(start, min(int(raw_end), transcript_length - 1, max_end))
-        if original_end is not None and end != original_end:
-            repaired = True
-
-        title = raw.top_title
-        segment_repaired = (
-            raw.start_index != start
-            or (raw.end_index is not None and raw.end_index != end)
-            or raw.start_index is None
-        )
-        repaired |= segment_repaired
-        confidence = max(0.0, min(1.0, raw.confidence))
-        if segment_repaired:
-            confidence = min(confidence, 0.5)
-
-        segments.append(
-            AssignmentSegment(
-                top_index=index,
-                top_title=title,
-                start_index=start,
-                end_index=end,
-                confidence=round(confidence, 2),
-                uncertain=raw.uncertain or segment_repaired or confidence < 0.7,
-                transition_type=raw.transition_type,
-                reason=(
-                    raw.reason
-                    if not segment_repaired
-                    else f"{raw.reason} Grenzen wurden validiert oder repariert."
-                ),
-                evidence_index=start,
-                evidence_text=raw.evidence_text,
-            )
-        )
-
-    return segments, repaired
-
-
-def _match_fallback_segments(
-    raw_segments: list[_RawSegment],
-    fallback_segments: list[AssignmentSegment],
-) -> list[AssignmentSegment | None]:
-    matched: list[AssignmentSegment | None] = []
-    for raw in raw_segments:
-        title = normalize_text(parse_agenda_label(raw.top_title).title)
-        candidates = [segment for segment in fallback_segments
-                      if normalize_text(segment.top_title) == normalize_text(raw.top_title)
-                      or normalize_text(parse_agenda_label(segment.top_title).title) == title]
-        at_start = [segment for segment in candidates if segment.start_index == raw.start_index]
-        candidates = at_start or candidates
-        matched.append(candidates[0] if len(candidates) == 1 else None)
-    return matched
-
-
 def _segment_to_raw(
     segment: AssignmentSegment,
     *,
@@ -1061,6 +986,8 @@ def _segment_to_raw(
         uncertain=segment.uncertain,
         reason=segment.reason,
         transition_type=segment.transition_type,
+        evidence_index=segment.evidence_index,
+        evidence_index_provided=segment.evidence_index is not None,
     )
 
 

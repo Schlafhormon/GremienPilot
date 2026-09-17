@@ -18,6 +18,7 @@ import {
   startPipeline,
 } from './api';
 import type { PipelineJob, PipelineResultResponse } from './types';
+import { agendaSource } from './agendaProposals';
 
 vi.mock('./api', () => ({
   checkBackendHealth: vi.fn(),
@@ -63,7 +64,7 @@ function pipelineResult(
   warnings: string[] = [],
   agendaDetection: PipelineResultResponse['agenda_detection'] = null
 ): PipelineResultResponse {
-  return {
+  const result: PipelineResultResponse = {
     pipeline,
     session: {
       session_id: 'session-1',
@@ -72,7 +73,7 @@ function pipelineResult(
       tops: ['Haushalt'],
       top_ids: ['top-1'],
       transcript: [
-        { speaker: 'SPEAKER_00', text: 'Der Haushalt wird beraten.', start: 0, end: 2 },
+        { line_id: 'legacy:0', speaker: 'SPEAKER_00', text: 'Der Haushalt wird beraten.', start: 0, end: 2 },
       ],
       assignments: [0],
       speaker_names: { SPEAKER_00: 'Alice' },
@@ -106,6 +107,24 @@ function pipelineResult(
     warnings,
     agenda_detection: agendaDetection,
   };
+  if (!('agenda_proposals' in overrides)) {
+    const session = result.session;
+    const detection = {
+      tops: session.tops, transcript: session.transcript ?? [],
+      assignments: session.assignments, strategy: 'test', uncertain_count: 0,
+      segments: [{
+        top_index: 0, top_title: session.tops[0] ?? '', start_index: 0, end_index: 0,
+        confidence: 0.9, uncertain: false, transition_type: 'explicit', reason: 'Aufruf',
+      }],
+      ...agendaDetection,
+    };
+    result.session.agenda_proposals = {
+      version: 1, source: agendaSource(session.tops, session.top_ids ?? [], session.transcript ?? []),
+      result: detection,
+    };
+    result.agenda_detection = detection;
+  }
+  return result;
 }
 
 async function uploadAndStart(user = userEvent.setup()) {

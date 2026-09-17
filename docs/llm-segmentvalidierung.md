@@ -82,5 +82,16 @@ Auch ein echtes Zitat beweist weder den gesamten Bereich noch eine exakte
 Endgrenze. Indirekte Themenwechsel, unvollständige Transkripte und die gekürzte
 LLM-Ansicht langer Transkripte können zu Fehlern führen. Die Prüfung bleibt eine
 konservative, regelbasierte Plausibilitätskontrolle; manuelle Prüfung bleibt nötig.
-Die strengere Bereichs- und Evidenzvalidierung hier betrifft die bekannte Agenda;
-die freie TOP-Erkennung verwendet weiterhin ihren bisherigen Materialisierer.
+Die freie TOP-Erkennung verwendet dieselbe Bereichs- und Evidenzvalidierung.
+Ihre vorläufigen Identitäten stammen aus den erkannten Bezeichnungen; eindeutige
+Originalnummern dürfen dabei fehlende Titel ergänzen, etwa bei einer Wiederaufnahme
+mit „TOP 1“ nach „TOP 1 Haushalt“. Widersprüchliche Titel oder Abschnitte werden
+nicht zusammengeführt. Heuristisch belegte Nummern dürfen einen eindeutig passenden
+unnummerierten Modelltitel ergänzen.
+
+Bei langen Transkripten werden Grenzen zuerst gegen den jeweiligen Chunk geprüft,
+bevor Zeilen- und Belegindizes in globale Indizes umgerechnet werden. Identische
+Vorschläge aus überlappenden Kontextfenstern werden dedupliziert; sonstige
+Überlappungen unterliegen der konservativen Verwerfungsregel.
+Auch Unterbrechungen und nicht eindeutig auflösbare Aufrufe innerhalb eines
+LLM-Segments verhindern die Einstufung als sicher.

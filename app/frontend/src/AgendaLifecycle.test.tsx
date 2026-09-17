@@ -140,7 +140,7 @@ describe('agenda proposals across real editor state transitions', () => {
     await user.click(screen.getByRole('button', { name: 'Speichern' }));
     expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
     expect(assignments()).toEqual([0, 2]);
-    view = await reopen(view);
+    await reopen(view);
     expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
     expect(screen.getByText(/2 Segmente, 1 unsicher/)).toBeInTheDocument();
     expect(stored.agenda_proposals!.source!.transcript[0]!.text).toBe('TOP 1 Haushalt.');
@@ -206,7 +206,7 @@ describe('agenda proposals across real editor state transitions', () => {
 
   it('invalidates after joining transcript lines and restores the old uncertainty', async () => {
     const user = userEvent.setup();
-    let view = render(<App />);
+    const view = render(<App />);
     await screen.findByRole('button', { name: 'Alle übernehmen' });
     await user.click(screen.getByText('TOP 1 Haushalt.'));
     await user.click(screen.getByRole('button', { name: 'Zeile mit nächster verbinden' }));
@@ -214,7 +214,7 @@ describe('agenda proposals across real editor state transitions', () => {
     expect(draft().transcript![0]!.line_id).toBe('line-a');
     expect(assignments()).toEqual([null]);
     expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
-    view = await reopen(view);
+    await reopen(view);
     expect(screen.getByText(/2 Segmente, 1 unsicher/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
   });
@@ -225,5 +225,40 @@ describe('agenda proposals across real editor state transitions', () => {
     await screen.findByText(/Unsicherheiten sind unbekannt/);
     expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
     expect(detectAgenda).not.toHaveBeenCalled();
+  });
+
+  it('does not restore old summary indices when a save finishes after TOP insertion', async () => {
+    stored.summaries = { 0: 'Haushaltstext', 1: 'Schulbautext' };
+    let resolve!: (value: SessionResponse) => void;
+    vi.mocked(saveSession).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('button', { name: 'Alle übernehmen' });
+    await user.click(screen.getByText('TOP 1 Haushalt.'));
+    await waitFor(() => expect(saveSession).toHaveBeenCalled());
+    const submitted = structuredClone(vi.mocked(saveSession).mock.calls[0]![0]);
+    await user.click(screen.getByRole('button', { name: 'TOP hinzufügen' }));
+    expect(draft().summaries).toEqual({ 0: 'Haushaltstext', 2: 'Schulbautext' });
+    await act(async () => resolve({ ...submitted, session_id: 'session-1', revision: 2 }));
+    expect(draft().top_ids).toEqual(['top-a', expect.any(String), 'top-b']);
+    expect(draft().summaries).toEqual({ 0: 'Haushaltstext', 2: 'Schulbautext' });
+    expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
+  });
+
+  it.each(['uncertain', 'stale', 'missing', 'warning'])('retains %s review status when restoring from the start screen', async (condition) => {
+    stored.summaries = { 0: 'Haushaltstext', 1: 'Schulbautext' };
+    if (condition === 'missing') stored.agenda_proposals = null;
+    if (condition === 'stale') stored.tops = ['Finanzen', 'Schulbau'];
+    if (condition === 'warning') {
+      stored.agenda_proposals!.result.uncertain_count = 0;
+      stored.agenda_proposals!.result.segments.forEach((segment) => { segment.uncertain = false; });
+    }
+    localStorage.setItem('active-session-id', stored.session_id);
+    window.history.replaceState(null, '', '/');
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /letzte sitzung fortsetzen/i }));
+    expect(await screen.findByText(/Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Direkt zum Protokoll' })).not.toBeInTheDocument();
   });
 });
