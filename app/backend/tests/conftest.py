@@ -1,8 +1,22 @@
 import sys
 import types
 from dataclasses import dataclass
+from pathlib import Path
+import re
 
 import pytest
+
+
+@pytest.fixture
+def frontend_summary_prompt():
+    """Read the actual UI default so this regression cannot drift from production."""
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/src/components/LLMSettingsPanel.tsx"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"export const DEFAULT_SYSTEM_PROMPT = `([^`]+)`;", source)
+    assert match, "Update this fixture if the frontend prompt representation changes"
+    return match.group(1)
 
 
 @dataclass

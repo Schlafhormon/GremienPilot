@@ -119,7 +119,11 @@ export interface PipelineStartOptions {
   pdfFile?: File | null;
   autoDetectTopsFromPdf?: boolean;
   model?: string;
+  /** Legacy alias for summarySystemPrompt; used only for summaries. */
   systemPrompt?: string;
+  summarySystemPrompt?: string;
+  agendaSystemPrompt?: string;
+  pdfSystemPrompt?: string;
   rememberSpeakers?: boolean;
   skipAgendaDetection?: boolean;
 }

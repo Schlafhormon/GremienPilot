@@ -1,10 +1,12 @@
 from agenda_detection import (
+    DEFAULT_AGENDA_DETECTION_PROMPT,
     build_agenda_detection_system_prompt,
     detect_agenda_from_transcript,
     segment_known_agenda,
 )
 from assignment_suggestions import TranscriptUtterance
 import agenda_detection
+import pytest
 
 
 def test_segment_known_agenda_detects_clear_top_announcements():
@@ -151,6 +153,7 @@ def test_fallback_without_llm_returns_reviewable_assignments():
 def test_unknown_agenda_llm_detection_chunks_long_transcripts(
     fake_openai_module,
     monkeypatch,
+    frontend_summary_prompt,
 ):
     monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_CHUNK_LINES", 2)
     monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_CHUNK_OVERLAP_LINES", 0)
@@ -173,7 +176,9 @@ def test_unknown_agenda_llm_detection_chunks_long_transcripts(
         TranscriptUtterance("B", "Der Schulbau wird beraten."),
     ]
 
-    result = detect_agenda_from_transcript(transcript, model="test-model")
+    result = detect_agenda_from_transcript(
+        transcript, model="test-model", system_prompt=frontend_summary_prompt,
+    )
 
     assert result.tops == ["Haushalt", "Schulbau"]
     assert result.assignments == [0, 0, 1, 1]
@@ -183,9 +188,38 @@ def test_unknown_agenda_llm_detection_chunks_long_transcripts(
     ]
     calls = [call for instance in fake_openai_module.instances for call in instance.calls]
     assert len(calls) == 2
+    for call in calls:
+        assert DEFAULT_AGENDA_DETECTION_PROMPT in call["messages"][0]["content"]
+        assert frontend_summary_prompt in call["messages"][0]["content"]
     assert "0: MOD" in calls[0]["messages"][1]["content"]
     assert "2: MOD" not in calls[0]["messages"][1]["content"]
 
 
 def test_build_agenda_detection_system_prompt_does_not_force_no_think():
-    assert build_agenda_detection_system_prompt("Nur JSON") == "Nur JSON"
+    prompt = build_agenda_detection_system_prompt("Nur JSON")
+    assert DEFAULT_AGENDA_DETECTION_PROMPT in prompt
+    assert "Nur JSON" in prompt
+    assert not prompt.startswith("/no_think")
+
+
+@pytest.mark.parametrize("custom_prompt", [None, "", "   ", DEFAULT_AGENDA_DETECTION_PROMPT])
+def test_default_detection_contract(custom_prompt):
+    assert build_agenda_detection_system_prompt(custom_prompt) == DEFAULT_AGENDA_DETECTION_PROMPT
+
+
+@pytest.mark.parametrize("known_tops", [False, True])
+def test_frontend_summary_prompt_cannot_replace_detection_contract(
+    fake_openai_module, frontend_summary_prompt, known_tops,
+):
+    fake_openai_module.content = '{"tops": [{"top_title": "Haushalt", "start_index": 0, "end_index": 0, "confidence": 0.9}]}'
+    transcript = [TranscriptUtterance("MOD", "TOP 1 Haushalt.")]
+    if known_tops:
+        segment_known_agenda(transcript, ["Haushalt"], model="test-model", system_prompt=frontend_summary_prompt)
+    else:
+        detect_agenda_from_transcript(transcript, model="test-model", system_prompt=frontend_summary_prompt)
+    request = fake_openai_module.instances[0].calls[0]
+    prompt = request["messages"][0]["content"]
+    assert DEFAULT_AGENDA_DETECTION_PROMPT in prompt
+    assert frontend_summary_prompt in prompt
+    assert "diese haben Vorrang" in prompt
+    assert "0: MOD" in request["messages"][1]["content"]

@@ -1109,7 +1109,7 @@ export default function App() {
         pdfFile,
         autoDetectTopsFromPdf: shouldAutoDetectTopsFromPdf,
         model: llmSettings.model,
-        systemPrompt: llmSettings.systemPrompt,
+        summarySystemPrompt: llmSettings.systemPrompt,
         rememberSpeakers,
         skipAgendaDetection,
       });

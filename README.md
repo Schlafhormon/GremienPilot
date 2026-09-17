@@ -572,6 +572,12 @@ docker build -f app/backend/Dockerfile.gpu-blackwell --build-arg PRECACHE_MODELS
 | `/api/speaker-profiles/{profile_id}/embeddings` | DELETE | gespeicherte Embeddings löschen |
 | `/api/sessions/{session_id}/speaker-observations` | GET | Sprecherprofil-Vorschläge abrufen |
 
+Der Pipeline-Start trennt `summary_system_prompt`, `agenda_system_prompt` und
+`pdf_system_prompt` (Formularfelder oder JSON-Feld `options`). Das bisherige
+`system_prompt` bleibt als Fallback ausschließlich für Zusammenfassungen erhalten;
+gespeicherte KI-Einstellungen bleiben kompatibel. Fachliche Ergänzungen lassen
+die verbindlichen Ausgabeformate und Aufgabenregeln bestehen.
+
 ## Kubernetes
 
 Unter `k8s/` liegen Manifeste für ein GPU-beschleunigtes Deployment. Die

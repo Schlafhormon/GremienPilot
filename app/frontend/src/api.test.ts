@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_SYSTEM_PROMPT } from './components/LLMSettingsPanel';
 import {
   archiveSpeakerProfile,
   backfillSpeakerEmbeddings,
@@ -104,6 +105,30 @@ describe('api session client', () => {
     expect(body.get('pdf')).toBeInstanceOf(File);
     expect(body.get('transcript')).toBeNull();
     expect(body.get('summaries')).toBeNull();
+  });
+
+  it('sends the actual UI default only as a summary prompt', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ pipeline_id: 'p', warnings: [] }) });
+    vi.stubGlobal('fetch', fetchMock);
+    await startPipeline(new File(['audio'], 'meeting.mp3'), { summarySystemPrompt: DEFAULT_SYSTEM_PROMPT });
+    const body = fetchMock.mock.calls[0]![1]!.body as FormData;
+    expect(body.get('summary_system_prompt')).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(body.has('system_prompt')).toBe(false);
+    expect(body.has('agenda_system_prompt')).toBe(false);
+    expect(body.has('pdf_system_prompt')).toBe(false);
+  });
+
+  it('serializes separate task prompts including an explicit empty summary preference', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ pipeline_id: 'p', warnings: [] }) });
+    vi.stubGlobal('fetch', fetchMock);
+    await startPipeline(new File(['audio'], 'meeting.mp3'), {
+      systemPrompt: 'Legacy', summarySystemPrompt: '', agendaSystemPrompt: 'Grenzen', pdfSystemPrompt: 'Einladung',
+    });
+    const body = fetchMock.mock.calls[0]![1]!.body as FormData;
+    expect(body.get('system_prompt')).toBe('Legacy');
+    expect(body.get('summary_system_prompt')).toBe('');
+    expect(body.get('agenda_system_prompt')).toBe('Grenzen');
+    expect(body.get('pdf_system_prompt')).toBe('Einladung');
   });
 
   it('extracts PDF agenda data including session metadata', async () => {

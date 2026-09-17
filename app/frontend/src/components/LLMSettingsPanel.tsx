@@ -3,6 +3,7 @@ import SpeakerProfileManager from './SpeakerProfileManager';
 
 export interface LLMSettings {
   model: string;
+  // Summary preference; retain this key for existing localStorage settings.
   systemPrompt: string;
 }
 

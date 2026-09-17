@@ -77,7 +77,17 @@ Regeln:
 
 
 def build_agenda_detection_system_prompt(system_prompt: str | None = None) -> str:
-    return (system_prompt or DEFAULT_AGENDA_DETECTION_PROMPT).strip()
+    """Caller context may refine detection, but never replace its output contract."""
+    custom_prompt = (system_prompt or "").strip()
+    if not custom_prompt or custom_prompt == DEFAULT_AGENDA_DETECTION_PROMPT.strip():
+        return DEFAULT_AGENDA_DETECTION_PROMPT
+    return (
+        DEFAULT_AGENDA_DETECTION_PROMPT
+        + "\n\nZusätzliche fachliche Vorgaben des Nutzers. Diese nur anwenden, "
+        "soweit sie der TOP-Erkennung, dem JSON-Schema und den Regeln für "
+        "Segmentgrenzen oben nicht widersprechen; diese haben Vorrang:\n"
+        + custom_prompt
+    )
 
 
 @dataclass(frozen=True)

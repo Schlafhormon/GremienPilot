@@ -2,6 +2,9 @@ import pytest
 from pathlib import Path
 
 from extract_tops import (
+    DEFAULT_EXTRACTION_PROMPT,
+    DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT,
+    build_agenda_data_extraction_system_prompt,
     build_extraction_system_prompt,
     extract_agenda_data_from_text,
     extract_session_metadata_from_text,
@@ -54,15 +57,44 @@ def test_extract_tops_from_text_uses_openai_client_and_parses_response(fake_open
     request = client.calls[0]
     assert request["model"] == "test-model"
     assert request["temperature"] == 0.1
-    assert request["messages"][0] == {
-        "role": "system",
-        "content": "/no_think\nNur TOPs extrahieren",
-    }
+    assert request["messages"][0]["role"] == "system"
+    assert DEFAULT_EXTRACTION_PROMPT in request["messages"][0]["content"]
+    assert "Nur TOPs extrahieren" in request["messages"][0]["content"]
     assert "Einladung zur Sitzung" in request["messages"][1]["content"]
 
 
 def test_build_extraction_system_prompt_does_not_duplicate_no_think():
-    assert build_extraction_system_prompt("/no_think\nNur TOPs") == "/no_think\nNur TOPs"
+    prompt = build_extraction_system_prompt("/no_think\nNur TOPs")
+    assert prompt.startswith("/no_think\n")
+    assert prompt.count("/no_think") == 1
+    assert DEFAULT_EXTRACTION_PROMPT in prompt
+    assert "Nur TOPs" in prompt
+
+
+@pytest.mark.parametrize("builder, default", [
+    (build_extraction_system_prompt, DEFAULT_EXTRACTION_PROMPT),
+    (build_agenda_data_extraction_system_prompt, DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT),
+])
+@pytest.mark.parametrize("custom_prompt", [None, "", "   ", "/no_think"])
+def test_extraction_defaults_preserve_contract(builder, default, custom_prompt):
+    assert builder(custom_prompt) == f"/no_think\n{default}"
+
+
+@pytest.mark.parametrize("extract, default, response", [
+    (extract_tops_from_text, DEFAULT_EXTRACTION_PROMPT, "1. Haushalt"),
+    (extract_agenda_data_from_text, DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT, '{"tops": ["Haushalt"], "metadata": {}}'),
+])
+def test_frontend_summary_prompt_cannot_replace_pdf_contract(
+    fake_openai_module, frontend_summary_prompt, extract, default, response,
+):
+    fake_openai_module.content = response
+    extract("Einladung zur Sitzung", model="test-model", system_prompt=frontend_summary_prompt)
+    request = fake_openai_module.instances[0].calls[0]
+    prompt = request["messages"][0]["content"]
+    assert default in prompt
+    assert frontend_summary_prompt in prompt
+    assert "diese haben Vorrang" in prompt
+    assert "Einladung zur Sitzung" in request["messages"][1]["content"]
 
 
 def test_parse_agenda_data_response_handles_json_and_metadata():

@@ -155,6 +155,13 @@ export async function startPipeline(
   if (options.systemPrompt) {
     formData.append("system_prompt", options.systemPrompt);
   }
+  for (const [field, prompt] of [
+    ["summary_system_prompt", options.summarySystemPrompt],
+    ["agenda_system_prompt", options.agendaSystemPrompt],
+    ["pdf_system_prompt", options.pdfSystemPrompt],
+  ] as const) {
+    if (prompt !== undefined) formData.append(field, prompt);
+  }
   formData.append("remember_speakers", String(Boolean(options.rememberSpeakers)));
   formData.append("skip_agenda_detection", String(Boolean(options.skipAgendaDetection)));
   formData.append(

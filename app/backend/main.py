@@ -28,6 +28,7 @@ from fastapi import (
     HTTPException,
     Header,
     Query,
+    Request,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -2877,7 +2878,8 @@ def detect_pipeline_agenda(
     agenda_tops = [top.strip() for top in known_tops if top.strip()]
     pdf_metadata: dict[str, Any] = {}
     model = options.get("agenda_model") or options.get("model")
-    system_prompt = options.get("agenda_system_prompt") or options.get("system_prompt")
+    # The legacy system_prompt belongs only to summarization.
+    system_prompt = options.get("agenda_system_prompt")
     if options.get("skip_agenda_detection"):
         return [], [None for _ in transcript], {
             "strategy": "no_agenda_requested",
@@ -2890,7 +2892,7 @@ def detect_pipeline_agenda(
             extracted = extract_agenda_data_from_pdf(
                 pdf_path,
                 model=model,
-                system_prompt=system_prompt,
+                system_prompt=options.get("pdf_system_prompt"),
             )
             extracted_tops = extracted.tops
             pdf_metadata = extracted.metadata.to_dict()
@@ -2960,7 +2962,9 @@ def summarize_pipeline_segments(
     summaries: dict[int, str] = {}
     summary_reviews: dict[int, Any] = {}
     model = options.get("summary_model") or options.get("model")
-    system_prompt = options.get("summary_system_prompt") or options.get("system_prompt")
+    system_prompt = options.get("summary_system_prompt")
+    if system_prompt is None:
+        system_prompt = options.get("system_prompt")
     if not tops:
         try:
             transcript_text = "\n".join(
@@ -3358,6 +3362,7 @@ async def llm_diagnostics_endpoint(model: Optional[str] = None):
 
 @app.post("/api/pipeline/start", response_model=PipelineStartResponse)
 async def start_pipeline(
+    request: Request,
     audio: UploadFile = File(...),
     pdf: Optional[UploadFile] = File(None),
     session_id: Optional[str] = Form(None),
@@ -3365,6 +3370,9 @@ async def start_pipeline(
     options: Optional[str] = Form(None),
     model: Optional[str] = Form(None),
     system_prompt: Optional[str] = Form(None),
+    summary_system_prompt: Optional[str] = Form(None),
+    agenda_system_prompt: Optional[str] = Form(None),
+    pdf_system_prompt: Optional[str] = Form(None),
     remember_speakers: bool = Form(False),
     skip_agenda_detection: bool = Form(False),
     auto_detect_tops_from_pdf: bool = Form(False),
@@ -3395,6 +3403,18 @@ async def start_pipeline(
         parsed_options["model"] = model
     if system_prompt:
         parsed_options["system_prompt"] = system_prompt
+    form = await request.form()
+    for key, prompt in (
+        ("summary_system_prompt", summary_system_prompt),
+        ("agenda_system_prompt", agenda_system_prompt),
+        ("pdf_system_prompt", pdf_system_prompt),
+    ):
+        if prompt is not None:
+            parsed_options[key] = prompt
+        elif form.get(key) == "":
+            # FastAPI normalizes empty optional form strings to None. Preserve
+            # explicit resets so neither JSON options nor the legacy alias win.
+            parsed_options[key] = ""
     parsed_options["skip_agenda_detection"] = skip_agenda_detection
     parsed_options["auto_detect_tops_from_pdf"] = auto_detect_tops_from_pdf
     known_tops = parse_pipeline_tops(tops)

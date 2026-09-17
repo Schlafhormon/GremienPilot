@@ -9,6 +9,9 @@ from fastapi.testclient import TestClient
 import main
 import persistence
 import summarize
+import pytest
+import agenda_detection
+import extract_tops
 from conftest import FakeTranscriptionResult
 from speaker_recognition import LocalSpeakerEmbedding
 
@@ -31,6 +34,91 @@ def configure_test_app(tmp_path, monkeypatch, *, concurrency=1):
     persistence.init_db()
     main.jobs.clear()
     return upload_dir
+
+
+@pytest.mark.parametrize("agenda_source, prompt_mode", [
+    ("transcript", "legacy"),
+    ("manual", "legacy"),
+    ("pdf", "legacy"),
+    ("pdf", "legacy_options"),
+    ("pdf", "scoped_form"),
+    ("pdf", "scoped_options"),
+    ("pdf", "blank_options"),
+    ("pdf", "blank_form"),
+])
+def test_pipeline_routes_prompts_to_actual_model_messages(
+    tmp_path, monkeypatch, fake_openai_module, frontend_summary_prompt,
+    agenda_source, prompt_mode,
+):
+    configure_test_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "transcribe_audio", lambda *args, **kwargs: FakeTranscriptionResult(
+        transcript=[{"speaker": "MOD", "text": "TOP 1 Haushalt.", "start": 0.0, "end": 2.0}],
+        audio_duration_seconds=2.0,
+    ))
+    # Only PDF decoding, transcription and the model transport are doubles.
+    # Routing, prompt builders, parsing and persistence run as in production.
+    monkeypatch.setattr(extract_tops, "extract_text_from_pdf", lambda path: "Einladung zur Sitzung: Haushalt")
+    data = {"model": "test-model", "system_prompt": frontend_summary_prompt}
+    scoped = {
+        "summary_system_prompt": "SUMMARY_ONLY: Sachliche Niederschrift.",
+        "agenda_system_prompt": "AGENDA_ONLY: Moderationssignale beachten.",
+        "pdf_system_prompt": "PDF_ONLY: Einladung beachten.",
+    }
+    if prompt_mode == "scoped_form":
+        data.update(scoped)
+        data["options"] = json.dumps({key: "OVERRIDDEN_OPTION" for key in scoped})
+    elif prompt_mode == "scoped_options":
+        data["options"] = json.dumps(scoped)
+    elif prompt_mode == "blank_options":
+        data["options"] = json.dumps({key: "" for key in scoped})
+    elif prompt_mode == "blank_form":
+        data.update({key: "" for key in scoped})
+        data["options"] = json.dumps({key: "OVERRIDDEN_OPTION" for key in scoped})
+    elif prompt_mode == "legacy_options":
+        data["options"] = json.dumps({"system_prompt": data.pop("system_prompt")})
+    files = {"audio": ("meeting.mp3", b"audio", "audio/mpeg")}
+    if agenda_source == "manual":
+        data["tops"] = json.dumps(["Haushalt"])
+    if agenda_source == "pdf":
+        data["auto_detect_tops_from_pdf"] = "true"
+        files["pdf"] = ("agenda.pdf", b"%PDF-1.4", "application/pdf")
+        fake_openai_module.responses.append('{"tops": ["Haushalt"], "metadata": {}}')
+    fake_openai_module.responses.extend([
+        '{"tops": [{"top_title": "Haushalt", "start_index": 0, "end_index": 0, "confidence": 0.9}]}',
+        json.dumps({"discussion": ["Der Haushalt wurde beraten."], "decisions": [], "votes": [],
+                    "action_items": [], "open_points": [], "uncertainties": []}),
+    ])
+    with TestClient(main.app) as client:
+        response = client.post("/api/pipeline/start", data=data, files=files)
+        assert response.status_code == 200
+        pipeline_id = response.json()["pipeline_id"]
+        assert wait_until(lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"] == "ready_for_review")
+        result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
+
+    calls = [call for instance in fake_openai_module.instances for call in instance.calls]
+    assert len(calls) == (3 if agenda_source == "pdf" else 2)
+    contracts = [agenda_detection.DEFAULT_AGENDA_DETECTION_PROMPT, summarize.DEFAULT_SYSTEM_PROMPT]
+    prompt_keys = ["agenda_system_prompt", "summary_system_prompt"]
+    if agenda_source == "pdf":
+        contracts.insert(0, extract_tops.DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT)
+        prompt_keys.insert(0, "pdf_system_prompt")
+    for call, contract, key in zip(calls, contracts, prompt_keys):
+        assert call["model"] == "test-model"
+        assert [message["role"] for message in call["messages"]] == ["system", "user"]
+        prompt = call["messages"][0]["content"]
+        assert contract in prompt
+        assert "OVERRIDDEN_OPTION" not in prompt
+        assert (frontend_summary_prompt in prompt) == (key == "summary_system_prompt" and prompt_mode.startswith("legacy"))
+        for scoped_key, custom_prompt in scoped.items():
+            assert (custom_prompt in prompt) == (prompt_mode.startswith("scoped_") and key == scoped_key)
+    assert "0: MOD" in calls[-2]["messages"][1]["content"]
+    assert "TOP: Haushalt" in calls[-1]["messages"][1]["content"]
+    assert result["session"]["tops"] == ["Haushalt"]
+    assert result["session"]["assignments"] == [0]
+    assert result["agenda_detection"]["strategy"] == (
+        "heuristic_transcript_llm" if agenda_source == "transcript" else "known_agenda_heuristic_llm"
+    )
+    assert result["session"]["summary_reviews"]["0"]["fallback_used"] is False
 
 
 def test_audio_upload_validation_accepts_supported_content_types_and_extensions():

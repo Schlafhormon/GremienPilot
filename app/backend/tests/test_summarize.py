@@ -2,6 +2,19 @@ import summarize
 import pytest
 
 
+def test_actual_frontend_prompt_preserves_summary_contract(fake_openai_module, frontend_summary_prompt):
+    fake_openai_module.content = structured_response()
+    result = summarize.summarize_segment(
+        "Haushalt", "MOD: Der Haushalt wird beraten.",
+        model="test-model", system_prompt=frontend_summary_prompt,
+    )
+    prompt = fake_openai_module.instances[0].calls[0]["messages"][0]["content"]
+    assert summarize.DEFAULT_SYSTEM_PROMPT in prompt
+    assert frontend_summary_prompt in prompt
+    assert "das JSON-Ausgabeformat hat Vorrang" in prompt
+    assert not result.fallback_used
+
+
 def structured_response(**overrides):
     payload = {
         "discussion": ["Die Vorsitzende erlaeuterte den Sachverhalt."],

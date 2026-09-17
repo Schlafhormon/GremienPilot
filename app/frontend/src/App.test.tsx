@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import { DEFAULT_SYSTEM_PROMPT } from './components/LLMSettingsPanel';
 import {
   checkBackendHealth,
   extractAgendaDataFromPDF,
@@ -186,9 +187,27 @@ describe('App pipeline flow', () => {
           tops: [],
           pdfFile: null,
           model: expect.any(String),
+          summarySystemPrompt: DEFAULT_SYSTEM_PROMPT,
         })
       );
     });
+    const options = vi.mocked(startPipeline).mock.calls[0]![1]!;
+    expect(options).not.toHaveProperty('systemPrompt');
+    expect(options).not.toHaveProperty('agendaSystemPrompt');
+    expect(options).not.toHaveProperty('pdfSystemPrompt');
+  });
+
+  it('keeps a saved legacy prompt as the summary preference', async () => {
+    localStorage.setItem('llm-settings', JSON.stringify({ model: 'saved-model', systemPrompt: 'Gespeicherte Fachvorgabe' }));
+    await uploadAndStart();
+    await waitFor(() => expect(startPipeline).toHaveBeenCalled());
+    const options = vi.mocked(startPipeline).mock.calls[0]![1]!;
+    expect(options.summarySystemPrompt).toBe('Gespeicherte Fachvorgabe');
+    expect(options.model).toBe('saved-model');
+    expect(options).not.toHaveProperty('systemPrompt');
+    expect(options).not.toHaveProperty('agendaSystemPrompt');
+    expect(options).not.toHaveProperty('pdfSystemPrompt');
+    expect(JSON.parse(localStorage.getItem('llm-settings')!).systemPrompt).toBe('Gespeicherte Fachvorgabe');
   });
 
   it('starts auto-PDF processing without requiring immediate TOP extraction', async () => {

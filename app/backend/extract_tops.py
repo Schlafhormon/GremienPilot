@@ -92,25 +92,28 @@ class PdfAgendaExtractionResult:
 
 
 def build_extraction_system_prompt(system_prompt: Optional[str] = None) -> str:
-    """Return a prompt that keeps reasoning models from hiding the final answer."""
-    prompt = (system_prompt or DEFAULT_EXTRACTION_PROMPT).strip()
-    if prompt.startswith(NO_THINK_DIRECTIVE):
-        return prompt
-    return f"{NO_THINK_DIRECTIVE}\n{prompt}"
+    """Preserve the numbered-list contract and suppress hidden reasoning."""
+    return _build_extraction_prompt(DEFAULT_EXTRACTION_PROMPT, system_prompt)
 
 
 def build_agenda_data_extraction_system_prompt(system_prompt: Optional[str] = None) -> str:
     """Return the structured extraction prompt with optional caller context."""
-    base_prompt = DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT
-    if system_prompt and system_prompt.strip():
-        base_prompt = (
-            f"{system_prompt.strip()}\n\n"
-            "Für diese Aufgabe gilt zusätzlich zwingend:\n"
-            f"{DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT}"
+    return _build_extraction_prompt(DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT, system_prompt)
+
+
+def _build_extraction_prompt(base_prompt: str, system_prompt: Optional[str]) -> str:
+    custom_prompt = (system_prompt or "").strip()
+    if custom_prompt.startswith(NO_THINK_DIRECTIVE):
+        custom_prompt = custom_prompt[len(NO_THINK_DIRECTIVE):].strip()
+    prompt = f"{NO_THINK_DIRECTIVE}\n{base_prompt}"
+    if custom_prompt and custom_prompt != base_prompt.strip():
+        prompt += (
+            "\n\nZusätzliche fachliche Vorgaben des Nutzers. Diese nur anwenden, "
+            "soweit sie der Extraktionsaufgabe, den Regeln und dem Ausgabeformat "
+            "oben nicht widersprechen; diese haben Vorrang:\n"
+            + custom_prompt
         )
-    if base_prompt.startswith(NO_THINK_DIRECTIVE):
-        return base_prompt
-    return f"{NO_THINK_DIRECTIVE}\n{base_prompt}"
+    return prompt
 
 
 def repair_common_pdf_text(text: str) -> str:
@@ -356,7 +359,7 @@ def extract_tops_from_text(
     Args:
         pdf_text: Full text extracted from the PDF
         model: LLM model to use (default: from env or qwen3:8b)
-        system_prompt: Custom system prompt (default: DEFAULT_EXTRACTION_PROMPT)
+        system_prompt: Optional context supplementing the mandatory extraction prompt
 
     Returns:
         List of TOP titles (including numbering)
