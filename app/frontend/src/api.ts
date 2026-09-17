@@ -81,6 +81,8 @@ function normalizeAgendaDetection(
     segments: data.segments ?? [],
     strategy: data.strategy ?? "unknown",
     uncertain_count: data.uncertain_count ?? 0,
+    llm: data.llm ?? null,
+    warnings: data.warnings ?? [],
   };
 }
 
@@ -163,6 +165,9 @@ export async function startPipeline(
     if (prompt !== undefined) formData.append(field, prompt);
   }
   formData.append("remember_speakers", String(Boolean(options.rememberSpeakers)));
+  if (options.agendaUseLlm != null) {
+    formData.append("agenda_use_llm", String(options.agendaUseLlm));
+  }
   formData.append("skip_agenda_detection", String(Boolean(options.skipAgendaDetection)));
   formData.append(
     "auto_detect_tops_from_pdf",
@@ -593,6 +598,7 @@ export async function detectAgenda(
       transcript: request.transcript,
       model: request.model,
       system_prompt: request.systemPrompt,
+      use_llm: request.useLlm,
     }),
   });
 
@@ -609,6 +615,8 @@ export async function detectAgenda(
     segments: data.segments ?? [],
     strategy: data.strategy ?? "unknown",
     uncertain_count: data.uncertain_count ?? 0,
+    llm: data.llm ?? null,
+    warnings: data.warnings ?? [],
   };
 }
 

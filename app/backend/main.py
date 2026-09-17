@@ -14,6 +14,7 @@ import threading
 import unicodedata
 import hashlib
 from collections import OrderedDict
+from dataclasses import asdict
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -32,7 +33,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from transcribe import (
     transcribe_audio,
@@ -1240,6 +1241,7 @@ class AssignmentSuggestionsRequest(BaseModel):
 
 
 class AgendaDetectionRequest(BaseModel):
+    use_llm: Optional[StrictBool] = None
     transcript: List[TranscriptLine]
     tops: List[str] = Field(default_factory=list)
     model: Optional[str] = None
@@ -1266,7 +1268,19 @@ class AssignmentSuggestionsResponse(BaseModel):
     uncertain_count: int
 
 
+class AgendaLLMUsageResponse(BaseModel):
+    enabled: bool
+    source: str
+    timeout_seconds: float
+    status: str
+    attempted_calls: int
+    failed_calls: int
+    failure_reasons: List[str] = Field(default_factory=list)
+
+
 class AgendaDetectionResponse(BaseModel):
+    llm: Optional[AgendaLLMUsageResponse] = None
+    warnings: List[str] = Field(default_factory=list)
     tops: List[str]
     transcript: List[TranscriptLine] = Field(default_factory=list)
     assignments: List[Optional[int]]
@@ -2095,6 +2109,8 @@ def parse_pipeline_options(raw_options: str | None) -> dict[str, Any]:
         ) from exc
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=400, detail="Optionen müssen ein JSON-Objekt sein")
+    if parsed.get("agenda_use_llm") is not None and type(parsed["agenda_use_llm"]) is not bool:
+        raise HTTPException(status_code=400, detail="agenda_use_llm muss boolesch oder null sein")
     return parsed
 
 
@@ -2132,6 +2148,8 @@ def build_pipeline_agenda_detection_response(
         transcript=list(session.transcript or []),
         assignments=list(session.assignments or []),
         segments=segments,
+        llm=agenda_info.get("llm"),
+        warnings=list(agenda_info.get("warnings") or []),
         strategy=str(agenda_info.get("strategy") or "unknown"),
         uncertain_count=int(agenda_info.get("uncertain_count") or 0),
     )
@@ -2905,6 +2923,7 @@ def detect_pipeline_agenda(
                 f"({safe_exception_label(exc)}).",
             )
 
+    detection_details: dict[str, Any] = {}
     try:
         utterances = transcript_utterances(transcript)
         if agenda_tops:
@@ -2913,15 +2932,23 @@ def detect_pipeline_agenda(
                 agenda_tops,
                 model=model,
                 system_prompt=system_prompt,
+                use_llm=options.get("agenda_use_llm"),
             )
         else:
             result = detect_agenda_from_transcript(
                 utterances,
                 model=model,
                 system_prompt=system_prompt,
+                use_llm=options.get("agenda_use_llm"),
             )
+        usage = result.llm
+        warnings = usage.warnings if usage else []
+        detection_details = {"llm": asdict(usage) if usage else None, "warnings": warnings}
+        for warning in warnings:
+            append_pipeline_warning(pipeline_id, warning)
         if result.tops and result.assignments:
             return result.tops, result.assignments, {
+                **detection_details,
                 "strategy": result.strategy,
                 "segments": [segment.__dict__ for segment in result.segments],
                 "uncertain_count": result.uncertain_count,
@@ -2938,6 +2965,7 @@ def detect_pipeline_agenda(
         )
 
     tops, assignments, agenda_info = fallback_agenda(transcript, agenda_tops)
+    agenda_info.update(detection_details)
     return tops, assignments, agenda_info, pdf_metadata
 
 
@@ -3372,6 +3400,7 @@ async def start_pipeline(
     system_prompt: Optional[str] = Form(None),
     summary_system_prompt: Optional[str] = Form(None),
     agenda_system_prompt: Optional[str] = Form(None),
+    agenda_use_llm: Optional[bool] = Form(None),
     pdf_system_prompt: Optional[str] = Form(None),
     remember_speakers: bool = Form(False),
     skip_agenda_detection: bool = Form(False),
@@ -3399,6 +3428,8 @@ async def start_pipeline(
     transcription_job_id = str(uuid.uuid4())
     effective_session_id = session_id or str(uuid.uuid4())
     parsed_options = parse_pipeline_options(options)
+    if agenda_use_llm is not None:
+        parsed_options["agenda_use_llm"] = agenda_use_llm
     if model:
         parsed_options["model"] = model
     if system_prompt:
@@ -4614,15 +4645,19 @@ async def agenda_detection_endpoint(request: AgendaDetectionRequest):
             valid_tops,
             model=request.model,
             system_prompt=request.system_prompt,
+            use_llm=request.use_llm,
         )
     else:
         result = detect_agenda_from_transcript(
             transcript,
             model=request.model,
             system_prompt=request.system_prompt,
+            use_llm=request.use_llm,
         )
 
     return AgendaDetectionResponse(
+        llm=asdict(result.llm) if result.llm else None,
+        warnings=result.llm.warnings if result.llm else [],
         tops=result.tops,
         transcript=[TranscriptLine(**line) for line in split_transcript],
         assignments=result.assignments,

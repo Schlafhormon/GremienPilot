@@ -123,6 +123,7 @@ export interface PipelineStartOptions {
   systemPrompt?: string;
   summarySystemPrompt?: string;
   agendaSystemPrompt?: string;
+  agendaUseLlm?: boolean | null;
   pdfSystemPrompt?: string;
   rememberSpeakers?: boolean;
   skipAgendaDetection?: boolean;
@@ -322,13 +323,26 @@ export interface AssignmentSuggestionsResponse {
 }
 
 export interface AgendaDetectionRequest {
+  useLlm?: boolean | null;
   tops?: string[];
   transcript: TranscriptLine[];
   model?: string;
   systemPrompt?: string;
 }
 
+export interface AgendaLLMUsage {
+  enabled: boolean;
+  source: "server_default" | "request";
+  timeout_seconds: number;
+  status: "disabled" | "skipped" | "success" | "fallback" | "partial_fallback";
+  attempted_calls: number;
+  failed_calls: number;
+  failure_reasons: string[];
+}
+
 export interface AgendaDetectionResponse {
+  llm?: AgendaLLMUsage | null;
+  warnings?: string[];
   tops: string[];
   transcript?: TranscriptLine[];
   assignments: (number | null)[];

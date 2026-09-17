@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from assignment_suggestions import (
@@ -32,13 +33,15 @@ logger = logging.getLogger(__name__)
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
 LLM_BASE_URL = get_llm_config().base_url
 LLM_API_KEY = get_llm_config().api_key
-AGENDA_DETECTION_USE_LLM = (
-    os.environ.get("AGENDA_DETECTION_USE_LLM", "false").lower() == "true"
-)
+_agenda_llm_default = os.environ.get("AGENDA_DETECTION_USE_LLM", "false").strip().lower()
+if _agenda_llm_default not in {"true", "false"}:
+    raise ValueError("AGENDA_DETECTION_USE_LLM must be true or false")
+AGENDA_DETECTION_USE_LLM = _agenda_llm_default == "true"
 AGENDA_DETECTION_TIMEOUT_SECONDS = float(
     os.environ.get("AGENDA_DETECTION_TIMEOUT_SECONDS", "8")
 )
-AGENDA_DETECTION_MIN_TIMEOUT_SECONDS = 30.0
+if not math.isfinite(AGENDA_DETECTION_TIMEOUT_SECONDS) or AGENDA_DETECTION_TIMEOUT_SECONDS <= 0:
+    raise ValueError("AGENDA_DETECTION_TIMEOUT_SECONDS must be finite and positive")
 AGENDA_DETECTION_CHUNK_LINES = int(
     os.environ.get("AGENDA_DETECTION_CHUNK_LINES", "160")
 )
@@ -90,6 +93,45 @@ def build_agenda_detection_system_prompt(system_prompt: str | None = None) -> st
     )
 
 
+@dataclass
+class AgendaLLMUsage:
+    enabled: bool
+    source: str
+    timeout_seconds: float = AGENDA_DETECTION_TIMEOUT_SECONDS
+    status: str = "skipped"
+    attempted_calls: int = 0
+    failed_calls: int = 0
+    failure_reasons: list[str] = field(default_factory=list)
+
+    @property
+    def warnings(self) -> list[str]:
+        if not self.failed_calls:
+            return []
+        return [
+            f"TOP-Erkennung: {self.failed_calls} von {self.attempted_calls} LLM-Aufrufen "
+            f"fehlgeschlagen ({', '.join(self.failure_reasons)}). "
+            "Heuristische Ersatzverarbeitung verwendet; bitte TOP-Zuordnung prüfen."
+        ]
+
+
+def _llm_usage(use_llm: bool | None) -> AgendaLLMUsage:
+    enabled = _should_use_llm(use_llm)
+    return AgendaLLMUsage(
+        enabled=enabled,
+        source="server_default" if use_llm is None else "request",
+        timeout_seconds=AGENDA_DETECTION_TIMEOUT_SECONDS,
+        status="skipped" if enabled else "disabled",
+    )
+
+
+class _InvalidLLMResponse(ValueError):
+    pass
+
+
+class _EmptyLLMResponse(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class AgendaDetectionResult:
     tops: list[str]
@@ -97,6 +139,7 @@ class AgendaDetectionResult:
     segments: list[AssignmentSegment]
     uncertain_count: int
     strategy: str
+    llm: AgendaLLMUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -115,10 +158,13 @@ def detect_agenda_from_transcript(
     transcript: list[TranscriptUtterance],
     model: str | None = None,
     system_prompt: str | None = None,
+    *,
+    use_llm: bool | None = None,
 ) -> AgendaDetectionResult:
     """Detect TOP titles and line boundaries without a known agenda list."""
+    usage = _llm_usage(use_llm)
     if not transcript:
-        return AgendaDetectionResult([], [], [], 0, "heuristic_transcript_empty")
+        return AgendaDetectionResult([], [], [], 0, "heuristic_transcript_empty", usage)
 
     heuristic_segments = _heuristic_detect_unknown_agenda(transcript)
     llm_segments = _maybe_detect_with_llm(
@@ -127,6 +173,7 @@ def detect_agenda_from_transcript(
         heuristic_segments=heuristic_segments,
         model=model,
         system_prompt=system_prompt,
+        usage=usage,
     )
 
     if llm_segments:
@@ -142,11 +189,11 @@ def detect_agenda_from_transcript(
             [_segment_to_raw(segment) for segment in heuristic_segments],
             fallback_segments=[],
         )
-        strategy = "heuristic_transcript_fallback" if not _should_use_llm(model, system_prompt) else "heuristic_transcript_llm_fallback"
+        strategy = "heuristic_transcript_fallback" if not usage.enabled else "heuristic_transcript_llm_fallback"
         if repaired:
             strategy += "_repaired"
 
-    return _result_from_segments(len(transcript), segments, strategy)
+    return _result_from_segments(len(transcript), segments, strategy, usage=usage)
 
 
 def segment_known_agenda(
@@ -154,11 +201,14 @@ def segment_known_agenda(
     tops: list[str],
     model: str | None = None,
     system_prompt: str | None = None,
+    *,
+    use_llm: bool | None = None,
 ) -> AgendaDetectionResult:
     """Detect start/end lines for an already known TOP list."""
+    usage = _llm_usage(use_llm)
     valid_tops = [top.strip() for top in tops if top.strip()]
     if not transcript or not valid_tops:
-        return AgendaDetectionResult(valid_tops, [None] * len(transcript), [], 0, "known_agenda_empty")
+        return AgendaDetectionResult(valid_tops, [None] * len(transcript), [], 0, "known_agenda_empty", usage)
 
     heuristic_result = suggest_assignments(transcript, valid_tops)
     heuristic_segments = list(heuristic_result.segments)
@@ -168,6 +218,7 @@ def segment_known_agenda(
         heuristic_segments=heuristic_segments,
         model=model,
         system_prompt=system_prompt,
+        usage=usage,
     )
 
     if llm_segments:
@@ -186,12 +237,12 @@ def segment_known_agenda(
             heuristic_segments,
         )
         strategy = "known_agenda_heuristic"
-        if _should_use_llm(model, system_prompt):
+        if usage.enabled:
             strategy += "_llm_fallback"
         if repaired:
             strategy += "_repaired"
 
-    return _result_from_segments(len(transcript), segments, strategy, tops=valid_tops)
+    return _result_from_segments(len(transcript), segments, strategy, tops=valid_tops, usage=usage)
 
 
 def _result_from_segments(
@@ -200,6 +251,7 @@ def _result_from_segments(
     strategy: str,
     *,
     tops: list[str] | None = None,
+    usage: AgendaLLMUsage,
 ) -> AgendaDetectionResult:
     assignments = assignments_from_segments(transcript_length, segments)
     return AgendaDetectionResult(
@@ -208,11 +260,43 @@ def _result_from_segments(
         segments=segments,
         uncertain_count=sum(1 for segment in segments if segment.uncertain),
         strategy=strategy,
+        llm=usage,
     )
 
 
-def _should_use_llm(model: str | None, system_prompt: str | None) -> bool:
-    return bool(model or system_prompt or AGENDA_DETECTION_USE_LLM)
+def _should_use_llm(use_llm: bool | None = None) -> bool:
+    """An explicit request overrides the server default, never model/prompt text."""
+    if use_llm is not None and not isinstance(use_llm, bool):
+        raise ValueError("use_llm must be a boolean or None")
+    return AGENDA_DETECTION_USE_LLM if use_llm is None else use_llm
+
+
+def _attempt_llm_detection(*, usage: AgendaLLMUsage, **kwargs: Any) -> list[_RawSegment]:
+    usage.attempted_calls += 1
+    try:
+        segments = _detect_with_llm(**kwargs)
+        if not segments:
+            raise _EmptyLLMResponse()
+        return segments
+    except Exception as exc:
+        # Fixed reason codes only: exception messages may contain transcript,
+        # provider response bodies, URLs or credentials.
+        names = {cls.__name__ for cls in type(exc).__mro__}
+        if isinstance(exc, _InvalidLLMResponse):
+            reason = "invalid_response"
+        elif isinstance(exc, _EmptyLLMResponse):
+            reason = "empty_response"
+        elif names & {"TimeoutError", "APITimeoutError", "TimeoutException"}:
+            reason = "timeout"
+        elif names & {"ConnectionError", "APIConnectionError", "ConnectError"}:
+            reason = "connection_error"
+        else:
+            reason = "request_error"
+        usage.failed_calls += 1
+        if reason not in usage.failure_reasons:
+            usage.failure_reasons.append(reason)
+        logger.warning("Agenda LLM fallback: reason=%s call=%d", reason, usage.attempted_calls)
+        return []
 
 
 def _maybe_detect_with_llm(
@@ -222,31 +306,25 @@ def _maybe_detect_with_llm(
     heuristic_segments: list[AssignmentSegment],
     model: str | None,
     system_prompt: str | None,
+    usage: AgendaLLMUsage,
 ) -> list[_RawSegment]:
-    if not _should_use_llm(model, system_prompt):
+    if not usage.enabled:
         return []
-
-    try:
-        if tops is None and len(transcript) > AGENDA_DETECTION_CHUNK_LINES:
-            return _detect_unknown_agenda_with_llm_chunks(
-                transcript,
-                heuristic_segments=heuristic_segments,
-                model=model,
-                system_prompt=system_prompt,
-            )
-        return _detect_with_llm(
-            transcript,
-            tops=tops,
-            heuristic_segments=heuristic_segments,
-            model=model,
-            system_prompt=system_prompt,
+    if tops is None and len(transcript) > AGENDA_DETECTION_CHUNK_LINES:
+        segments = _detect_unknown_agenda_with_llm_chunks(
+            transcript, heuristic_segments=heuristic_segments,
+            model=model, system_prompt=system_prompt, usage=usage,
         )
-    except Exception as exc:
-        logger.warning(
-            "Agenda LLM detection failed; using heuristic fallback (%s)",
-            exc.__class__.__name__,
+    else:
+        segments = _attempt_llm_detection(
+            usage=usage, transcript=transcript, tops=tops,
+            heuristic_segments=heuristic_segments, model=model, system_prompt=system_prompt,
         )
-        return []
+    usage.status = (
+        "success" if not usage.failed_calls else
+        "fallback" if usage.failed_calls == usage.attempted_calls else "partial_fallback"
+    )
+    return segments
 
 
 def _iter_transcript_chunks(
@@ -330,32 +408,29 @@ def _detect_unknown_agenda_with_llm_chunks(
     heuristic_segments: list[AssignmentSegment],
     model: str | None,
     system_prompt: str | None,
+    usage: AgendaLLMUsage,
 ) -> list[_RawSegment]:
     detected: list[_RawSegment] = []
     for chunk_start, chunk in _iter_transcript_chunks(transcript):
-        try:
-            detected.extend(
-                _offset_raw_segments(
-                    _detect_with_llm(
-                        chunk,
-                        tops=None,
-                        heuristic_segments=_segments_for_chunk(
-                            heuristic_segments,
-                            chunk_start=chunk_start,
-                            chunk_length=len(chunk),
-                        ),
-                        model=model,
-                        system_prompt=system_prompt,
-                    ),
-                    offset=chunk_start,
+        segments = _attempt_llm_detection(
+            usage=usage, transcript=chunk, tops=None,
+            heuristic_segments=_segments_for_chunk(
+                heuristic_segments, chunk_start=chunk_start, chunk_length=len(chunk),
+            ),
+            model=model, system_prompt=system_prompt,
+        )
+        if not segments:
+            segments = [
+                replace(
+                    _segment_to_raw(segment), uncertain=True,
+                    reason="Heuristische Ersatzverarbeitung nach LLM-Ausfall.",
                 )
-            )
-        except Exception as exc:
-            logger.warning(
-                "Agenda LLM chunk failed; continuing with remaining chunks (%s)",
-                exc.__class__.__name__,
-            )
-    return detected
+                for segment in _segments_for_chunk(
+                    heuristic_segments, chunk_start=chunk_start, chunk_length=len(chunk),
+                )
+            ]
+        detected.extend(_offset_raw_segments(segments, offset=chunk_start))
+    return [] if usage.failed_calls == usage.attempted_calls else detected
 
 
 def _detect_with_llm(
@@ -377,7 +452,8 @@ def _detect_with_llm(
     client = OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
-        timeout=max(AGENDA_DETECTION_TIMEOUT_SECONDS, AGENDA_DETECTION_MIN_TIMEOUT_SECONDS),
+        timeout=AGENDA_DETECTION_TIMEOUT_SECONDS,
+        max_retries=0,
     )
 
     response = client.chat.completions.create(
@@ -389,8 +465,11 @@ def _detect_with_llm(
         temperature=0.1,
         max_tokens=2048,
     )
-    raw_response = _llm_message_text(response.choices[0].message)
-    return _parse_llm_segments(raw_response)
+    try:
+        raw_response = _llm_message_text(response.choices[0].message)
+        return _parse_llm_segments(raw_response)
+    except Exception as exc:
+        raise _InvalidLLMResponse() from exc
 
 
 def _llm_message_text(message: Any) -> str:

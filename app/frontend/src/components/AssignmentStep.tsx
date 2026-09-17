@@ -603,6 +603,9 @@ export default function AssignmentStep({
           </div>
         </div>
 
+        {agendaDetection?.warnings?.map((warning) => (
+          <p key={warning} role="status" className="text-amber-700">{warning}</p>
+        ))}
         {agendaDetectionError && (
           <div className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
             Automatische TOP-Erkennung fehlgeschlagen: {agendaDetectionError}. Die manuelle Zuordnung bleibt verfügbar.

@@ -58,7 +58,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
     # Only PDF decoding, transcription and the model transport are doubles.
     # Routing, prompt builders, parsing and persistence run as in production.
     monkeypatch.setattr(extract_tops, "extract_text_from_pdf", lambda path: "Einladung zur Sitzung: Haushalt")
-    data = {"model": "test-model", "system_prompt": frontend_summary_prompt}
+    data = {"model": "test-model", "system_prompt": frontend_summary_prompt, "agenda_use_llm": "true"}
     scoped = {
         "summary_system_prompt": "SUMMARY_ONLY: Sachliche Niederschrift.",
         "agenda_system_prompt": "AGENDA_ONLY: Moderationssignale beachten.",
@@ -1647,3 +1647,72 @@ def test_cleanup_old_jobs_enforces_max_count(tmp_path, monkeypatch):
     assert files[2].exists()
 
     main.jobs.clear()
+
+
+@pytest.mark.parametrize("known_tops", [False, True])
+@pytest.mark.parametrize("decision, default, enabled", [(None, False, False), (None, True, True), (False, True, False), (True, False, True)])
+def test_agenda_api_explicit_llm_policy(monkeypatch, fake_openai_module, known_tops, decision, default, enabled):
+    monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_USE_LLM", default)
+    fake_openai_module.responses = [TimeoutError("SECRET")]
+    # No lifespan or real models needed for the stateless detection endpoint.
+    client = TestClient(main.app)
+    payload = {
+        "transcript": [{"speaker": "MOD", "text": "TOP 1 Haushalt.", "start": 0, "end": 1}],
+        "tops": ["Haushalt"] if known_tops else [],
+        "model": "test-model", "system_prompt": "custom", "use_llm": decision,
+    }
+    response = client.post("/api/agenda-detection", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["llm"]["enabled"] is enabled
+    assert data["llm"]["status"] == ("fallback" if enabled else "disabled")
+    assert bool(data["warnings"]) is enabled
+    assert "SECRET" not in response.text
+
+
+@pytest.mark.parametrize("decision", ["false", "true", 1, 0, [], {}])
+def test_agenda_json_rejects_non_boolean_decisions(decision):
+    response = TestClient(main.app).post("/api/agenda-detection", json={"transcript": [], "use_llm": decision})
+    assert response.status_code == 422
+    with pytest.raises(main.HTTPException):
+        main.parse_pipeline_options(json.dumps({"agenda_use_llm": decision}))
+
+
+@pytest.mark.parametrize("form_value, option_value, server_default, enabled", [
+    (None, None, False, False), (None, None, True, True),
+    (None, False, True, False), (None, True, False, True),
+    ("false", True, True, False), ("true", False, False, True),
+])
+def test_pipeline_llm_policy_and_persisted_fallback(
+    tmp_path, monkeypatch, fake_openai_module, form_value, option_value, server_default, enabled,
+):
+    configure_test_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_USE_LLM", server_default)
+    monkeypatch.setattr(main, "transcribe_audio", lambda *args, **kwargs: FakeTranscriptionResult(
+        transcript=[{"speaker": "MOD", "text": "TOP 1 Haushalt.", "start": 0, "end": 1}],
+        audio_duration_seconds=1,
+    ))
+    monkeypatch.setattr(main, "summarize_segment", lambda *args, **kwargs: summarize.SummarizationResult(
+        summary="Haushalt beraten.", duration_seconds=0.01,
+        structured=summarize.StructuredSummary(discussion=["Haushalt beraten."]),
+    ))
+    fake_openai_module.responses = [TimeoutError("SECRET")]
+    data = {"model": "test-model", "agenda_system_prompt": "custom", "options": json.dumps({"agenda_use_llm": option_value})}
+    if form_value is not None:
+        data["agenda_use_llm"] = form_value
+    with TestClient(main.app) as client:
+        response = client.post("/api/pipeline/start", data=data, files={"audio": ("test.mp3", b"fake", "audio/mpeg")})
+        assert response.status_code == 200
+        pipeline_id = response.json()["pipeline_id"]
+        assert wait_until(lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"] == "completed")
+        main.jobs.clear()
+        result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
+    usage = result["agenda_detection"]["llm"]
+    assert usage["enabled"] is enabled
+    assert usage["status"] == ("fallback" if enabled else "disabled")
+    assert usage["source"] == ("server_default" if option_value is None and form_value is None else "request")
+    assert len(fake_openai_module.instances) == int(enabled)
+    if enabled:
+        assert result["agenda_detection"]["warnings"]
+        assert any("timeout" in warning for warning in result["warnings"])
+    assert "SECRET" not in str(result)

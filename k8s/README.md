@@ -60,7 +60,7 @@ k8s/
 | `WHISPER_LANGUAGE` | `de` | Audio language |
 | `LLM_BASE_URL` | `https://api.aisc.hpi.de` | AISC LLM API endpoint |
 | `LLM_MODEL` | `llama-3-3-70b` | Model name for summarization |
-| `LLM_TIMEOUT_SECONDS` | `120` | Timeout per LLM request |
+| `LLM_TIMEOUT_SECONDS` | `120` | Summary/diagnostics request timeout (not transcript agenda detection) |
 | `LLM_MAX_RETRIES` | `2` | Retries for transient LLM errors |
 | `LLM_RETRY_BACKOFF_SECONDS` | `0.5` | Backoff between retries |
 | `LLM_CHUNK_CHARS` | `12000` | Target chunk size for long TOP transcripts |
@@ -192,3 +192,9 @@ kubectl rollout status deployment/tops-frontend -n tops
 | Networking | Docker network (service names) | K8s Services + DNS |
 | Storage | `./uploads` and `./data` bind mounts | `tops-backend-data` PVC mounted at `/app/uploads` and `/app/data` |
 | External access | `localhost:3000` | LoadBalancer by default; optional Ingress example |
+
+Agenda detection uses the `AGENDA_DETECTION_*` values in
+`backend/configmap.yaml` (LLM default off, 8-second timeout per chunk, no SDK
+retries). Explicit API `use_llm` / pipeline `agenda_use_llm` overrides the server
+default; model/prompt alone does not enable it. See the [configuration contract](../README.md#llm-nutzung-für-automatische-top-zuordnung).
+Restart backend pods after ConfigMap changes to load the new values.

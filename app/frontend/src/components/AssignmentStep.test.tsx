@@ -297,3 +297,8 @@ describe('AssignmentStep', () => {
     expect(setAssignments).toHaveBeenLastCalledWith([0, 0]);
   });
 });
+
+it('shows an agenda fallback warning alongside reviewable segments', () => {
+  render(<AssignmentStep {...defaultProps} agendaDetection={{ ...defaultProps.agendaDetection!, warnings: ['TOP-Erkennung: timeout. Heuristische Ersatzverarbeitung verwendet.'] }} />);
+  expect(screen.getByRole('status')).toHaveTextContent('Heuristische Ersatzverarbeitung verwendet.');
+});

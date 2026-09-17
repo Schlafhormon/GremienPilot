@@ -694,3 +694,34 @@ describe('api session client', () => {
     });
   });
 });
+
+
+describe('explicit agenda LLM policy', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([undefined, null, false, true])('preserves decision %s for detection and pipeline', async (decision) => {
+    const llm = { enabled: true, source: 'request', timeout_seconds: 8, status: 'fallback', attempted_calls: 1, failed_calls: 1, failure_reasons: ['timeout'] };
+    const warnings = ['Heuristische Ersatzverarbeitung verwendet.'];
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ tops: [], segments: [], assignments: [], llm, warnings }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await detectAgenda({ transcript: [], model: 'chosen', systemPrompt: 'custom', useLlm: decision });
+    const payload = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(payload.use_llm).toBe(decision);
+    expect(result.llm).toEqual(llm);
+    expect(result.warnings).toEqual(warnings);
+    await startPipeline(new File(['fake'], 'test.mp3'), { agendaUseLlm: decision });
+    const form = fetchMock.mock.calls[1]![1].body as FormData;
+    expect(form.get('agenda_use_llm')).toBe(decision == null ? null : String(decision));
+  });
+
+  it('retains persisted diagnostics and warnings when loading a pipeline result', async () => {
+    const agenda = { tops: [], assignments: [], segments: [], strategy: 'known_agenda_heuristic_llm_fallback', uncertain_count: 0, llm: { status: 'fallback', failure_reasons: ['timeout'] }, warnings: ['TOP-Zuordnung prüfen.'] };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ pipeline: {}, session: {}, agenda_detection: agenda }) }));
+    const result = await getPipelineResult('test');
+    expect(result.agenda_detection?.llm).toEqual(agenda.llm);
+    expect(result.agenda_detection?.warnings).toEqual(agenda.warnings);
+  });
+});
