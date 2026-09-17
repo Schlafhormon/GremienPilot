@@ -519,6 +519,7 @@ def _detect_with_llm(
         ],
         temperature=0.1,
         max_tokens=2048,
+        **config.reasoning_options,
     )
     try:
         raw_response = _llm_message_text(response.choices[0].message)

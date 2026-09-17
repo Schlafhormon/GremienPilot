@@ -9,6 +9,7 @@ Configuration via environment variables:
 - LLM_BASE_URL: API endpoint (local default: http://localhost:11434/v1,
   Docker default: http://ollama:11434/v1)
 - LLM_MODEL: Model name (default: qwen3:8b)
+- LLM_REASONING_EFFORT: empty for server default, none to disable, or low/medium/high/max
 - LLM_TIMEOUT_SECONDS: request timeout per LLM call (default: 120)
 - LLM_MAX_RETRIES: retry count for transient LLM errors (default: 2)
 - LLM_CHUNK_CHARS: target chunk size for long TOP transcripts (default: 12000)
@@ -108,6 +109,14 @@ class LLMConfig:
     api_key: str
     timeout_seconds: float
     base_url_source: str
+    reasoning_effort: str | None = None
+
+    @property
+    def reasoning_options(self) -> dict[str, str]:
+        """Omit the API field entirely for servers without reasoning support."""
+        if self.reasoning_effort is None:
+            return {}
+        return {"reasoning_effort": self.reasoning_effort}
 
     @property
     def uses_internal_ollama(self) -> bool:
@@ -141,12 +150,18 @@ class LLMAvailability:
 
 def get_llm_config(model: str | None = None) -> LLMConfig:
     base_url, source = resolve_llm_base_url()
+    reasoning_effort = os.environ.get("LLM_REASONING_EFFORT", "").strip().lower()
+    if reasoning_effort not in {"", "none", "low", "medium", "high", "max"}:
+        raise ValueError(
+            "LLM_REASONING_EFFORT must be empty, none, low, medium, high or max"
+        )
     return LLMConfig(
         base_url=base_url,
         model=model or os.environ.get("LLM_MODEL", LLM_MODEL),
         api_key=os.environ.get("LLM_API_KEY", LLM_API_KEY),
         timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", str(LLM_TIMEOUT_SECONDS))),
         base_url_source=source,
+        reasoning_effort=reasoning_effort or None,
     )
 
 
@@ -421,6 +436,8 @@ def _load_openai_client(config: LLMConfig | None = None) -> Any:
         base_url=config.base_url,
         api_key=config.api_key,
         timeout=config.timeout_seconds,
+        # The summary retry loop owns retries; do not multiply them in the SDK.
+        max_retries=0,
     )
 
 
@@ -573,6 +590,7 @@ def _chat_completion_content(
     max_tokens: int,
     temperature: float,
 ) -> str:
+    reasoning_options = get_llm_config(model).reasoning_options
     last_error: Exception | None = None
     last_info = LLMErrorInfo("unknown", False)
 
@@ -584,6 +602,7 @@ def _chat_completion_content(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 timeout=LLM_TIMEOUT_SECONDS,
+                **reasoning_options,
             )
             content = response.choices[0].message.content or ""
             if not content.strip():

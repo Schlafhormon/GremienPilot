@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from agenda_labels import label_from_json, parse_agenda_label, section_heading, with_section
-from summarize import get_llm_config
+from summarize import LLM_MAX_RETRIES, get_llm_config
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ NO_THINK_DIRECTIVE = "/no_think"
 # Default system prompt for TOP extraction. Keep this short: reasoning models can
 # otherwise spend the whole response budget on hidden reasoning and return no
 # message.content through Ollama's OpenAI-compatible endpoint.
-DEFAULT_EXTRACTION_PROMPT = """Du bist ein Extraktor. Antworte ohne Denken, ohne Erklärung, nur mit einer nummerierten Liste der Tagesordnungspunkte.
+DEFAULT_EXTRACTION_PROMPT = """Du bist ein Extraktor. Antworte ohne Erklärung, nur mit einer nummerierten Liste der Tagesordnungspunkte.
 Extrahiere aus der Einladung alle eigentlichen TOPs aus öffentlichem und nichtöffentlichem Teil.
 Ignoriere Abschnittsüberschriften wie "TOP I. Öffentlicher Teil" und "TOP II. Nichtöffentlicher Teil" als eigene TOPs.
 Ignoriere Bullet-Unterpunkte wie "- Fäkalienentsorgungssatzung - FES".
@@ -40,7 +40,7 @@ Erhalte die Originalnummer inklusive Unterpunkten und Lücken; erfinde keine Num
 Jeder TOP kommt auf eine eigene Zeile im Format: 2.1. Titel (ohne Nummer, falls unbekannt).
 Stelle bei bekanntem Abschnitt [Öffentlich] oder [Nichtöffentlich] voran."""
 
-DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT = """Du bist ein Extraktor. Antworte ohne Denken, ohne Erklärung, nur mit validem JSON.
+DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT = """Du bist ein Extraktor. Antworte ohne Erklärung, nur mit validem JSON.
 Extrahiere aus der Einladung:
 - alle eigentlichen Tagesordnungspunkte aus öffentlichem und nichtöffentlichem Teil
 - die Sitzungsmetadaten Gremium, Sitzungsdatum, Ort und Sitzungstitel
@@ -98,7 +98,7 @@ class PdfAgendaExtractionResult:
 
 
 def build_extraction_system_prompt(system_prompt: Optional[str] = None) -> str:
-    """Preserve the numbered-list contract and suppress hidden reasoning."""
+    """Preserve the numbered-list contract and the configured reasoning mode."""
     return _build_extraction_prompt(DEFAULT_EXTRACTION_PROMPT, system_prompt)
 
 
@@ -111,7 +111,12 @@ def _build_extraction_prompt(base_prompt: str, system_prompt: Optional[str]) -> 
     custom_prompt = (system_prompt or "").strip()
     if custom_prompt.startswith(NO_THINK_DIRECTIVE):
         custom_prompt = custom_prompt[len(NO_THINK_DIRECTIVE):].strip()
-    prompt = f"{NO_THINK_DIRECTIVE}\n{base_prompt}"
+    # Preserve the legacy Qwen3 prompt when no API setting was supplied. An
+    # explicit reasoning mode is controlled solely by the API, including none.
+    prompt = (
+        f"{NO_THINK_DIRECTIVE}\n{base_prompt}"
+        if get_llm_config().reasoning_effort is None else base_prompt
+    )
     if custom_prompt and custom_prompt != base_prompt.strip():
         prompt += (
             "\n\nZusätzliche fachliche Vorgaben des Nutzers. Diese nur anwenden, "
@@ -390,6 +395,8 @@ def extract_tops_from_text(
     client = OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
+        timeout=config.timeout_seconds,
+        max_retries=LLM_MAX_RETRIES,
     )
 
     user_prompt = f"""Extrahiere alle Tagesordnungspunkte aus diesem Einladungsdokument:
@@ -407,6 +414,7 @@ TOPs:"""
             ],
             max_tokens=2048,
             temperature=0.1,  # Very low temperature for consistent extraction
+            **config.reasoning_options,
         )
 
         raw_response = response.choices[0].message.content or ""
@@ -587,6 +595,8 @@ def extract_agenda_data_from_text(
     client = OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
+        timeout=config.timeout_seconds,
+        max_retries=LLM_MAX_RETRIES,
     )
 
     user_prompt = f"""Extrahiere Tagesordnungspunkte und Sitzungsmetadaten aus diesem Einladungsdokument:
@@ -604,6 +614,7 @@ JSON:"""
             ],
             max_tokens=3072,
             temperature=0.1,
+            **config.reasoning_options,
         )
 
         raw_response = response.choices[0].message.content or ""

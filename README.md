@@ -300,7 +300,8 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `WHISPER_LANGUAGE` | Sprache | `de` |
 | `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://ollama:11434/v1`, lokale Backend-Entwicklung: `http://localhost:11434/v1` |
 | `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3:8b` |
-| `LLM_TIMEOUT_SECONDS` | Timeout für Zusammenfassungen und LLM-Diagnose (nicht TOP-Erkennung im Transkript) | `120` |
+| `LLM_REASONING_EFFORT` | Reasoning für alle LLM-Aufgaben: leer = bisheriges Verhalten, `none` = aus, `low`/`medium`/`high`/`max` = an (modell-/serverabhängig) | leer |
+| `LLM_TIMEOUT_SECONDS` | Timeout für Zusammenfassungen, PDF-Extraktion und LLM-Diagnose (nicht TOP-Erkennung im Transkript) | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
 | `SPEAKER_EMBEDDING_ENABLED` | lokale Sprecher-Embeddings für prüfbare Matches erzeugen | `true` |
 | `SPEAKER_EMBEDDING_MODEL` | primäres Embedding-Modell | `pyannote/embedding` |
@@ -332,6 +333,27 @@ OpenAI-kompatible Endpunkte müssen explizit mit vollständiger `/v1`-URL
 konfiguriert werden.
 
 ### LLM-Nutzung für automatische TOP-Zuordnung
+
+`LLM_REASONING_EFFORT` wird als `reasoning_effort` an die OpenAI-kompatible
+Chat-API übergeben: bei PDF-Extraktion, TOP-Zuordnung und allen
+Zusammenfassungsaufrufen einschließlich Teilzusammenfassungen und Fallbacks.
+Ein leerer Wert lässt das API-Feld weg; die PDF-Extraktion behält dann ihre
+bisherige `/no_think`-Promptanweisung. Bei einem expliziten Wert steuert die API
+das Reasoning, ohne automatisch hinzugefügte `/no_think`-Anweisung.
+Ungültige Werte werden abgewiesen. Der Modellserver muss den gewählten Wert
+unterstützen; die Einstellung wird bei Fehlern nicht stillschweigend entfernt.
+Die unterstützten Werte sind in der [Ollama-API-Dokumentation](https://docs.ollama.com/api/openai-compatibility)
+beschrieben. Reasoning-Stufen können je nach Modell gleich behandelt werden.
+
+Für einen CPU-Test mit Qwen3.5 bietet sich `LLM_MODEL=qwen3.5:9b` mit
+`LLM_REASONING_EFFORT=none`, `AGENDA_DETECTION_USE_LLM=true` und großzügigen
+Timeouts an, beispielsweise jeweils `1800` Sekunden für
+`LLM_TIMEOUT_SECONDS` und `AGENDA_DETECTION_TIMEOUT_SECONDS`.
+Das sind Timeouts je Aufruf, keine Gesamtlaufzeitgrenze. Aktiviertes Reasoning
+kann zusätzliche Ausgabetokens benötigen; die vorhandenen `max_tokens`-Limits
+werden durch diese Variable nicht erhöht. `LLM_MAX_RETRIES=0` deaktiviert
+Wiederholungen bei Zusammenfassung und PDF-Extraktion. Die TOP-Zuordnung
+verwendet unabhängig davon keine SDK-Wiederholungen.
 
 `POST /api/agenda-detection` akzeptiert `use_llm`: `true` aktiviert das LLM,
 `false` erzwingt Heuristik, fehlend oder `null` übernimmt
