@@ -914,8 +914,10 @@ class TranscriptLine(BaseModel):
     line_id: Optional[str] = None
     speaker: str
     text: str
-    start: float  # Start time in seconds
-    end: float  # End time in seconds
+    # Seconds; sentence chunks may use character-based estimates, not measured
+    # speech boundaries. Decimal places do not indicate timestamp accuracy.
+    start: float
+    end: float
 
 
 class AudioMetadata(BaseModel):

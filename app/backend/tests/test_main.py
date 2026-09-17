@@ -621,6 +621,37 @@ def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
     assert data["strategy"] == "heuristic_transcript_fallback"
 
 
+@pytest.mark.parametrize("tops", [[], ["Haushalt", "Schulbau"]])
+def test_agenda_detection_endpoint_retains_short_tail_on_repeated_requests(tops):
+    text = (
+        "Dies ist ein ausreichend langer erster Satz mit Erläuterungen zur bisherigen Beratung. "
+        "Danach folgt ein weiterer längerer Satz zum gleichen Thema. TOP 2."
+    )
+    source = [{"line_id": "source-line", "speaker": "SPEAKER_04", "text": text,
+               "start": 10.0, "end": 20.0}]
+    # No lifespan is needed: this endpoint uses neither models nor persistence.
+    client = TestClient(main.app)
+    response = client.post("/api/agenda-detection", json={
+        "transcript": source, "tops": tops, "use_llm": False,
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    lines = data["transcript"]
+    assert len(lines) == 3
+    assert lines[-1]["text"] == "TOP 2."
+    assert " ".join(line["text"] for line in lines) == text
+    assert lines[0]["line_id"] == "source-line"
+    assert len(data["assignments"]) == len(lines)
+
+    repeated = client.post("/api/agenda-detection", json={
+        "transcript": lines, "tops": tops, "use_llm": False,
+    })
+    assert repeated.status_code == 200
+    assert repeated.json()["transcript"] == lines
+    assert repeated.json()["assignments"] == data["assignments"]
+
+
 def test_agenda_detection_endpoint_splits_mid_utterance_top_transition():
     with TestClient(main.app) as client:
         response = client.post(
