@@ -61,10 +61,9 @@ def test_segment_known_agenda_marks_uncertain_boundaries():
 
     result = segment_known_agenda(transcript, ["Begrüßung", "Haushalt", "Schulbau"])
 
-    assert len(result.segments) == 3
-    assert result.uncertain_count == 2
-    assert all(segment.uncertain for segment in result.segments[1:])
-    assert result.assignments.count(None) == 0
+    assert result.segments == []
+    assert result.uncertain_count == 0  # counts segments, not unassigned rows
+    assert result.assignments == [None] * len(transcript)
 
 
 def test_llm_invalid_boundaries_are_repaired(fake_openai_module):
@@ -333,4 +332,100 @@ def test_transcript_detection_keeps_number_with_or_without_llm(fake_openai_modul
     for use_llm in (False, True):
         result = detect_agenda_from_transcript(transcript, use_llm=use_llm)
         assert result.tops == [label]
-        assert not result.segments[0].uncertain
+        assert result.segments[0].uncertain is (not use_llm)
+
+
+@pytest.mark.parametrize('failure', [None, TimeoutError('offline'), 'not json'])
+def test_known_fallback_preserves_gaps_order_and_resumption(fake_openai_module, failure):
+    if failure is not None:
+        fake_openai_module.responses = [failure]
+    tops = ['1 Begrüßung', '2 Haushalt', '3 Schulbau', '4 Anfragen']
+    transcript = [TranscriptUtterance('MOD', text) for text in [
+        'Ich eröffne die Sitzung.',
+        'Den Haushalt behandeln wir später unter TOP 2.',
+        'Kommen wir zu TOP 3 Schulbau.',
+        'Kommen wir zu TOP 2 Haushalt.',
+        'Wortmeldung.',
+        'Kommen wir zu TOP 99.',
+        'Unbekanntes Thema.',
+        'Kommen wir wieder zu TOP 3 Schulbau.',
+    ]]
+    result = segment_known_agenda(transcript, tops, use_llm=failure is not None)
+    assert result.tops == tops
+    assert result.assignments == [None, None, 2, 1, 1, None, None, 2]
+    assert [s.top_index for s in result.segments] == [2, 1, 2]
+    assert result.segments[1].evidence_index == 3
+
+
+def test_unknown_agenda_fallback_rejects_previews_and_reuses_exact_labels():
+    result = detect_agenda_from_transcript([
+        TranscriptUtterance('MOD', text) for text in [
+            'Später kommen wir zu TOP 2 Haushalt.',
+            'Kommen wir zu TOP 3 Schulbau.',
+            'Kommen wir zu TOP 2 Haushalt.',
+            'Kommen wir wieder zu TOP 3 Schulbau.',
+        ]
+    ], use_llm=False)
+    assert result.tops == ['TOP 3 Schulbau', 'TOP 2 Haushalt']
+    assert result.assignments == [None, 0, 1, 0]
+    assert [s.top_index for s in result.segments] == [0, 1, 0]
+
+
+def test_llm_known_labels_are_resolved_by_identity_not_position(fake_openai_module):
+    fake_openai_module.content = '''{"tops":[
+        {"top_title":"Schulbau","start_index":1,"end_index":1,"confidence":0.9},
+        {"top_title":"Haushalt","start_index":2,"end_index":2,"confidence":0.9},
+        {"top_title":"Schulbau","start_index":4,"end_index":4,"confidence":0.9}
+    ]}'''
+    transcript = [TranscriptUtterance('MOD', text) for text in [
+        'Vorgespräch.', 'Kommen wir zu TOP 3 Schulbau.', 'Kommen wir zu TOP 2 Haushalt.',
+        'Pause.', 'Kommen wir wieder zu TOP 3 Schulbau.',
+    ]]
+    result = segment_known_agenda(transcript, ['1 Begrüßung', '2 Haushalt', '3 Schulbau'], use_llm=True)
+    assert result.assignments == [None, 2, 1, None, 2]
+    assert [s.top_index for s in result.segments] == [2, 1, 2]
+
+
+def test_llm_cannot_promote_preview_to_safe_boundary(fake_openai_module):
+    fake_openai_module.content = '''{"tops":[
+        {"top_title":"Haushalt","start_index":0,"end_index":1,"confidence":0.99}
+    ]}'''
+    result = segment_known_agenda([
+        TranscriptUtterance('MOD', 'Den Haushalt behandeln wir später unter TOP 2.'),
+        TranscriptUtterance('MOD', 'Anwesenheitsliste.'),
+    ], ['1 Begrüßung', '2 Haushalt'], use_llm=True)
+    assert len(result.segments) == 1
+    assert result.segments[0].top_index == 1
+    assert result.segments[0].uncertain
+    assert result.segments[0].confidence <= 0.5
+
+
+def test_llm_missing_known_boundary_is_not_interpolated(fake_openai_module):
+    fake_openai_module.content = '''{"tops":[
+        {"top_title":"Haushalt","confidence":0.99}
+    ]}'''
+    result = segment_known_agenda([TranscriptUtterance('A', 'Allgemeine Diskussion.')], ['Haushalt'], use_llm=True)
+    assert result.assignments == [None]
+    assert result.segments == []
+
+
+def test_known_llm_prompt_allows_omissions_and_revisits(fake_openai_module):
+    segment_known_agenda([TranscriptUtterance('A', 'Diskussion.')], ['Haushalt'], use_llm=True)
+    user_prompt = fake_openai_module.instances[0].calls[0]['messages'][1]['content']
+    assert 'genau einen Eintrag' not in user_prompt
+    assert 'TOPs dürfen fehlen oder mehrfach auftreten' in user_prompt
+
+
+@pytest.mark.parametrize('raw_segments', [
+    [{'top_title': 'TOP 99 Haushalt', 'start_index': 0, 'confidence': 0.99}],
+    [
+        {'top_title': 'Haushalt', 'start_index': 0, 'confidence': 0.99},
+        {'top_title': 'Schulbau', 'start_index': 0, 'confidence': 0.99},
+    ],
+])
+def test_known_llm_conflicting_identity_does_not_select_arbitrary_topic(fake_openai_module, raw_segments):
+    import json
+    fake_openai_module.content = json.dumps({'tops': raw_segments})
+    result = segment_known_agenda([TranscriptUtterance('A', 'Diskussion.')], ['2 Haushalt', '3 Schulbau'], use_llm=True)
+    assert result.assignments == [None]
+    assert result.segments == []

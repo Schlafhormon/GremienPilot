@@ -581,9 +581,9 @@ def test_assignment_suggestions_endpoint_returns_reviewable_segments():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["suggested_assignments"] == [0, 1]
-    assert data["segments"][1]["confidence"] >= 0.7
-    assert data["segments"][1]["reason"]
+    assert data["suggested_assignments"] == [None, 1]
+    assert data["segments"][0]["confidence"] >= 0.7
+    assert data["segments"][0]["reason"]
 
 
 def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
@@ -693,8 +693,8 @@ def test_agenda_detection_endpoint_splits_mid_utterance_top_transition():
         "Kommen wir zum Tagesordnungspunkt 3.",
         "Wir haben heute Herrn Krull zu verpflichten.",
     ]
-    assert data["assignments"] == [0, 1, 1, 2, 2]
-    assert data["segments"][2]["start_index"] == 3
+    assert data["assignments"] == [0, 0, 0, 2, 2]
+    assert data["segments"][1]["start_index"] == 3
 
 
 def test_llm_diagnostics_endpoint_reports_configured_model(fake_openai_module):
@@ -1475,13 +1475,13 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
             transcript=[
                 {
                     "speaker": "SPEAKER_00",
-                    "text": "TOP 1 Haushalt wird beraten.",
+                    "text": "Kommen wir zu TOP 1 Haushalt.",
                     "start": 0.0,
                     "end": 2.0,
                 },
                 {
                     "speaker": "SPEAKER_00",
-                    "text": "TOP 2 Fehler wird beraten.",
+                    "text": "Kommen wir zu TOP 2 Fehler.",
                     "start": 2.0,
                     "end": 4.0,
                 },
@@ -1783,4 +1783,20 @@ def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path,
     assert result['tops'] == tops
     assert not result['segments'][1]['uncertain']
     assert not result['segments'][2]['uncertain']
-    assert result['segments'][3]['uncertain']
+    assert result['assignments'][6:] == [None, None]
+    assert len(result['segments']) == 3
+
+
+def test_pipeline_known_fallback_keeps_absence_of_evidence_visible(monkeypatch):
+    transcript = [{'speaker': 'A', 'text': 'Allgemeine Diskussion.'}]
+    tops = ['Begrüßung', 'Haushalt']
+    actual_tops, assignments, info = main.fallback_agenda(transcript, tops)
+    assert actual_tops == tops
+    assert assignments == [None]
+    assert info['segments'] == []
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('unavailable')
+
+    monkeypatch.setattr(main, 'suggest_assignments', fail)
+    assert main.fallback_agenda(transcript, tops)[1] == [None]

@@ -302,3 +302,46 @@ it('shows an agenda fallback warning alongside reviewable segments', () => {
   render(<AssignmentStep {...defaultProps} agendaDetection={{ ...defaultProps.agendaDetection!, warnings: ['TOP-Erkennung: timeout. Heuristische Ersatzverarbeitung verwendet.'] }} />);
   expect(screen.getByRole('status')).toHaveTextContent('Heuristische Ersatzverarbeitung verwendet.');
 });
+
+it('shows missing evidence even when no uncertain segments exist', () => {
+  renderAssignmentStep({
+    agendaDetection: {
+      tops: defaultProps.tops,
+      assignments: [null, null],
+      segments: [],
+      uncertain_count: 0,
+      strategy: 'known_agenda_heuristic',
+    },
+  });
+  expect(screen.getByText('2 Zeilen ohne automatischen Zuordnungsvorschlag.')).toBeInTheDocument();
+  expect(screen.getByText(/Ohne Segmentnachweis: Begruessung, Haushalt/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Alle sicheren übernehmen' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
+});
+
+it('applies reordered and resumed safe segments while leaving gaps and uncertain rows open', () => {
+  const setAssignments = vi.fn();
+  const line = transcript[0]!;
+  const segment = defaultProps.agendaDetection!.segments[1]!;
+  renderAssignmentStep({
+    transcript: Array.from({ length: 5 }, () => ({ ...line })),
+    assignments: [null, null, null, null, null],
+    setAssignments,
+    agendaDetection: {
+      tops: defaultProps.tops,
+      assignments: [null, 1, 0, 1, 0],
+      segments: [
+        { ...segment, top_index: 1, start_index: 1, end_index: 1 },
+        { ...segment, top_index: 0, start_index: 2, end_index: 2 },
+        { ...segment, top_index: 1, start_index: 3, end_index: 3 },
+        { ...segment, top_index: 0, start_index: 4, end_index: 4, confidence: 0.5, uncertain: true },
+      ],
+      uncertain_count: 1,
+      strategy: 'known_agenda_heuristic',
+    },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Alle sicheren übernehmen' }));
+  expect(setAssignments).toHaveBeenCalledWith([null, 1, 0, 1, null]);
+  expect(screen.getByText('1 Zeilen ohne automatischen Zuordnungsvorschlag.')).toBeInTheDocument();
+  expect(screen.getByText('Unsicher prüfen')).toBeInTheDocument();
+});

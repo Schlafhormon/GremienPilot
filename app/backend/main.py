@@ -2872,15 +2872,13 @@ def fallback_agenda(
     try:
         result = suggest_assignments(transcript_utterances(transcript), tops)
         assignments = result.suggested_assignments
-        if not assignments or all(assignment is None for assignment in assignments):
-            assignments = [0 if tops else None for _ in transcript]
         return tops, assignments, {
             "strategy": f"{result.strategy}_pipeline_fallback",
             "segments": [segment.__dict__ for segment in result.segments],
             "uncertain_count": result.uncertain_count,
         }
     except Exception:
-        return tops, [0 if tops else None for _ in transcript], {
+        return tops, [None for _ in transcript], {
             "strategy": "pipeline_fallback_known_tops",
             "segments": [],
             "uncertain_count": len(tops),

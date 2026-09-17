@@ -3,34 +3,79 @@ Heuristic TOP assignment suggestions for meeting transcripts.
 
 The implementation intentionally stays deterministic and explainable. It uses
 moderator transition phrases and lightweight keyword overlap from the agenda
-titles, then marks weak or inferred boundaries as uncertain.
+titles. Missing evidence leaves gaps; weak title matches remain local and uncertain.
 """
 
 from __future__ import annotations
 
-import math
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
-from agenda_labels import parse_agenda_label, reference_targets
+from agenda_labels import agenda_references, parse_agenda_label, reference_targets
 
 
-TRANSITION_PATTERNS = [
-    r"\btagesordnungspunkt\b",
-    r"\btop\b",
-    r"\bpunkt\b",
-    r"\brufe\b.+\bauf\b",
-    r"\bkomme(?:n)?\s+wir\s+zu\b",
-    r"\bkommen\s+wir\s+zum\b",
-    r"\bals\s+nachstes\b",
-    r"\bnachste(?:n|r|s)?\b",
-    r"\bnaechste(?:n|r|s)?\b",
-    r"\bdann\s+haben\s+wir\b",
-    r"\bweiter\s+geht\b",
-    r"\babschliessend\b",
-]
+# Speech acts, not occurrences of "TOP", determine transitions. These patterns
+# express present performatives; tense/modality/polarity are checked separately.
+CALL = re.compile(
+    r"^(?:(?:so|gut|also|dann|nun|jetzt|abschliessend|als n(?:a|ae)chstes)[,:]?\s+)*"
+    r"(?:komme(?:n)?\s+(?:wir|ich)\s+(?:(?:jetzt|nun|wieder|zuruck)\s+)*(?:zu|zum|zur)\b"
+    r"|(?:ich\s+rufe|rufe\s+ich|wir\s+rufen|rufen\s+wir)\b.+\bauf\b"
+    r"|(?:ich\s+eroffne|wir\s+eroffnen)\b"
+    r"|weiter\s+geht\s+es\s+(?:mit|um)\b"
+    r"|(?:wir\s+)?(?:behandeln|beraten|besprechen)\s+(?:wir\s+)?(?:jetzt|nun)\b"
+    r"|(?:wir\s+)?(?:nehmen|setzen)\b.+\b(?:wieder\s+auf|fort)\b"
+    r"|n(?:a|ae)chste(?:r|s)?\s+(?:punkt|top|tagesordnungspunkt)\b)"
+)
+NON_CURRENT = re.compile(
+    r"\b(?:nicht(?![-\s]*(?:o|oe)ffentlich)|kein\w*|spater|spaeter|nachher|morgen|"
+    r"anschliessend|danach|zuvor|vorhin|bereits|damals|gestern|"
+    r"hatten|haben|wurde\w*|war|waren|warst|wuerde\w*|"
+    r"konnten|koennten|soll\w*|wollen|mochte\w*|moechte\w*|"
+    r"bevor|wenn|falls|sobald|"
+    r"erwahnt\w*|erwaehnt\w*|zitiert\w*)\b"
+)
+STOP = re.compile(
+    r"^(?:damit\s+)?(?:ich\s+schliesse|wir\s+(?:beenden|unterbrechen|vertagen))\b"
+    r"|\b(?:top|tagesordnungspunkt|beratung|sitzung)\b.*\b(?:abgeschlossen|beendet|unterbrochen)\b"
+    r"|^(?:top|tagesordnungspunkt)\b.*\b(?:wird\s+(?:vertagt|verschoben|abgesetzt)|ist\s+abgesetzt|entfallt|entfaellt)\b"
+)
+# A bare agenda heading is useful evidence, but a sentence about a TOP is not.
+HEADING_PREDICATE = re.compile(
+    r"\b(?:ist|sind|hat|enthalt|enthaelt|betrifft|kostet|zeigt|steht|geht|"
+    r"behandelt|bespricht|kommt|bleibt|fehlt|steigt|sinkt|braucht|sagt)\b"
+)
+
+
+def transition_kind(text: str) -> str:
+    """Classify a whole assignable row conservatively.
+
+    Mixed/negated/future/reported utterances are not positive boundary evidence.
+    We intentionally do not try to assign two clauses within a single row.
+    """
+    normalized = normalize_text(text)
+    blocked = bool(NON_CURRENT.search(normalized) or "?" in text or re.search(r'[„“"«»]', text))
+    if not blocked and STOP.search(normalized):
+        return "stop"
+    deferred = r"\b(?:werde\w*|wird|verschieb\w*|vertag\w*|abgesetzt|entfall\w*)\b"
+    if blocked or re.search(deferred, normalized):
+        # A row containing both an actual call and a separate preview cannot be
+        # split by the assignment model. Do not carry the old topic across it.
+        clauses = re.split(r"[.!?;]\s+(?!\d)", normalized)
+        if len(clauses) > 1 and any(
+            CALL.search(clause) and not NON_CURRENT.search(clause)
+            and not re.search(deferred, clause) for clause in clauses
+        ):
+            return "mixed"
+        return "mention"
+    if CALL.search(normalized):
+        return "call"
+    refs = agenda_references(text)
+    if refs and refs[0].start == 0 and not HEADING_PREDICATE.search(normalized):
+        return "heading"
+    return "none"
+
 
 STOPWORDS = {
     "aber",
@@ -94,18 +139,6 @@ class TranscriptUtterance:
 
 
 @dataclass(frozen=True)
-class BoundaryCandidate:
-    top_index: int
-    start_index: int
-    confidence: float
-    uncertain: bool
-    transition_type: str
-    reason: str
-    evidence_index: int | None = None
-    evidence_text: str | None = None
-
-
-@dataclass(frozen=True)
 class AssignmentSegment:
     top_index: int
     top_title: str
@@ -156,8 +189,7 @@ def extract_agenda_number(top: str, fallback: int | None = None) -> str | None:
 
 
 def has_transition_phrase(text: str) -> bool:
-    normalized = normalize_text(text)
-    return any(re.search(pattern, normalized) for pattern in TRANSITION_PATTERNS)
+    return transition_kind(text) in {"call", "heading"}
 
 
 def references_top_number(text: str, number: str | int | None) -> bool:
@@ -167,165 +199,65 @@ def references_top_number(text: str, number: str | int | None) -> bool:
     return has_reference and targets == {0}
 
 
-def speaker_transition_counts(transcript: list[TranscriptUtterance]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for line in transcript:
-        if has_transition_phrase(line.text):
-            counts[line.speaker] = counts.get(line.speaker, 0) + 1
-    return counts
-
-
-def likely_moderator_speakers(transcript: list[TranscriptUtterance]) -> set[str]:
-    counts = speaker_transition_counts(transcript)
-    if not counts:
-        return set()
-    maximum = max(counts.values())
-    return {speaker for speaker, count in counts.items() if count == maximum and count > 0}
-
-
 def keyword_overlap_score(line_tokens: set[str], top_tokens: set[str]) -> float:
     if not line_tokens or not top_tokens:
         return 0.0
     overlap = len(line_tokens & top_tokens)
     if overlap == 0:
         return 0.0
-    return min(1.0, overlap / math.sqrt(len(top_tokens)))
+    return overlap / len(top_tokens)
 
 
 def score_line_for_top(
     line: TranscriptUtterance,
     top: str,
     top_index: int,
-    moderator_speakers: set[str],
     tops: list[str] | None = None,
 ) -> tuple[float, str, str]:
-    top_number = extract_agenda_number(top)
-    line_tokens = token_set(line.text)
-    top_tokens = token_set(parse_agenda_label(top).title)
-    overlap = keyword_overlap_score(line_tokens, top_tokens)
-    transition = has_transition_phrase(line.text)
-    moderator_bonus = 0.08 if line.speaker in moderator_speakers else 0.0
-
-    has_reference, targets = reference_targets(line.text, tops if tops is not None else [top])
+    # Speaker frequency is not independent evidence: repeated mentions used to
+    # manufacture a moderator bonus and turn a weak hit into a certain one.
+    kind = transition_kind(line.text)
+    if kind in {"mention", "stop", "mixed"}:
+        return 0.0, "none", "Kein aktueller TOP-Aufruf."
+    agenda = tops if tops is not None else [top]
     target_index = top_index if tops is not None else 0
-    if has_reference and targets != {target_index}:
-        # An ambiguous or contradictory number must not become a strong keyword hit.
-        return 0.0, "none", "TOP-Verweis ist mehrdeutig oder passt nicht zum TOP."
-
+    label = parse_agenda_label(top)
+    top_tokens = token_set(label.title)
+    overlap = keyword_overlap_score(token_set(line.text), top_tokens)
+    has_reference, targets = reference_targets(line.text, agenda)
     if has_reference:
-        confidence = min(0.98, 0.82 + moderator_bonus + (0.08 if transition else 0.0))
-        return (
-            confidence,
-            "explicit",
-            f"Expliziter Verweis auf TOP {top_number}.",
-        )
-
-    if transition and overlap > 0:
-        confidence = min(0.9, 0.5 + (overlap * 0.25) + moderator_bonus)
-        return (
-            confidence,
-            "explicit",
-            "Moderations- oder Übergangsformulierung mit Begriffen aus dem TOP.",
-        )
-
+        # A heading must contain only its title (plus section metadata).
+        # Sentences beginning with a TOP reference remain mentions.
+        if kind == "heading":
+            tail = line.text[agenda_references(line.text)[0].end:]
+            tail = re.sub(r"\b(?:nicht[- ]*)?(?:ö|oe|o)ffentlich\w*\b", "", tail, flags=re.I)
+            if token_set(tail) - top_tokens:
+                return 0.0, "none", "Satz über einen TOP, kein eindeutiger Aufruf."
+        if targets != {target_index}:
+            # Unnumbered agendas can match a title, never an assumed list number.
+            # Unknown/ambiguous numbers in a numbered agenda cannot be rescued by keywords.
+            refs = agenda_references(line.text)
+            if (targets or label.number_key is not None or len(refs) != 1
+                    or refs[0].number is None or overlap < 0.7
+                    or reference_targets(line.text, [f"TOP {refs[0].number}"])[1] != {0}):
+                return 0.0, "none", "TOP-Verweis ist mehrdeutig oder passt nicht zum TOP."
+            if kind in {"call", "heading"}:
+                return 0.75, "explicit", "Aktueller Aufruf mit passendem Titel; TOP-Nummer ist nicht hinterlegt."
+        elif kind in {"call", "heading"}:
+            if overlap < 0.7 and any(
+                index != target_index
+                and keyword_overlap_score(token_set(line.text), token_set(parse_agenda_label(other).title)) >= 0.7
+                for index, other in enumerate(agenda)
+            ):
+                return 0.0, "none", "TOP-Nummer und Titel widersprechen sich."
+            return (0.9 if kind == "call" else 0.8), "explicit", f"Aktueller Aufruf von TOP {label.original_number}."
+        # A reference in running speech is not even a local title suggestion.
+        return 0.0, "none", "Bloße Erwähnung einer TOP-Nummer."
+    if kind == "call" and overlap >= 0.7:
+        return 0.8, "explicit", "Aktueller Aufruf mit passendem TOP-Titel."
     if overlap >= 0.7:
-        confidence = min(0.78, 0.45 + overlap * 0.25 + moderator_bonus)
-        return confidence, "keyword", "Starker Begriffsabgleich mit dem TOP-Titel."
-
-    if overlap >= 0.35:
-        confidence = min(0.62, 0.34 + overlap * 0.25 + moderator_bonus)
-        return confidence, "keyword", "Teilweiser Begriffsabgleich mit dem TOP-Titel."
-
+        return 0.5, "keyword", "Nur Titelähnlichkeit in dieser Zeile; kein belegter Segmentbeginn."
     return 0.0, "none", "Keine belastbare Evidenz."
-
-
-def find_boundary_for_top(
-    transcript: list[TranscriptUtterance],
-    tops: list[str],
-    top_index: int,
-    search_start: int,
-    moderator_speakers: set[str],
-) -> BoundaryCandidate | None:
-    remaining_after = len(tops) - top_index - 1
-    search_end = max(search_start, len(transcript) - remaining_after)
-    best: tuple[float, int, str, str] | None = None
-
-    for line_index in range(search_start, search_end):
-        confidence, transition_type, reason = score_line_for_top(
-            transcript[line_index],
-            tops[top_index],
-            top_index,
-            moderator_speakers,
-            tops,
-        )
-        if confidence <= 0:
-            continue
-
-        # Prefer earlier plausible boundaries. TOPs usually occur in agenda order,
-        # and late keyword mentions inside an old TOP are common in debate.
-        distance_penalty = min(0.18, (line_index - search_start) * 0.01)
-        ranked_confidence = confidence - distance_penalty
-        if best is None or ranked_confidence > best[0]:
-            best = (ranked_confidence, line_index, transition_type, reason)
-
-    if best is None:
-        return None
-
-    ranked_confidence, line_index, transition_type, reason = best
-    confidence = max(0.0, min(1.0, ranked_confidence))
-    return BoundaryCandidate(
-        top_index=top_index,
-        start_index=line_index,
-        confidence=round(confidence, 2),
-        uncertain=confidence < 0.55,
-        transition_type=transition_type,
-        reason=reason,
-        evidence_index=line_index,
-        evidence_text=transcript[line_index].text,
-    )
-
-
-def inferred_boundary(
-    top_index: int,
-    start_index: int,
-    reason: str,
-) -> BoundaryCandidate:
-    return BoundaryCandidate(
-        top_index=top_index,
-        start_index=start_index,
-        confidence=0.35,
-        uncertain=True,
-        transition_type="inferred",
-        reason=reason,
-    )
-
-
-def build_segments(
-    transcript: list[TranscriptUtterance],
-    tops: list[str],
-    boundaries: list[BoundaryCandidate],
-) -> list[AssignmentSegment]:
-    segments: list[AssignmentSegment] = []
-    for index, boundary in enumerate(boundaries):
-        next_start = boundaries[index + 1].start_index if index + 1 < len(boundaries) else len(transcript)
-        end_index = max(boundary.start_index, next_start - 1)
-        if boundary.start_index >= len(transcript):
-            continue
-        segments.append(
-            AssignmentSegment(
-                top_index=boundary.top_index,
-                top_title=tops[boundary.top_index],
-                start_index=boundary.start_index,
-                end_index=min(end_index, len(transcript) - 1),
-                confidence=boundary.confidence,
-                uncertain=boundary.uncertain,
-                transition_type=boundary.transition_type,
-                reason=boundary.reason,
-                evidence_index=boundary.evidence_index,
-                evidence_text=boundary.evidence_text,
-            )
-        )
-    return segments
 
 
 def assignments_from_segments(
@@ -342,69 +274,57 @@ def suggest_assignments(
     transcript: list[TranscriptUtterance],
     tops: list[str],
 ) -> AssignmentSuggestionResult:
-    valid_tops = [top.strip() for top in tops if top.strip()]
-    if not transcript or not valid_tops:
-        return AssignmentSuggestionResult(
-            suggested_assignments=[None] * len(transcript),
-            segments=[],
-            strategy="heuristic_moderator_keyword",
-            uncertain_count=0,
-        )
+    """Follow observed calls in transcript order, allowing gaps and revisits.
 
-    moderator_speakers = likely_moderator_speakers(transcript)
-    first_has_reference, first_targets = reference_targets(transcript[0].text, valid_tops)
-    first_ambiguous = first_has_reference and first_targets != {0}
-    boundaries: list[BoundaryCandidate] = [
-        BoundaryCandidate(
-            top_index=0,
-            start_index=0,
-            confidence=0.35 if first_ambiguous else 0.6,
-            uncertain=first_ambiguous,
-            transition_type="inferred",
-            reason=("Mehrdeutiger oder unbekannter TOP-Verweis am Transkriptanfang; Zuordnung prüfen."
-                    if first_ambiguous else "Erster TOP beginnt am Anfang des Transkripts."),
-            evidence_index=0,
-            evidence_text=transcript[0].text,
+    Confidence is an evidence score for the boundary, not a calibrated probability
+    for every line. Explicit calls persist until the next call/stop/conflict;
+    keyword-only suggestions cover one row and are always uncertain.
+    """
+    segments: list[AssignmentSegment] = []
+    active: int | None = None  # index into segments, not agenda order
+    for line_index, line in enumerate(transcript):
+        kind = transition_kind(line.text)
+        if kind == "stop":
+            has_ref, targets = reference_targets(line.text, tops)
+            if active is not None and has_ref and targets and segments[active].top_index not in targets:
+                segments[active] = replace(segments[active], end_index=line_index)
+            else:
+                active = None
+            continue
+        scores = sorted(
+            [(score_line_for_top(line, top, index, tops), index)
+             for index, top in enumerate(tops) if top.strip()],
+            key=lambda item: item[0][0], reverse=True,
         )
-    ]
-
-    search_start = 1
-    for top_index in range(1, len(valid_tops)):
-        candidate = find_boundary_for_top(
-            transcript,
-            valid_tops,
-            top_index,
-            search_start,
-            moderator_speakers,
-        )
-        if candidate is None:
-            remaining_topics = len(valid_tops) - top_index
-            remaining_lines = max(1, len(transcript) - search_start)
-            fallback_start = min(
-                len(transcript) - 1,
-                search_start + max(1, remaining_lines // (remaining_topics + 1)),
-            )
-            candidate = inferred_boundary(
-                top_index,
-                fallback_start,
-                "Keine klare Ankündigung gefunden; Grenze wurde aus der Reihenfolge der TOPs geschätzt.",
-            )
-        if candidate.start_index <= boundaries[-1].start_index:
-            candidate = inferred_boundary(
-                top_index,
-                min(len(transcript) - 1, boundaries[-1].start_index + 1),
-                "Grenze wurde angepasst, damit TOPs ohne Überlappung in Reihenfolge bleiben.",
-            )
-        boundaries.append(candidate)
-        search_start = min(len(transcript), candidate.start_index + 1)
-
-    segments = build_segments(transcript, valid_tops, boundaries)
-    assignments = assignments_from_segments(len(transcript), segments)
-    uncertain_count = sum(1 for segment in segments if segment.uncertain)
+        best, top_index = scores[0] if scores else ((0.0, "none", ""), -1)
+        confidence, transition_type, reason = best
+        ambiguous = len(scores) > 1 and scores[1][0][0] > 0 and confidence - scores[1][0][0] < 0.15
+        if kind in {"call", "heading", "mixed"}:
+            # An unresolvable call interrupts the previous topic too. It must not
+            # inherit its confident assignment or an agenda-order guess.
+            active = None
+        if confidence > 0 and not ambiguous:
+            if active is not None and segments[active].top_index == top_index:
+                segments[active] = replace(segments[active], end_index=line_index)
+                continue
+            active = None
+            segments.append(AssignmentSegment(
+                top_index=top_index, top_title=tops[top_index].strip(),
+                start_index=line_index, end_index=line_index,
+                confidence=confidence, uncertain=transition_type != "explicit",
+                transition_type=transition_type, reason=reason,
+                evidence_index=line_index, evidence_text=line.text,
+            ))
+            if transition_type == "explicit":
+                active = len(segments) - 1
+        elif ambiguous:
+            active = None
+        elif active is not None:
+            segments[active] = replace(segments[active], end_index=line_index)
 
     return AssignmentSuggestionResult(
-        suggested_assignments=assignments,
+        suggested_assignments=assignments_from_segments(len(transcript), segments),
         segments=segments,
         strategy="heuristic_moderator_keyword",
-        uncertain_count=uncertain_count,
+        uncertain_count=sum(segment.uncertain for segment in segments),
     )

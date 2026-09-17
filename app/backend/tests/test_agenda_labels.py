@@ -86,15 +86,14 @@ def test_only_exact_known_numbers_are_certain_even_with_keyword_overlap():
         'Beginn', 'TOP 2.2 Schulbau', 'Diskussion', 'TOP sieben Anfragen', 'Ende',
     ]]
     result = suggest_assignments(transcript, ['2 Haushalt', '2.2 Schulbau', '7 Anfragen'])
-    assert result.suggested_assignments == [0, 1, 1, 2, 2]
+    assert result.suggested_assignments == [None, 1, 1, 2, 2]
     assert all(not segment.uncertain for segment in result.segments[1:])
     for tops in [
         ['1 Beginn', '2 Schulbau', '2 Schulbau'],
-        ['1 Beginn', 'Schulbau', 'Anfragen'],
         ['1 Beginn', '2 Schulbau', '7 Anfragen'],
     ]:
         result = suggest_assignments(transcript, tops)
-        assert result.segments[1].uncertain
+        assert not any(s.start_index == 1 and not s.uncertain for s in result.segments)
 
 
 @pytest.mark.parametrize('text', ['2a Schulbau', '2/1 Schulbau', '2,1 Schulbau', '2 . 1 Schulbau', '2.1a Schulbau'])

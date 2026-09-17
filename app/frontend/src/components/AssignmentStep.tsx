@@ -492,6 +492,12 @@ export default function AssignmentStep({
   const canProceed = hasTops ? assignedCount > 0 : true;
   const selectedSegmentBounds =
     selectedLineIndex !== null ? getCurrentSegmentBounds(selectedLineIndex) : null;
+  const detectedUnassignedCount = agendaDetection
+    ? transcript.filter((_, index) => agendaDetection.assignments[index] == null).length
+    : 0;
+  const undetectedTops = agendaDetection
+    ? tops.filter((_, index) => !agendaDetection.segments.some((segment) => segment.top_index === index))
+    : [];
   const safeSuggestionCount =
     agendaDetection?.segments.filter((segment) => !segment.uncertain && segment.confidence >= 0.7)
       .length ?? 0;
@@ -580,7 +586,8 @@ export default function AssignmentStep({
           <div>
             <h3 className="font-medium text-gray-900">Automatisch erkannte Segmente</h3>
             <p className="text-sm text-gray-600">
-              Sichere Treffer sind bereits nutzbar; gelb markierte Bereiche sollten geprüft werden.
+              Aufrufe begründen Segmentanfänge. Gelbe Vorschläge und Zeilen ohne Zuordnung bitte prüfen;
+              auch innerhalb eines Segments können unangekündigte Themenwechsel vorkommen.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -616,6 +623,15 @@ export default function AssignmentStep({
             <div className="text-xs text-gray-500">
               {agendaDetection.segments.length} Segmente, {agendaDetection.uncertain_count} unsicher · Strategie: {agendaDetection.strategy}
             </div>
+            {(detectedUnassignedCount > 0 || undetectedTops.length > 0) && (
+              <div role="status" className="rounded border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900">
+                {detectedUnassignedCount > 0 && <p>{detectedUnassignedCount} Zeilen ohne automatischen Zuordnungsvorschlag.</p>}
+                {undetectedTops.length > 0 && <p>Ohne Segmentnachweis: {undetectedTops.join(', ')}. Das belegt keine Absetzung.</p>}
+              </div>
+            )}
+            <p className="text-xs text-gray-500">
+              Der Evidenzwert bewertet den Segmentanfang, nicht die Richtigkeit jeder Zeile.
+            </p>
             <div className="grid gap-2 md:grid-cols-2">
               {agendaDetection.segments.map((segment) => {
                 const color = getColor(segment.top_index);
@@ -637,8 +653,8 @@ export default function AssignmentStep({
                           </span>
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
-                          Zeilen {segment.start_index + 1}-{segment.end_index + 1} · Confidence{' '}
-                          {Math.round(segment.confidence * 100)}%
+                          Zeilen {segment.start_index + 1}-{segment.end_index + 1} · Evidenz am Anfang{' '}
+                          {Math.round(segment.confidence * 100)}/100
                         </div>
                         {segment.uncertain && (
                           <div className="mt-1 inline-flex items-center px-2 py-0.5 rounded bg-yellow-200 text-yellow-900 text-xs font-medium">
