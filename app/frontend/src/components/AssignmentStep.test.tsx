@@ -5,8 +5,8 @@ import type { AssignmentStepProps, TranscriptLine } from '../types';
 import AssignmentStep from './AssignmentStep';
 
 const transcript: TranscriptLine[] = [
-  { speaker: 'SPEAKER_00', text: 'Hallo zusammen', start: 0, end: 4 },
-  { speaker: 'SPEAKER_01', text: 'Wir beraten den Haushalt', start: 5, end: 9 },
+  { line_id: 'line-0', speaker: 'SPEAKER_00', text: 'Hallo zusammen', start: 0, end: 4 },
+  { line_id: 'line-1', speaker: 'SPEAKER_01', text: 'Wir beraten den Haushalt', start: 5, end: 9 },
 ];
 
 const defaultProps: AssignmentStepProps = {
@@ -132,7 +132,7 @@ describe('AssignmentStep', () => {
 
     expect(setTranscript).toHaveBeenCalledWith([
       { ...transcript[0]!, text: 'Hallo', start: 0, end: 2 },
-      { ...transcript[0]!, text: 'zusammen', start: 2, end: 4 },
+      { ...transcript[0]!, line_id: expect.any(String), text: 'zusammen', start: 2, end: 4 },
       transcript[1],
     ]);
     expect(setAssignments).toHaveBeenCalledWith([0, 0, 1]);
@@ -163,6 +163,7 @@ describe('AssignmentStep', () => {
     ]);
     expect(setSpeakerNames).toHaveBeenCalledWith({
       SPEAKER_00: 'Alice',
+      SPEAKER_01: 'Alice', // Keep historical speaker labels resolvable.
     });
   });
 

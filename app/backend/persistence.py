@@ -312,6 +312,8 @@ def init_db(db_path: Path | None = None) -> None:
                 ADD COLUMN export_metadata_json TEXT
                 """
             )
+        if "agenda_proposals_json" not in session_columns:
+            db.execute("ALTER TABLE sessions ADD COLUMN agenda_proposals_json TEXT")
         if "revision" not in session_columns:
             db.execute(
                 """
@@ -1461,14 +1463,15 @@ def save_session(
             """
             INSERT INTO sessions (
                 session_id, job_id, current_step, skipped_assignment, export_metadata_json,
-                revision, created_at, updated_at
+                agenda_proposals_json, revision, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 job_id = excluded.job_id,
                 current_step = excluded.current_step,
                 skipped_assignment = excluded.skipped_assignment,
                 export_metadata_json = excluded.export_metadata_json,
+                agenda_proposals_json = excluded.agenda_proposals_json,
                 revision = sessions.revision + ?,
                 updated_at = excluded.updated_at
             """,
@@ -1478,6 +1481,7 @@ def save_session(
                 state.get("current_step"),
                 1 if state.get("skipped_assignment") else 0,
                 _to_json(state.get("export_metadata") or {}),
+                _to_json(state.get("agenda_proposals")),
                 created_at,
                 now,
                 1 if bump_revision else 0,
@@ -1702,6 +1706,7 @@ def load_session(
         }
         for item in summary_states
     }
+    session["agenda_proposals"] = _from_json(session.pop("agenda_proposals_json", None))
     session["export_metadata"] = _from_json(session.get("export_metadata_json")) or {}
     session["transcript"] = [dict(line) for line in transcript] if transcript else None
     return session

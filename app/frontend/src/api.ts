@@ -599,6 +599,7 @@ export async function detectAgenda(
       model: request.model,
       system_prompt: request.systemPrompt,
       use_llm: request.useLlm,
+      preserve_transcript_structure: request.preserveTranscriptStructure,
     }),
   });
 

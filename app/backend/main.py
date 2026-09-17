@@ -984,6 +984,7 @@ class SummaryJobResponse(BaseModel):
 
 
 class SessionSaveRequest(BaseModel):
+    agenda_proposals: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
     revision: Optional[int] = None
     job_id: Optional[str] = None
@@ -1001,6 +1002,7 @@ class SessionSaveRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    agenda_proposals: Optional[Dict[str, Any]] = None
     session_id: str
     revision: int = 1
     created_at: Optional[float] = None
@@ -1243,6 +1245,7 @@ class AssignmentSuggestionsRequest(BaseModel):
 
 
 class AgendaDetectionRequest(BaseModel):
+    preserve_transcript_structure: StrictBool = False
     use_llm: Optional[StrictBool] = None
     transcript: List[TranscriptLine]
     tops: List[str] = Field(default_factory=list)
@@ -1434,6 +1437,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         tops=session.get("tops") or [],
         top_ids=session.get("top_ids") or [],
         assignments=session.get("assignments") or [],
+        agenda_proposals=session_agenda_proposals(session, latest_pipeline),
         speaker_names=session.get("speaker_names") or {},
         summaries=session.get("summaries") or {},
         summary_reviews=session.get("summary_reviews") or {},
@@ -2133,29 +2137,40 @@ def build_pipeline_status_response(job: dict[str, Any]) -> PipelineStatusRespons
     )
 
 
+def session_agenda_proposals(
+    session: dict[str, Any], latest_pipeline: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if session.get("agenda_proposals") is not None:
+        return session["agenda_proposals"]
+    # Old pipeline artifacts have no immutable input snapshot. Preserve warnings,
+    # but never rebind their positional indices to today's edited session.
+    info = _pipeline_refs(latest_pipeline).get("agenda") if latest_pipeline else None
+    if not isinstance(info, dict):
+        return None
+    return {
+        "version": 1,
+        "source": None,
+        "result": {
+            "tops": [], "transcript": [], "assignments": [],
+            "segments": info.get("segments") or [],
+            "uncertain_count": info.get("uncertain_count") or 0,
+            "strategy": info.get("strategy") or "legacy",
+            "warnings": info.get("warnings") or [],
+            "llm": info.get("llm"),
+        },
+    }
+
+
 def build_pipeline_agenda_detection_response(
     agenda_info: Any,
     session: SessionResponse,
 ) -> AgendaDetectionResponse | None:
-    if not isinstance(agenda_info, dict):
+    # The session owns the immutable result, including its original assignments.
+    # Never combine historical segments with current manual assignments.
+    proposals = session.agenda_proposals
+    if not proposals:
         return None
-
-    segments: list[AssignmentSuggestionSegmentResponse] = []
-    for raw_segment in agenda_info.get("segments") or []:
-        if not isinstance(raw_segment, dict):
-            continue
-        segments.append(AssignmentSuggestionSegmentResponse(**raw_segment))
-
-    return AgendaDetectionResponse(
-        tops=list(session.tops or []),
-        transcript=list(session.transcript or []),
-        assignments=list(session.assignments or []),
-        segments=segments,
-        llm=agenda_info.get("llm"),
-        warnings=list(agenda_info.get("warnings") or []),
-        strategy=str(agenda_info.get("strategy") or "unknown"),
-        uncertain_count=int(agenda_info.get("uncertain_count") or 0),
-    )
+    return AgendaDetectionResponse(**proposals["result"])
 
 
 def line_to_dict(line: Any) -> dict[str, Any]:
@@ -2801,6 +2816,7 @@ def save_pipeline_session(
     summaries: dict[int, str] | None = None,
     summary_reviews: dict[int, Any] | None = None,
     summary_states: dict[int, Any] | None = None,
+    agenda_proposals: dict[str, Any] | None = None,
     export_metadata: dict[str, Any] | None = None,
     current_step: int | None = None,
     skipped_assignment: bool | None = None,
@@ -2835,6 +2851,8 @@ def save_pipeline_session(
         state["summary_reviews"] = summary_reviews
     if summary_states is not None:
         state["summary_states"] = summary_states
+    if agenda_proposals is not None:
+        state["agenda_proposals"] = agenda_proposals
     if export_metadata is not None:
         current_metadata = dict(state.get("export_metadata") or {})
         for key, value in export_metadata.items():
@@ -3220,6 +3238,15 @@ def run_pipeline_job(
             options=options,
         )
         top_ids = [str(uuid.uuid4()) for _ in tops]
+        # Freeze the exact detector input and result before manual editing begins.
+        agenda_proposals = {
+            "version": 1,
+            "source": {"tops": tops, "top_ids": top_ids, "transcript": transcript},
+            "result": {
+                **agenda_info, "tops": tops, "transcript": transcript,
+                "assignments": assignments,
+            },
+        }
         save_pipeline_session(
             session_id,
             job_id=transcription_job_id,
@@ -3228,6 +3255,7 @@ def run_pipeline_job(
             top_ids=top_ids,
             assignments=assignments,
             export_metadata=pdf_metadata,
+            agenda_proposals=agenda_proposals,
             skipped_assignment=not bool(tops),
             current_step=2,
         )
@@ -3663,7 +3691,12 @@ async def create_or_save_session(request: SessionSaveRequest):
     session_id = request.session_id or str(uuid.uuid4())
     state = model_to_dict(request)
     state["session_id"] = session_id
-    state = reconcile_session_summaries(load_session(session_id), state)
+    existing = load_session(session_id)
+    if "agenda_proposals" not in request.model_fields_set and existing:
+        state["agenda_proposals"] = session_agenda_proposals(
+            existing, load_latest_pipeline_job_for_session(session_id)
+        )
+    state = reconcile_session_summaries(existing, state)
     session = save_session_or_conflict(
         session_id,
         state,
@@ -3677,7 +3710,12 @@ async def save_existing_session(session_id: str, request: SessionSaveRequest):
     """Save a persisted editing session under a known session ID."""
     state = model_to_dict(request)
     state["session_id"] = session_id
-    state = reconcile_session_summaries(load_session(session_id), state)
+    existing = load_session(session_id)
+    if "agenda_proposals" not in request.model_fields_set and existing:
+        state["agenda_proposals"] = session_agenda_proposals(
+            existing, load_latest_pipeline_job_for_session(session_id)
+        )
+    state = reconcile_session_summaries(existing, state)
     session = save_session_or_conflict(session_id, state, request.revision)
     return build_session_response(session)
 
@@ -4635,8 +4673,10 @@ async def agenda_detection_endpoint(request: AgendaDetectionRequest):
     if not request.transcript:
         raise HTTPException(status_code=400, detail="Kein Transkript vorhanden")
 
-    split_transcript = split_transcript_for_agenda_detection(
-        [line_to_dict(line) for line in request.transcript]
+    input_transcript = [line_to_dict(line) for line in request.transcript]
+    split_transcript = (
+        input_transcript if request.preserve_transcript_structure
+        else split_transcript_for_agenda_detection(input_transcript)
     )
     transcript = transcript_utterances(split_transcript)
     valid_tops = [top.strip() for top in request.tops if top.strip()]

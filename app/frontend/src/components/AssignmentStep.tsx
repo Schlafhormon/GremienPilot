@@ -40,6 +40,9 @@ export default function AssignmentStep({
   setAssignments,
   agendaDetection,
   agendaDetectionError,
+  agendaDetectionStale = false,
+  isDetectingAgenda = false,
+  onDetectAgenda,
   onTranscriptStructureChange,
   audioUrl,
   speakerNames,
@@ -147,6 +150,7 @@ export default function AssignmentStep({
   };
 
   const applySuggestionSegment = (segment: AssignmentSuggestionSegment) => {
+    if (agendaDetectionStale) return;
     const newAssignments = [...assignments];
     for (let i = segment.start_index; i <= segment.end_index; i++) {
       if (i >= 0 && i < newAssignments.length) {
@@ -159,7 +163,7 @@ export default function AssignmentStep({
   };
 
   const applyAllSafeSuggestions = () => {
-    if (!agendaDetection) {
+    if (!agendaDetection || agendaDetectionStale) {
       return;
     }
 
@@ -177,7 +181,7 @@ export default function AssignmentStep({
   };
 
   const applyAllSuggestions = () => {
-    if (!agendaDetection) {
+    if (!agendaDetection || agendaDetectionStale) {
       return;
     }
     setAssignments(agendaDetection.assignments);
@@ -510,16 +514,16 @@ export default function AssignmentStep({
     agendaDetection?.segments.filter((segment) => segment.uncertain).length ?? 0;
   const topReviewStatus = !hasTops
     ? 'Nicht erforderlich'
-    : uncertainSegmentCount > 0 || unassignedCount > 0
+    : !agendaDetection || agendaDetectionStale || agendaDetection.uncertain_count > 0 || uncertainSegmentCount > 0 || unassignedCount > 0
       ? 'Prüfen'
       : 'Bereit';
   const speakerReviewStatus = openSpeakerCount > 0 ? 'Prüfen' : 'Bereit';
   const protocolDraftStatus = hasSummaries ? 'Vorbereitet' : 'Wird nach Prüfung erstellt';
 
   const getDetectionSegmentForLine = (lineIndex: number) =>
-    agendaDetection?.segments.find(
+    !agendaDetectionStale ? agendaDetection?.segments.find(
       (segment) => lineIndex >= segment.start_index && lineIndex <= segment.end_index
-    ) ?? null;
+    ) ?? null : null;
 
   return (
     <div className="space-y-6">
@@ -588,13 +592,20 @@ export default function AssignmentStep({
             <p className="text-sm text-gray-600">
               Aufrufe begründen Segmentanfänge. Gelbe Vorschläge und Zeilen ohne Zuordnung bitte prüfen;
               auch innerhalb eines Segments können unangekündigte Themenwechsel vorkommen.
+              Neuberechnen ändert keine Zuordnungen. Übernehmen ersetzt manuelle Zuordnungen im gewählten Bereich.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            {onDetectAgenda && <button
+              type="button"
+              onClick={onDetectAgenda}
+              disabled={isDetectingAgenda || !hasTops || !transcript.length}
+              className="px-4 py-2 border rounded-lg disabled:text-gray-400"
+            >{isDetectingAgenda ? 'TOP-Erkennung läuft …' : 'TOP-Erkennung erneut berechnen'}</button>}
             <button
               type="button"
               onClick={applyAllSafeSuggestions}
-              disabled={!safeSuggestionCount}
+              disabled={agendaDetectionStale || !safeSuggestionCount}
               className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-400"
             >
               Alle sicheren übernehmen
@@ -602,7 +613,7 @@ export default function AssignmentStep({
             <button
               type="button"
               onClick={applyAllSuggestions}
-              disabled={!agendaDetection?.segments.length}
+              disabled={agendaDetectionStale || !agendaDetection?.segments.length}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400"
             >
               Alle übernehmen
@@ -610,6 +621,13 @@ export default function AssignmentStep({
           </div>
         </div>
 
+        {agendaDetectionStale && (
+          <p role="status" className="mb-3 rounded border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900">
+            Vorschläge veraltet oder ohne überprüfbaren Quellenstand. Übernehmen ist gesperrt.
+            Bitte TOP-Erkennung erneut berechnen. Frühere Unsicherheiten bleiben unten sichtbar;
+            die alten Zeilenangaben beziehen sich auf den damaligen Stand.
+          </p>
+        )}
         {agendaDetection?.warnings?.map((warning) => (
           <p key={warning} role="status" className="text-amber-700">{warning}</p>
         ))}
@@ -623,7 +641,7 @@ export default function AssignmentStep({
             <div className="text-xs text-gray-500">
               {agendaDetection.segments.length} Segmente, {agendaDetection.uncertain_count} unsicher · Strategie: {agendaDetection.strategy}
             </div>
-            {(detectedUnassignedCount > 0 || undetectedTops.length > 0) && (
+            {!agendaDetectionStale && (detectedUnassignedCount > 0 || undetectedTops.length > 0) && (
               <div role="status" className="rounded border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900">
                 {detectedUnassignedCount > 0 && <p>{detectedUnassignedCount} Zeilen ohne automatischen Zuordnungsvorschlag.</p>}
                 {undetectedTops.length > 0 && <p>Ohne Segmentnachweis: {undetectedTops.join(', ')}. Das belegt keine Absetzung.</p>}
@@ -664,6 +682,7 @@ export default function AssignmentStep({
                       </div>
                       <button
                         type="button"
+                        disabled={agendaDetectionStale}
                         onClick={() => applySuggestionSegment(segment)}
                         className="shrink-0 px-3 py-1.5 text-xs bg-gray-900 text-white rounded hover:bg-gray-700"
                       >
@@ -683,7 +702,8 @@ export default function AssignmentStep({
           </div>
         ) : (
           <div className="text-sm text-gray-600">
-            Keine automatischen Segmente verfügbar. Nutzen Sie bei Bedarf die manuelle Zeilenzuordnung.
+            Keine überprüfbaren automatischen Vorschläge verfügbar. Unsicherheiten sind unbekannt.
+            Berechnen Sie die Erkennung erneut oder prüfen Sie die Zuordnung manuell.
           </div>
         )}
       </div>

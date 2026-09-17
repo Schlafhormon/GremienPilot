@@ -140,6 +140,7 @@ export interface PipelineResultResponse {
 }
 
 export interface SessionSavePayload {
+  agenda_proposals?: AgendaProposals | null;
   session_id?: string | null;
   revision?: number | null;
   job_id?: string | null;
@@ -323,6 +324,7 @@ export interface AssignmentSuggestionsResponse {
 }
 
 export interface AgendaDetectionRequest {
+  preserveTranscriptStructure?: boolean;
   useLlm?: boolean | null;
   tops?: string[];
   transcript: TranscriptLine[];
@@ -350,6 +352,13 @@ export interface AgendaDetectionResponse {
   segments: AssignmentSuggestionSegment[];
   strategy: string;
   uncertain_count: number;
+}
+
+// Positional results are usable only against this exact, identity-bound input.
+export interface AgendaProposals {
+  version: 1;
+  source: { tops: string[]; top_ids: string[]; transcript: TranscriptLine[] } | null;
+  result: AgendaDetectionResponse;
 }
 
 export interface ExportMetadata {
@@ -436,6 +445,9 @@ export interface AssignmentStepProps {
   setAssignments: (assignments: (number | null)[]) => void;
   agendaDetection?: AgendaDetectionResponse | null;
   agendaDetectionError?: string | null;
+  agendaDetectionStale?: boolean;
+  isDetectingAgenda?: boolean;
+  onDetectAgenda?: () => void;
   onTranscriptStructureChange?: () => void;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;

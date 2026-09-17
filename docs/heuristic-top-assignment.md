@@ -80,3 +80,46 @@ Kontrasttests prüfen echte Aufrufe gegen Vorschauen, Negationen, Rückverweise,
 Zitate, Bedingungen und Fragen. Weitere Tests prüfen lokale Stichwortevidenz,
 lange Abstände, Lücken, andere Reihenfolgen, Wiederaufnahmen, Konflikte sowie
 LLM-Ausfälle, API/Pipeline und das Übernehmen von Vorschlägen in der Review-Anzeige.
+
+## Lebenszyklus im Zuordnungsschritt
+
+Automatische Vorschläge werden als `agenda_proposals` zusammen mit der Sitzung
+und im lokalen Entwurf gespeichert. Der versionierte Datensatz enthält den
+unveränderten Erkennungsstand (`result`, einschließlich Unsicherheiten,
+Evidenz und Warnungen) sowie dessen Eingaben (`source`): geordnete TOP-Titel und
+stabile TOP-IDs sowie Transkriptzeilen mit stabilen IDs, Sprecher, Text und Zeiten.
+Die automatischen Zuordnungen bleiben von den aktuell bearbeiteten Zuordnungen
+getrennt. Speichern übernimmt sie nicht erneut.
+
+Der Editor erlaubt die Übernahme nur bei identischen Eingaben und gültigen
+Indexbereichen. Einfügen, Löschen, Zusammenlegen und Umbenennen von TOPs sowie
+Änderungen an Transkripttext, Zeilenstruktur, Sprechern oder Zeiten sperren die
+bisherigen Vorschläge. Reine Änderungen der Sprecher-Anzeigenamen oder manuelle
+Zeilenzuordnungen lassen die Vorschläge gültig. Ein exaktes Zurücksetzen der
+Eingaben einschließlich ihrer IDs macht den ursprünglichen Stand wieder gültig.
+Alte Evidenz und Unsicherheiten bleiben bei einer Sperre sichtbar; die früheren
+Zeilennummern werden nicht mehr zur Markierung aktueller Transkriptzeilen genutzt.
+
+„TOP-Erkennung erneut berechnen“ startet genau einen expliziten Aufruf für die
+vorhandenen TOPs. Die serverseitige LLM-Konfiguration und das ausgewählte Modell
+gelten weiterhin. Beim Öffnen, Bearbeiten oder Speichern wird keine Erkennung
+angestoßen. Der Aufruf nutzt `preserve_transcript_structure: true`: Bereits
+bearbeitete Zeilen werden nicht erneut geteilt. Übergänge innerhalb einer solchen
+Zeile können deshalb nur auf Zeilenebene vorgeschlagen werden. Aufteilen ist
+weiterhin manuell möglich; danach kann erneut berechnet werden.
+
+Neue Ergebnisse ersetzen nur die Vorschläge, niemals aktuelle Zuordnungen.
+Zwischenzeitliche Änderungen der Eingaben oder ein Sitzungswechsel verwerfen
+verspätete Ergebnisse. Manuelle Zuordnungsänderungen während der Erkennung bleiben
+erhalten. Anschließend ist die bewusste Übernahme einzelner, sicherer oder aller
+gültigen Vorschläge weiterhin möglich und ersetzt die entsprechenden manuellen
+Zuordnungen. Fehler lassen den bisherigen Vorschlagsstand erhalten.
+
+Die SQLite-Migration ergänzt `sessions.agenda_proposals_json` ohne bestehende
+Daten zu verändern. Vorschläge werden in derselben Transaktion und unter derselben
+Revisionsprüfung wie die übrigen Sitzungsdaten gespeichert. Ältere Clients, die
+das Feld auslassen, behalten den vorhandenen Vorschlagsstand. Alte Pipeline-Artefakte
+ohne unveränderlichen Quellenstand werden nur als historische, gesperrte Evidenz
+angezeigt (`source: null`); ihre Indizes werden nie an die inzwischen bearbeitete
+Sitzung gebunden. Ohne vorhandene Evidenz weist die Oberfläche auf unbekannte
+Unsicherheiten hin. Eine explizite Neuberechnung ersetzt diesen historischen Stand.

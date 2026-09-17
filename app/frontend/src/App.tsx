@@ -21,12 +21,14 @@ import {
   cancelSummaryJob,
   acceptExistingSummary,
   checkBackendHealth,
+  detectAgenda,
   saveSession,
   loadSession,
   SessionConflictError,
 } from "./api";
 import type {
   AgendaDetectionResponse,
+  AgendaProposals,
   ExportMetadata,
   PipelineJob,
   PipelineResultResponse,
@@ -38,6 +40,8 @@ import type {
   SummaryJob,
   TranscriptLine,
 } from "./types";
+
+import { agendaSource, proposalsAreValid } from "./agendaProposals";
 
 // LocalStorage key for LLM settings
 const LLM_SETTINGS_KEY = "llm-settings";
@@ -356,7 +360,17 @@ export default function App() {
   const [topIds, setTopIds] = useState<string[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [assignments, setAssignments] = useState<(number | null)[]>([]);
-  const [agendaDetection, setAgendaDetection] = useState<AgendaDetectionResponse | null>(null);
+  const [agendaProposals, setAgendaProposals] = useState<AgendaProposals | null>(null);
+  const agendaDetection = agendaProposals?.result ?? null;
+  const agendaDetectionStale = Boolean(agendaProposals) &&
+    !proposalsAreValid(agendaProposals, tops, topIds, transcript);
+  const [isDetectingAgenda, setIsDetectingAgenda] = useState(false);
+  const agendaRequestRef = useRef(0);
+  const agendaInputEpochRef = useRef(0);
+  const agendaInputKey = JSON.stringify(agendaSource(tops, topIds, transcript));
+  useEffect(() => {
+    agendaInputEpochRef.current += 1;
+  }, [agendaInputKey, route.view, route.sessionId]);
   const [agendaDetectionError, setAgendaDetectionError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
@@ -496,6 +510,7 @@ export default function App() {
       top_ids: overrides.top_ids ?? topIds,
       transcript: overrides.transcript ?? transcript,
       assignments: overrides.assignments ?? assignments,
+      agenda_proposals: overrides.agenda_proposals === undefined ? agendaProposals : overrides.agenda_proposals,
       speaker_names: overrides.speaker_names ?? speakerNames,
       summaries: overrides.summaries ?? summaries,
       summary_reviews: overrides.summary_reviews ?? summaryReviews,
@@ -504,6 +519,7 @@ export default function App() {
       skipped_assignment: overrides.skipped_assignment ?? skippedAssignment,
     }),
     [
+      agendaProposals,
       assignments,
       currentStep,
       exportMetadata,
@@ -533,7 +549,7 @@ export default function App() {
     saveConflictRef.current = false;
     setJobId(session.job_id ?? null);
     setCurrentStep(session.current_step ?? 1);
-    setTops(session.tops?.length ? session.tops : EMPTY_TOPS);
+    setTops(session.tops ?? EMPTY_TOPS);
     setTopIds(
       session.top_ids?.length === (session.tops?.length ?? 0)
         ? session.top_ids
@@ -543,7 +559,9 @@ export default function App() {
     );
     setTranscript(session.transcript ?? []);
     setAssignments(session.assignments ?? []);
-    setAgendaDetection(null);
+    setAgendaProposals(session.agenda_proposals ?? null);
+    agendaRequestRef.current += 1;
+    setIsDetectingAgenda(false);
     setAgendaDetectionError(null);
     setSpeakerNames(session.speaker_names ?? {});
     setSkipAgendaDetection(Boolean(session.skipped_assignment));
@@ -616,7 +634,8 @@ export default function App() {
     setPipelineJob(completedPipeline);
     setPipelineId(null);
     setJobId(sessionWithSuggestedSpeakers.job_id ?? result.job?.job_id ?? completedPipeline.transcription_job_id ?? null);
-    setAgendaDetection(agendaDetectionResult);
+    setAgendaProposals(sessionWithSuggestedSpeakers.agenda_proposals ??
+      (agendaDetectionResult ? { version: 1, source: null, result: agendaDetectionResult } : null));
     setAgendaDetectionError(null);
     setIsProcessing(false);
     setProcessingProgress(100);
@@ -642,6 +661,8 @@ export default function App() {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
+    agendaRequestRef.current += 1;
+    setIsDetectingAgenda(false);
     setSessionId(null);
     activeSessionIdRef.current = null;
     setSessionRevision(null);
@@ -660,7 +681,7 @@ export default function App() {
     setTopIds([]);
     setTranscript([]);
     setAssignments([]);
-    setAgendaDetection(null);
+    setAgendaProposals(null);
     setAgendaDetectionError(null);
     setSummaries({});
     setSummaryReviews({});
@@ -791,7 +812,8 @@ export default function App() {
           const nextRevision = savedSession.revision ?? sessionRevisionRef.current;
           sessionRevisionRef.current = nextRevision;
           setSessionRevision(nextRevision);
-          setTopIds(savedSession.top_ids ?? topIds);
+          setTopIds((current) => JSON.stringify(current) === JSON.stringify(payload.top_ids)
+            ? savedSession.top_ids ?? current : current);
           setSummaries(normalizeSummaries(savedSession.summaries));
           setSummaryReviews(normalizeSummaryReviews(savedSession.summary_reviews));
           setSummaryStates(normalizeSummaryStates(savedSession.summary_states));
@@ -1188,7 +1210,7 @@ export default function App() {
     setCurrentStep(1);
     setTranscript([]);
     setAssignments([]);
-    setAgendaDetection(null);
+    setAgendaProposals(null);
     setAgendaDetectionError(null);
     setProcessingError(null);
     setAudioUrl(null);
@@ -1290,8 +1312,38 @@ export default function App() {
     setPipelineNotice(null);
   };
 
+  const handleDetectAgenda = async () => {
+    const requestId = ++agendaRequestRef.current;
+    const inputEpoch = agendaInputEpochRef.current;
+    const source = agendaSource(tops, topIds, transcript);
+    setIsDetectingAgenda(true);
+    setAgendaDetectionError(null);
+    try {
+      const result = await detectAgenda({
+        tops, transcript, model: llmSettings.model,
+        preserveTranscriptStructure: true,
+      });
+      if (requestId !== agendaRequestRef.current) return;
+      if (inputEpoch !== agendaInputEpochRef.current) {
+        setAgendaDetectionError("TOPs oder Transkript wurden während der Erkennung geändert. Bitte erneut berechnen");
+        return;
+      }
+      const proposals: AgendaProposals = { version: 1, source, result };
+      if (!proposalsAreValid(proposals, tops, topIds, transcript)) {
+        throw new Error("Das Ergebnis passt nicht zum aktuellen Transkript oder zur Tagesordnung");
+      }
+      // Detection only offers evidence. Even edits made while awaiting it remain untouched.
+      setAgendaProposals(proposals);
+    } catch (error) {
+      if (requestId === agendaRequestRef.current) {
+        setAgendaDetectionError(error instanceof Error ? error.message : "Erkennung fehlgeschlagen");
+      }
+    } finally {
+      if (requestId === agendaRequestRef.current) setIsDetectingAgenda(false);
+    }
+  };
+
   const handleTranscriptStructureChange = () => {
-    setAgendaDetection(null);
     setAgendaDetectionError(null);
     setDirectProtocolAvailable(false);
     setPipelineNotice(null);
@@ -1530,6 +1582,9 @@ export default function App() {
           setAssignments={setAssignments}
           agendaDetection={agendaDetection}
           agendaDetectionError={agendaDetectionError}
+          agendaDetectionStale={agendaDetectionStale}
+          isDetectingAgenda={isDetectingAgenda}
+          onDetectAgenda={handleDetectAgenda}
           onTranscriptStructureChange={handleTranscriptStructureChange}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}

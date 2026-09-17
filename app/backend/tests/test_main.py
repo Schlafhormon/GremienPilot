@@ -120,6 +120,13 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
     assert f"TOP: {expected_top}" in calls[-1]["messages"][1]["content"]
     assert result["session"]["tops"] == [expected_top]
     assert result["session"]["assignments"] == [0]
+    proposals = result["session"]["agenda_proposals"]
+    assert proposals["source"] == {
+        key: result["session"][key] for key in ("tops", "top_ids", "transcript")
+    }
+    assert proposals["result"]["assignments"] == [0]
+    persisted = persistence.load_session(result["session"]["session_id"])
+    assert persisted["agenda_proposals"] == proposals
     assert result["agenda_detection"]["strategy"] == (
         "heuristic_transcript_llm" if agenda_source == "transcript" else "known_agenda_heuristic_llm"
     )
@@ -1461,8 +1468,10 @@ def test_pipeline_result_exposes_agenda_segments_and_uncertainty(
 
     assert response.status_code == 200
     agenda_detection = response.json()["agenda_detection"]
-    assert agenda_detection["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
-    assert agenda_detection["assignments"] == [0, 1]
+    # Legacy indices cannot be rebound to the current editing state.
+    assert response.json()["session"]["agenda_proposals"]["source"] is None
+    assert agenda_detection["tops"] == []
+    assert agenda_detection["assignments"] == []
     assert agenda_detection["uncertain_count"] == 1
     assert agenda_detection["segments"][1]["uncertain"] is True
 
