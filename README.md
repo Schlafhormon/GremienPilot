@@ -74,9 +74,6 @@ automatisierten Ablauf.
 6. Zusammenfassungen je TOP prüfen. Änderungen an Sprechernamen und TOP-Titeln
    werden ohne LLM übernommen. Inhaltlich betroffene TOPs können bestätigt,
    manuell bearbeitet oder selektiv neu generiert werden.
-   Im Schritt „Exportieren“ können mehrere TOPs gemeinsam ausgewählt werden.
-   Der Auftrag zeigt Gesamtfortschritt und aktuellen TOP; fertige Ergebnisse und
-   Fehler einzelner TOPs erscheinen automatisch, ohne die Seite neu zu laden.
 7. Protokoll mit Sitzungsmetadaten als DOCX, PDF oder TXT exportieren.
 
 Bei aktivierter LLM-Zuordnung und bekannter Agenda werden alle Transkriptzeilen
