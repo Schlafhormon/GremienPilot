@@ -57,6 +57,53 @@ function readBlobAsText(blob: Blob): Promise<string> {
 }
 
 describe('SummaryStep', () => {
+  it('selects multiple TOPs, clears the selection and submits one job', async () => {
+    const user = userEvent.setup();
+    const regenerate = vi.fn().mockResolvedValue(undefined);
+    renderSummaryStep({ onRegenerateSummaries: regenerate });
+    expect(screen.getByRole('button', { name: 'Auswahl neu generieren (0)' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Alle auswählen' }));
+    expect(screen.getByRole('checkbox', { name: 'Begruessung auswählen' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Haushalt auswählen' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Auswahl aufheben' }));
+    expect(screen.getByRole('button', { name: 'Auswahl neu generieren (0)' })).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: 'Haushalt auswählen' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Begruessung auswählen' }));
+    await user.click(screen.getByRole('button', { name: 'Auswahl neu generieren (2)' }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+    expect(regenerate).toHaveBeenCalledExactlyOnceWith([0, 1]);
+  });
+
+  it('shows real aggregate progress, the current TOP and the immutable job selection', () => {
+    renderSummaryStep({
+      onRegenerateSummaries: vi.fn(), topIds: ['a', 'b'],
+      summaryJob: {
+        summary_job_id: 'job', session_id: 'session', status: 'processing',
+        progress: 42, current_top: 4, total_tops: 7, completed_tops: 3,
+        processed_tops: 3, current_top_id: 'b', top_ids: ['b'],
+      },
+    });
+    expect(screen.getByText('3 von 7 TOPs abgeschlossen')).toBeInTheDocument();
+    expect(screen.getByText('Aktuell: Haushalt')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '42');
+    expect(screen.getByRole('checkbox', { name: 'Haushalt auswählen' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Begruessung auswählen' })).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Alle auswählen' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Neu generieren' })).toBeDisabled();
+  });
+
+  it('keeps individual errors and partial completion visible', () => {
+    renderSummaryStep({ topIds: ['a', 'b'], summaryJob: {
+      summary_job_id: 'job', session_id: 'session', status: 'failed',
+      progress: 100, current_top: 2, total_tops: 2, completed_tops: 1,
+      processed_tops: 2, top_ids: ['a', 'b'], error: '1 von 2 TOPs fehlgeschlagen',
+      outcomes: { a: { status: 'completed' }, b: { status: 'failed', error: 'Modellfehler' } },
+    } });
+    expect(screen.getByText('Regenerierung mit Fehlern beendet')).toBeInTheDocument();
+    expect(screen.getByText('1 von 2 TOPs abgeschlossen')).toBeInTheDocument();
+    expect(screen.getByText('Haushalt: Modellfehler')).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     Element.prototype.scrollIntoView = vi.fn();

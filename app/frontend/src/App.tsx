@@ -1,3 +1,4 @@
+import { mergeSummarySession } from './summarySync';
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import Layout from "./components/Layout";
 import StepIndicator from "./components/StepIndicator";
@@ -147,6 +148,7 @@ function normalizeSummaryReviews(
     const index = Number(key);
     if (Number.isFinite(index) && value) {
       normalized[index] = {
+        ...value,
         structured: value.structured ?? null,
         source_links: value.source_links ?? [],
         review_warnings: value.review_warnings ?? [],
@@ -552,11 +554,15 @@ export default function App() {
     ]
   );
   const currentPayloadRef = useRef('');
+  const latestPayloadRef = useRef(buildSessionPayload());
+  const summaryBaselineRef = useRef<SessionSavePayload>(buildSessionPayload());
   useEffect(() => {
-    currentPayloadRef.current = serializeSessionPayload(buildSessionPayload());
+    latestPayloadRef.current = buildSessionPayload();
+    currentPayloadRef.current = serializeSessionPayload(latestPayloadRef.current);
   }, [buildSessionPayload]);
 
   const applySession = useCallback((session: SessionResponse | SessionDraft) => {
+    summaryBaselineRef.current = session;
     const nextSessionId = session.session_id ?? null;
     const nextRevision = session.revision ?? null;
     setSessionId(nextSessionId);
@@ -610,6 +616,7 @@ export default function App() {
     setPipelineNotice(null);
     setDirectProtocolAvailable(false);
     setIsProcessing(false);
+    setIsGeneratingSummary(false);
     setProcessingError(null);
     setProcessingStatus("");
     setProcessingProgress(0);
@@ -785,6 +792,7 @@ export default function App() {
       route.view === "history" ||
       isProcessing ||
       isGeneratingSummary ||
+      (summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status)) ||
       saveConflictRef.current
     ) {
       return;
@@ -829,6 +837,7 @@ export default function App() {
             revision: sessionRevisionRef.current,
           });
           if (activeSessionIdRef.current !== targetSessionId) return;
+          summaryBaselineRef.current = savedSession;
           const nextRevision = savedSession.revision ?? sessionRevisionRef.current;
           sessionRevisionRef.current = nextRevision;
           setSessionRevision(nextRevision);
@@ -869,6 +878,7 @@ export default function App() {
     buildSessionPayload,
     isProcessing,
     isGeneratingSummary,
+    summaryJob,
     pipelineId,
     route.view,
     sessionId,
@@ -962,35 +972,58 @@ export default function App() {
       ? summaryJob.summary_job_id
       : null;
 
+  const [summaryPollAttempt, setSummaryPollAttempt] = useState(0);
   useEffect(() => {
     if (!activeSummaryJobId || !sessionId) return;
     let cancelled = false;
+    let retryTimer: number | undefined;
+    const controller = new AbortController();
     setIsGeneratingSummary(true);
-    void pollSummaryJob(activeSummaryJobId, (job) => {
-      if (!cancelled && ['pending', 'processing', 'cancelling'].includes(job.status)) {
-        setSummaryJob(job);
-      }
-    })
+    const refresh = async () => {
+      const refreshed = await loadSession(sessionId);
+      if (cancelled || activeSessionIdRef.current !== sessionId) return;
+      const merged = mergeSummarySession(latestPayloadRef.current, summaryBaselineRef.current, refreshed);
+      summaryBaselineRef.current = refreshed;
+      latestPayloadRef.current = merged;
+      sessionRevisionRef.current = refreshed.revision ?? sessionRevisionRef.current;
+      setSessionRevision(sessionRevisionRef.current);
+      setTops(merged.tops);
+      setTopIds(merged.top_ids ?? []);
+      setTranscript(merged.transcript ?? []);
+      setAssignments(merged.assignments);
+      setSpeakerNames(merged.speaker_names);
+      setAgendaProposals(merged.agenda_proposals ?? null);
+      setSkippedAssignment(merged.skipped_assignment);
+      if (merged.export_metadata) setExportMetadata(merged.export_metadata);
+      setSummaries(normalizeSummaries(merged.summaries));
+      setSummaryReviews(normalizeSummaryReviews(merged.summary_reviews));
+      setSummaryStates(normalizeSummaryStates(merged.summary_states));
+      setSessionMessage(null);
+    };
+    void pollSummaryJob(activeSummaryJobId, async (job) => {
+      if (cancelled || !['pending', 'processing', 'cancelling'].includes(job.status)) return;
+      await refresh();
+      if (!cancelled) setSummaryJob(job);
+    }, 1500, controller.signal)
       .then(async (completed) => {
         if (cancelled) return;
-        setSummaryJob(completed);
-        const refreshed = await loadSession(sessionId);
+        // Keep the effect alive until the final results have been merged.
+        await refresh();
         if (cancelled) return;
-        applySession(refreshed);
-        setCurrentStep(3);
+        setIsGeneratingSummary(false);
+        setSummaryJob(completed);
       })
       .catch((error) => {
-        if (!cancelled) {
-          setSessionMessage(error instanceof Error ? error.message : 'Zusammenfassungsjob fehlgeschlagen');
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setIsGeneratingSummary(false);
+        if (cancelled) return;
+        setSessionMessage(error instanceof Error ? error.message : 'Zusammenfassungsjob konnte nicht aktualisiert werden');
+        retryTimer = window.setTimeout(() => setSummaryPollAttempt(value => value + 1), 3000);
       });
     return () => {
       cancelled = true;
+      controller.abort();
+      window.clearTimeout(retryTimer);
     };
-  }, [activeSummaryJobId, applySession, sessionId]);
+  }, [activeSummaryJobId, sessionId, summaryPollAttempt]);
 
   const handleRestoreSession = async () => {
     if (!restoreCandidate) return;
@@ -1245,8 +1278,8 @@ export default function App() {
     setCurrentStep(2);
   };
 
-  const handleRegenerateSummary = async (topIndex: number) => {
-    if (!sessionId) return;
+  const handleRegenerateSummaries = async (topIndexes: number[]) => {
+    if (!sessionId || activeSummaryJobId || isGeneratingSummary || !topIndexes.length) return;
     setIsGeneratingSummary(true);
     try {
       if (saveTimerRef.current !== null) {
@@ -1263,12 +1296,14 @@ export default function App() {
       sessionRevisionRef.current = revision;
       setSessionRevision(revision);
       setSummaryStates(normalizeSummaryStates(persisted.summary_states));
-      const topId = normalizeSummaryStates(persisted.summary_states)[topIndex]?.top_id
-        ?? (persisted.top_ids ?? topIds)[topIndex]
-        ?? `whole-session:${sessionId}`;
+      summaryBaselineRef.current = persisted;
+      const selectedIds = [...new Set(topIndexes)].map(topIndex =>
+        normalizeSummaryStates(persisted.summary_states)[topIndex]?.top_id
+          ?? (persisted.top_ids ?? topIds)[topIndex]
+          ?? `whole-session:${sessionId}`);
       const started = await startSummaryJob(sessionId, {
         revision,
-        topIds: [topId],
+        topIds: selectedIds,
         model: llmSettings.model,
         systemPrompt: tops.filter((top) => top.trim()).length === 0
           ? GENERIC_SUMMARY_PROMPT
@@ -1317,7 +1352,12 @@ export default function App() {
 
   const handleCancelSummaryJob = async () => {
     if (!summaryJob) return;
-    setSummaryJob(await cancelSummaryJob(summaryJob.summary_job_id));
+    try {
+      const cancelled = await cancelSummaryJob(summaryJob.summary_job_id);
+      if (['pending', 'processing', 'cancelling'].includes(cancelled.status)) setSummaryJob(cancelled);
+    } catch (error) {
+      setSessionMessage(error instanceof Error ? error.message : 'Abbruch fehlgeschlagen');
+    }
   };
 
   const handleRetry = () => {
@@ -1625,10 +1665,23 @@ export default function App() {
           transcript={transcript}
           assignments={assignments}
           summaries={summaries}
-          setSummaries={setSummaries}
+          setSummaries={(next) => {
+            const reviews = { ...summaryReviews };
+            const states = { ...effectiveSummaryStates };
+            Object.keys(next).map(Number).forEach(index => {
+              if (next[index] === summaries[index]) return;
+              delete reviews[index]; // Generated evidence no longer describes manual text.
+              if (states[index]) states[index] = { ...states[index]!, status: 'ready', origin: 'manual' };
+            });
+            setSummaries(next);
+            setSummaryReviews(reviews);
+            setSummaryStates(states);
+          }}
           summaryReviews={summaryReviews}
           summaryStates={effectiveSummaryStates}
-          onRegenerateSummary={handleRegenerateSummary}
+          onRegenerateSummary={(index) => handleRegenerateSummaries([index])}
+          onRegenerateSummaries={handleRegenerateSummaries}
+          topIds={topIds}
           onAcceptSummary={handleAcceptSummary}
           summaryJob={summaryJob}
           onCancelSummaryJob={handleCancelSummaryJob}

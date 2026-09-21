@@ -398,12 +398,15 @@ export async function getSummaryJob(summaryJobId: string): Promise<SummaryJob> {
 
 export async function pollSummaryJob(
   summaryJobId: string,
-  onStatus?: (job: SummaryJob) => void,
-  intervalMs = 1500
+  onStatus?: (job: SummaryJob) => void | Promise<void>,
+  intervalMs = 1500,
+  signal?: AbortSignal,
 ): Promise<SummaryJob> {
   while (true) {
+    signal?.throwIfAborted();
     const job = await getSummaryJob(summaryJobId);
-    onStatus?.(job);
+    signal?.throwIfAborted();
+    await onStatus?.(job);
     if (['completed', 'failed', 'cancelled'].includes(job.status)) {
       return job;
     }

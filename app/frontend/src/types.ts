@@ -251,6 +251,8 @@ export interface SummaryReview {
   review_warnings: SummaryReviewWarning[];
   fallback_used?: boolean;
   chunks_processed?: number;
+  duration_seconds?: number;
+  llm_usage?: Record<string, unknown>;
 }
 
 export type SummaryStatus =
@@ -288,6 +290,10 @@ export interface SummaryJob {
   current_top: number;
   total_tops: number;
   top_ids: string[];
+  completed_tops?: number;
+  processed_tops?: number;
+  current_top_id?: string | null;
+  outcomes?: Record<string, { status: 'completed' | 'failed'; error?: string }>;
   error?: string | null;
   created_at?: number | null;
   updated_at?: number | null;
@@ -470,6 +476,8 @@ export interface SummaryStepProps {
   summaryReviews?: Record<number, SummaryReview>;
   summaryStates?: Record<number, SummaryState>;
   onRegenerateSummary: (topIndex: number) => Promise<void>;
+  onRegenerateSummaries?: (topIndexes: number[]) => Promise<void>;
+  topIds?: string[];
   onAcceptSummary: (topIndex: number) => Promise<void>;
   summaryJob?: SummaryJob | null;
   onCancelSummaryJob?: () => Promise<void>;

@@ -5,6 +5,7 @@ import {
   backfillSpeakerEmbeddings,
   getPipelineResult,
   pollPipeline,
+  pollSummaryJob,
   confirmSpeakerObservation,
   createManualSpeakerObservation,
   createSpeakerProfile,
@@ -27,6 +28,33 @@ import {
 } from './api';
 
 describe('api session client', () => {
+  it('awaits summary result synchronization and returns partial job failures', async () => {
+    const job = { summary_job_id: 'batch', session_id: 'session', top_ids: ['a', 'b'],
+      total_tops: 2, current_top: 2, completed_tops: 1, processed_tops: 1, progress: 50 };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...job, status: 'processing' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...job, status: 'failed', processed_tops: 2,
+        outcomes: { a: { status: 'completed' }, b: { status: 'failed', error: 'Modellfehler' } } }) });
+    vi.stubGlobal('fetch', fetchMock);
+    let release!: () => void;
+    const onStatus = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const result = pollSummaryJob('batch', onStatus, 0);
+    await vi.waitFor(() => expect(onStatus).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    release();
+    expect((await result).status).toBe('failed');
+    expect(onStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not continue polling after the owner aborts', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(pollSummaryJob('batch', undefined, 0, controller.signal)).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.restoreAllMocks();
   });

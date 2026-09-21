@@ -981,6 +981,10 @@ class SummaryJobResponse(BaseModel):
     current_top: int = 0
     total_tops: int = 0
     top_ids: List[str] = Field(default_factory=list)
+    completed_tops: int = 0
+    processed_tops: int = 0
+    current_top_id: Optional[str] = None
+    outcomes: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
     created_at: Optional[float] = None
     updated_at: Optional[float] = None
@@ -1478,6 +1482,10 @@ def build_summary_job_response(job: dict[str, Any]) -> SummaryJobResponse:
         current_top=int(job.get("current_top") or 0),
         total_tops=int(job.get("total_tops") or 0),
         top_ids=list(refs.get("top_ids") or []),
+        completed_tops=sum(item.get("status") == "completed" for item in refs.get("outcomes", {}).values()),
+        processed_tops=len(refs.get("outcomes", {})),
+        current_top_id=refs.get("current_top_id"),
+        outcomes=dict(refs.get("outcomes") or {}),
         error=job.get("error"),
         created_at=job.get("created_at"),
         updated_at=job.get("updated_at"),
@@ -2446,6 +2454,9 @@ def reconcile_session_summaries(
             if review_was_edited
             else expected_review or requested_review
         )
+        if summary_was_edited and not review_was_edited:
+            # Generated claims and source links no longer describe manual text.
+            review = {}
 
         snapshot, input_hash = current_summary_input(state, index)
         baseline_snapshot = list(previous_state.get("source_snapshot") or [])
@@ -2565,44 +2576,62 @@ def summary_job_cancelled(summary_job_id: str) -> bool:
     ) == "cancelled"
 
 
-def finalize_summary_job_cancellation(
-    summary_job_id: str,
-    job: dict[str, Any],
-) -> None:
+class SummaryJobInputChanged(ValueError):
+    """A safe, user-facing explanation for a TOP that cannot be regenerated."""
+
+
+def summary_top_ids(session: dict[str, Any]) -> list[str]:
+    if not session.get("tops") or session.get("skipped_assignment"):
+        return [f"whole-session:{session['session_id']}"]
+    return list(session.get("top_ids") or [])
+
+
+def summary_edit_fingerprint(session: dict[str, Any], index: int) -> str:
+    """Protect both source edits and manual output edits, including label changes."""
+    _, input_hash = current_summary_input(session, index)
+    return hashlib.sha256(json.dumps({
+        "input": input_hash,
+        "title": "Gesamtes Gespräch" if session.get("skipped_assignment") else (session.get("tops") or ["Gesamtes Gespräch"])[index],
+        "speakers": session.get("speaker_names") or {},
+        "summary": (session.get("summaries") or {}).get(index),
+        "review": (session.get("summary_reviews") or {}).get(index),
+    }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def mutate_summary_session(
+    session_id: str, mutate: Callable[[dict[str, Any]], bool | None]
+) -> dict[str, Any]:
+    # Each retry rereads the session and reapplies only the intended TOP patch.
+    # Bumping the revision also protects concurrent browser autosaves.
+    for _ in range(10):
+        session = load_session(session_id)
+        if session is None:
+            raise RuntimeError("Session nicht gefunden")
+        if mutate(session) is False:
+            return session
+        try:
+            return save_session(session_id, session, expected_revision=session["revision"])
+        except SessionConflictError:
+            continue
+    raise RuntimeError("Sitzung wurde wiederholt zwischenzeitlich geändert")
+
+
+def finalize_summary_job_cancellation(summary_job_id: str, job: dict[str, Any]) -> None:
     refs = dict(job.get("refs") or {})
-    top_ids = list(refs.get("top_ids") or [])
-    previous_statuses = dict(refs.get("previous_statuses") or {})
-    session = load_session(job["session_id"])
-    if session is not None:
-        effective_ids = list(session.get("top_ids") or [])
-        if not session.get("tops") or session.get("skipped_assignment"):
-            effective_ids = [f"whole-session:{session['session_id']}"]
-        states = dict(session.get("summary_states") or {})
-        summaries = dict(session.get("summaries") or {})
-        changed = False
-        for top_id in top_ids:
-            if top_id not in effective_ids:
+    def restore(session):
+        ids = summary_top_ids(session)
+        for top_id in refs.get("top_ids", []):
+            if top_id not in ids:
                 continue
-            top_index = effective_ids.index(top_id)
-            current = dict(states.get(top_index) or {})
-            if current.get("status") not in {"queued", "running"}:
-                continue
-            fallback = "review_required" if summaries.get(top_index) else "missing"
-            previous_status = previous_statuses.get(top_id)
-            states[top_index] = {
-                **current,
-                "status": (
-                    previous_status
-                    if previous_status in {"ready", "review_required", "failed", "missing"}
-                    else fallback
-                ),
-                "updated_at": time.time(),
-            }
-            changed = True
-        if changed:
-            session["summary_states"] = states
-            save_session(session["session_id"], session, bump_revision=False)
-    update_summary_job(summary_job_id, status="cancelled")
+            index = ids.index(top_id)
+            state = (session.get("summary_states") or {}).get(index, {})
+            if state.get("status") in {"queued", "running"}:
+                state["status"] = refs.get("previous_statuses", {}).get(top_id, "missing")
+                state["updated_at"] = time.time()
+    mutate_summary_session(job["session_id"], restore)
+    current = load_summary_job(summary_job_id) or job
+    update_summary_job(summary_job_id, status="cancelled",
+                       refs={**current.get("refs", {}), "current_top_id": None})
 
 
 def run_summary_job(summary_job_id: str) -> None:
@@ -2611,215 +2640,109 @@ def run_summary_job(summary_job_id: str) -> None:
         return
     refs = dict(job.get("refs") or {})
     top_ids = list(refs.get("top_ids") or [])
-    expected_hashes = dict(refs.get("input_hashes") or {})
-    model = refs.get("model")
-    system_prompt = refs.get("system_prompt")
+    outcomes: dict[str, Any] = {}
     total = len(top_ids)
-    update_summary_job(
-        summary_job_id,
-        status="processing",
-        progress=0,
-        current_top=0,
-        total_tops=total,
-        error=None,
-    )
 
-    try:
-        for position, top_id in enumerate(top_ids):
-            if summary_job_cancelled(summary_job_id):
-                finalize_summary_job_cancellation(summary_job_id, job)
-                return
-            session = load_session(job["session_id"])
-            if session is None:
-                raise RuntimeError("Session nicht gefunden")
-            session_top_ids = list(session.get("top_ids") or [])
-            no_top_mode = not session.get("tops") or bool(session.get("skipped_assignment"))
-            effective_ids = (
-                session_top_ids
-                if not no_top_mode
-                else [f"whole-session:{session['session_id']}"]
-            )
-            if top_id not in effective_ids:
-                continue
-            top_index = effective_ids.index(top_id)
-            current_snapshot, current_hash = current_summary_input(session, top_index)
-            if expected_hashes.get(top_id) != current_hash:
-                states = dict(session.get("summary_states") or {})
-                current_state = dict(states.get(top_index) or {})
-                states[top_index] = {
-                    **current_state,
-                    "status": "review_required",
-                    "current_input_hash": current_hash,
-                    "change_reasons": ["changed_while_queued"],
-                    "updated_at": time.time(),
-                }
-                session["summary_states"] = states
-                save_session(session["session_id"], session, bump_revision=False)
-                continue
+    def report(**changes):
+        update_summary_job(summary_job_id, **changes, refs={
+            "outcomes": outcomes, "current_top_id": current_top_id,
+        })
 
-            update_summary_job(
-                summary_job_id,
-                current_top=position + 1,
-                progress=int((position / max(total, 1)) * 100),
-            )
-            states = dict(session.get("summary_states") or {})
-            states[top_index] = {
-                **dict(states.get(top_index) or {}),
-                "status": "running",
-                "updated_at": time.time(),
-            }
-            session["summary_states"] = states
-            save_session(session["session_id"], session, bump_revision=False)
+    current_top_id: str | None = None
+    report(status="processing", progress=0, current_top=0, total_tops=total, error=None)
+    for position, top_id in enumerate(top_ids):
+        if summary_job_cancelled(summary_job_id):
+            finalize_summary_job_cancellation(summary_job_id, job)
+            return
+        current_top_id = top_id
+        report(current_top=position + 1)
+        try:
+            def check_and_mark(session):
+                ids = summary_top_ids(session)
+                if top_id not in ids:
+                    raise SummaryJobInputChanged("TOP wurde entfernt")
+                index = ids.index(top_id)
+                expected = refs.get("edit_fingerprints", {}).get(top_id)
+                if expected and summary_edit_fingerprint(session, index) != expected:
+                    raise SummaryJobInputChanged("TOP wurde zwischenzeitlich bearbeitet; Ergebnis nicht übernommen")
+                if current_summary_input(session, index)[1] != refs.get("input_hashes", {}).get(top_id):
+                    raise SummaryJobInputChanged("TOP-Eingabe wurde zwischenzeitlich geändert")
+                session.setdefault("summary_states", {}).setdefault(index, {}).update(
+                    status="running", updated_at=time.time())
 
-            transcript = [line_to_dict(line) for line in (session.get("transcript") or [])]
-            assignments = list(session.get("assignments") or [])
-            lines = [
-                line
-                for line_index, line in enumerate(transcript)
-                if no_top_mode
-                or (line_index < len(assignments) and assignments[line_index] == top_index)
-            ]
+            session = mutate_summary_session(job["session_id"], check_and_mark)
+            index = summary_top_ids(session).index(top_id)
+            snapshot, input_hash = current_summary_input(session, index)
+            transcript = [line_to_dict(line) for line in session.get("transcript", [])]
+            assignments = session.get("assignments") or []
+            no_top_mode = not session.get("tops") or session.get("skipped_assignment")
+            lines = [line for i, line in enumerate(transcript)
+                     if no_top_mode or (i < len(assignments) and assignments[i] == index)]
             if not lines:
-                raise RuntimeError("Für den ausgewählten TOP sind keine Zeilen vorhanden")
-            title = (
-                "Gesamtes Gespräch"
-                if no_top_mode
-                else str(session.get("tops", [])[top_index])
-            )
-            speaker_names = dict(session.get("speaker_names") or {})
-            text = "\n".join(format_line_for_summary(line, speaker_names) for line in lines)
+                raise SummaryJobInputChanged("Für den ausgewählten TOP sind keine Zeilen vorhanden")
+            title = "Gesamtes Gespräch" if no_top_mode else session["tops"][index]
+            names = session.get("speaker_names") or {}
+            text = "\n".join(format_line_for_summary(line, names) for line in lines)
             with LLM_WORK_LOCK:
-                result = summarize_segment(
-                    title,
-                    text,
-                    model=model,
-                    system_prompt=system_prompt,
-                    meeting_context=meeting_context_from_transcript(transcript),
-                )
+                result = summarize_segment(title, text, model=refs.get("model"),
+                    system_prompt=refs.get("system_prompt"),
+                    meeting_context=meeting_context_from_transcript(transcript))
             if summary_job_cancelled(summary_job_id):
-                # A running local LLM call cannot be interrupted safely. Do not
-                # publish its result when cancellation was requested meanwhile.
                 finalize_summary_job_cancellation(summary_job_id, job)
                 return
-            named_lines = [
-                {
-                    **line,
-                    "speaker": speaker_names.get(line.get("speaker", ""), line.get("speaker", "")),
-                }
-                for line in lines
-            ]
-            review_result = build_summary_review(
-                structured=result.structured,
-                summary=result.summary,
-                lines=named_lines,
-            )
+            review = build_summary_review(structured=result.structured, summary=result.summary,
+                lines=[{**line, "speaker": names.get(line["speaker"], line["speaker"])} for line in lines])
+            if not result.summary.strip():
+                raise SummaryJobInputChanged("Die Generierung lieferte keine Zusammenfassung")
 
-            latest = load_session(session["session_id"])
-            if latest is None:
-                raise RuntimeError("Session nicht gefunden")
-            _, latest_hash = current_summary_input(latest, top_index)
-            if latest_hash != current_hash:
-                latest_states = dict(latest.get("summary_states") or {})
-                latest_states[top_index] = {
-                    **dict(latest_states.get(top_index) or {}),
-                    "status": "review_required",
-                    "change_reasons": ["changed_during_generation"],
-                    "current_input_hash": latest_hash,
-                    "updated_at": time.time(),
+            def publish(latest):
+                check_and_mark(latest)
+                target = summary_top_ids(latest).index(top_id)
+                latest.setdefault("summaries", {})[target] = result.summary
+                latest.setdefault("summary_reviews", {})[target] = {
+                    "structured": result.structured.to_dict() if result.structured else None,
+                    "source_links": [link.to_dict() for link in review.source_links],
+                    "review_warnings": [warning.to_dict() for warning in review.warnings],
+                    "fallback_used": result.fallback_used,
+                    "chunks_processed": result.chunks_processed,
+                    "llm_usage": getattr(result, "llm_usage", {}),
+                    "duration_seconds": result.duration_seconds,
                 }
-                latest["summary_states"] = latest_states
-                save_session(latest["session_id"], latest, bump_revision=False)
-                continue
+                latest["summary_states"][target].update(
+                    top_id=top_id, status="ready", input_hash=input_hash,
+                    current_input_hash=input_hash, source_snapshot=snapshot,
+                    change_reasons=[], origin="manual_regeneration",
+                    generated_at=time.time(), updated_at=time.time())
+            mutate_summary_session(job["session_id"], publish)
+            outcomes[top_id] = {"status": "completed"}
+        except Exception as exc:
+            # Retain successful TOPs and continue the same serial job after a failure.
+            message = str(exc) if isinstance(exc, SummaryJobInputChanged) else safe_exception_label(exc)
+            outcomes[top_id] = {"status": "failed", "error": message}
+            def mark_failed(latest):
+                ids = summary_top_ids(latest)
+                if top_id not in ids:
+                    return False
+                target = ids.index(top_id)
+                state = latest.setdefault("summary_states", {}).setdefault(target, {})
+                if state.get("status") not in {"queued", "running"}:
+                    return False  # A manual edit already established a newer state.
+                state.update(status="failed", updated_at=time.time())
+                review = latest.setdefault("summary_reviews", {}).setdefault(target, {})
+                review["review_warnings"] = [*review.get("review_warnings", []), {
+                    "kind": "summary_failed", "message": message, "severity": "error",
+                    "line_indices": [], "excerpt": "",
+                }]
+            try:
+                mutate_summary_session(job["session_id"], mark_failed)
+            except Exception:
+                logger.warning("Could not persist failure state for summary job %s", summary_job_id)
+        current_top_id = None
+        report(progress=int(len(outcomes) / max(total, 1) * 100))
 
-            summaries = dict(latest.get("summaries") or {})
-            reviews = dict(latest.get("summary_reviews") or {})
-            latest_states = dict(latest.get("summary_states") or {})
-            summaries[top_index] = result.summary
-            reviews[top_index] = {
-                "structured": result.structured.to_dict() if result.structured else None,
-                "source_links": [link.to_dict() for link in review_result.source_links],
-                "review_warnings": [warning.to_dict() for warning in review_result.warnings],
-                "fallback_used": result.fallback_used,
-                "chunks_processed": result.chunks_processed,
-                "llm_usage": getattr(result, "llm_usage", {}),
-                "duration_seconds": result.duration_seconds,
-            }
-            latest_states[top_index] = {
-                **dict(latest_states.get(top_index) or {}),
-                "top_id": top_id,
-                "status": "ready",
-                "input_hash": current_hash,
-                "current_input_hash": current_hash,
-                "source_snapshot": current_snapshot,
-                "change_reasons": [],
-                "origin": "manual_regeneration",
-                "generated_at": time.time(),
-                "updated_at": time.time(),
-            }
-            latest["summaries"] = summaries
-            latest["summary_reviews"] = reviews
-            latest["summary_states"] = latest_states
-            save_session(latest["session_id"], latest, bump_revision=False)
-            update_summary_job(
-                summary_job_id,
-                current_top=position + 1,
-                progress=int(((position + 1) / max(total, 1)) * 100),
-            )
-
-        update_summary_job(
-            summary_job_id,
-            status="completed",
-            progress=100,
-            current_top=total,
-        )
-    except Exception as exc:
-        logger.error(
-            "Summary job %s failed (%s)",
-            summary_job_id,
-            safe_exception_label(exc),
-            exc_info=True,
-        )
-        update_summary_job(
-            summary_job_id,
-            status="failed",
-            error=safe_exception_label(exc),
-        )
-        failed_session = load_session(job["session_id"])
-        if failed_session is not None:
-            failed_states = dict(failed_session.get("summary_states") or {})
-            failed_reviews = dict(failed_session.get("summary_reviews") or {})
-            effective_ids = list(failed_session.get("top_ids") or [])
-            if not failed_session.get("tops") or failed_session.get("skipped_assignment"):
-                effective_ids = [f"whole-session:{failed_session['session_id']}"]
-            for failed_top_id in top_ids:
-                if failed_top_id not in effective_ids:
-                    continue
-                failed_index = effective_ids.index(failed_top_id)
-                if (failed_states.get(failed_index) or {}).get("status") not in {
-                    "queued",
-                    "running",
-                }:
-                    continue
-                failed_states[failed_index] = {
-                    **dict(failed_states.get(failed_index) or {}),
-                    "status": "failed",
-                    "updated_at": time.time(),
-                }
-                failed_reviews[failed_index] = {
-                    **dict(failed_reviews.get(failed_index) or {}),
-                    "review_warnings": [
-                        {
-                            "kind": "summary_failed",
-                            "message": "Die selektive Neugenerierung ist fehlgeschlagen.",
-                            "severity": "error",
-                            "line_indices": [],
-                            "excerpt": "",
-                        }
-                    ],
-                }
-            failed_session["summary_states"] = failed_states
-            failed_session["summary_reviews"] = failed_reviews
-            save_session(failed_session["session_id"], failed_session, bump_revision=False)
+    failed = sum(item["status"] == "failed" for item in outcomes.values())
+    report(status="failed" if failed else "completed", progress=100,
+           error=f"{failed} von {total} TOPs fehlgeschlagen" if failed else None)
 
 
 def save_pipeline_session(
@@ -3830,6 +3753,7 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
 
     input_hashes: dict[str, str] = {}
     previous_statuses: dict[str, str] = {}
+    edit_fingerprints: dict[str, str] = {}
     states = dict(session.get("summary_states") or {})
     fallback_states = build_generated_summary_states(
         session_id=session_id,
@@ -3847,6 +3771,7 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
         top_index = effective_ids.index(top_id)
         _, input_hash = current_summary_input(session, top_index)
         input_hashes[top_id] = input_hash
+        edit_fingerprints[top_id] = summary_edit_fingerprint(session, top_index)
         previous_statuses[top_id] = str(
             (states.get(top_index) or {}).get("status") or "missing"
         )
@@ -3875,6 +3800,7 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
             "refs": {
                 "top_ids": selected,
                 "input_hashes": input_hashes,
+                "edit_fingerprints": edit_fingerprints,
                 "previous_statuses": previous_statuses,
                 "model": request.model,
                 "system_prompt": request.system_prompt,

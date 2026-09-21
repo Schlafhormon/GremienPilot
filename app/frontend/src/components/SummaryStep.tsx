@@ -43,6 +43,8 @@ export default function SummaryStep({
   summaryReviews = {},
   summaryStates = {},
   onRegenerateSummary,
+  onRegenerateSummaries,
+  topIds = [],
   onAcceptSummary,
   summaryJob,
   onCancelSummaryJob,
@@ -61,9 +63,12 @@ export default function SummaryStep({
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
   const [acceptedSummaryWarnings, setAcceptedSummaryWarnings] = useState(false);
-  const [regenerationCandidate, setRegenerationCandidate] = useState<number | null>(null);
+  const [regenerationCandidate, setRegenerationCandidate] = useState<number[] | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const transcriptLineRefs = useRef<Array<HTMLDivElement | null>>([]);
+
+  useEffect(() => { setAcceptedSummaryWarnings(false); }, [summaryReviews]);
 
   // Audio sync hook (uses full transcript for seeking)
   const {
@@ -187,7 +192,7 @@ export default function SummaryStep({
 
   const handleExport = async (format: ExportFormat) => {
     setExportError(null);
-    if (!summariesAreFresh) {
+    if (busy || !summariesAreFresh) {
       setExportError('Zusammenfassungen müssen nach den Korrekturen aktualisiert werden.');
       return;
     }
@@ -234,6 +239,15 @@ export default function SummaryStep({
   };
 
   const hasTops = tops.length > 0;
+  const topIdAt = (index: number) => topIds[index] ?? summaryStates[index]?.top_id ?? `top-${index}`;
+  const jobActive = Boolean(summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status));
+  const busy = isGenerating || jobActive;
+  const selection = jobActive ? summaryJob?.top_ids ?? [] : selectedIds;
+  const selectedIndexes = tops.map((_, index) => index).filter(index => selection.includes(topIdAt(index)));
+  const jobTopTitle = (id: string) => {
+    const index = tops.findIndex((_, i) => topIdAt(i) === id);
+    return index >= 0 ? tops[index] : id.startsWith('whole-session:') ? 'Gesamtes Gespräch' : id;
+  };
   const selectedSummaryIndex = hasTops ? selectedTop : 0;
   const topLines = hasTops ? getTranscriptForTop(selectedTop) : transcript;
   const selectedReview = summaryReviews[selectedSummaryIndex];
@@ -279,19 +293,26 @@ export default function SummaryStep({
         </div>
       )}
 
-      {summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status) && (
+      {summaryJob && (
         <div className="rounded-lg border border-blue-300 bg-blue-50 p-4 text-sm text-blue-900">
           <div className="flex items-center justify-between gap-4">
             <div className="flex-1">
-              <div className="font-medium">Ausgewählte TOP-Zusammenfassungen werden erzeugt</div>
-              <div className="mt-1">
-                TOP {summaryJob.current_top} von {summaryJob.total_tops}. Der Vorgang kann im CPU-Modus mehrere Stunden dauern.
+              <div className="font-medium">{jobActive ? 'Ausgewählte TOP-Zusammenfassungen werden erzeugt' : summaryJob.status === 'completed' ? 'Regenerierung abgeschlossen' : summaryJob.status === 'cancelled' ? 'Regenerierung abgebrochen' : 'Regenerierung mit Fehlern beendet'}</div>
+              <div className="mt-1" aria-live="polite">
+                {summaryJob.completed_tops ?? 0} von {summaryJob.total_tops} TOPs abgeschlossen
+                {summaryJob.current_top_id && <div>Aktuell: {jobTopTitle(summaryJob.current_top_id)}</div>}
+                {summaryJob.status === 'pending' && <div>Wartet auf Verarbeitung</div>}
+                {summaryJob.status === 'cancelling' && <div>Abbruch angefordert</div>}
+                {summaryJob.error && <div role="alert">{summaryJob.error}</div>}
+                {Object.entries(summaryJob.outcomes ?? {}).filter(([, outcome]) => outcome.status === 'failed').map(([id, outcome]) => (
+                  <div key={id} className="text-red-800">{jobTopTitle(id)}: {outcome.error}</div>
+                ))}
               </div>
-              <div className="mt-3 h-2 overflow-hidden rounded bg-blue-100">
+              <div role="progressbar" aria-label="Gesamtfortschritt" aria-valuemin={0} aria-valuemax={100} aria-valuenow={summaryJob.progress} className="mt-3 h-2 overflow-hidden rounded bg-blue-100">
                 <div className="h-full bg-blue-600 transition-all" style={{ width: `${summaryJob.progress}%` }} />
               </div>
             </div>
-            {onCancelSummaryJob && summaryJob.status !== 'cancelling' && (
+            {jobActive && onCancelSummaryJob && summaryJob.status !== 'cancelling' && (
               <button type="button" onClick={() => void onCancelSummaryJob()} className="rounded border border-blue-300 px-3 py-2">
                 Abbrechen
               </button>
@@ -371,6 +392,19 @@ export default function SummaryStep({
         {/* TOPs Sidebar */}
         <div className="w-72 bg-white rounded-lg border border-gray-200 p-4 overflow-y-auto">
           <h3 className="font-medium text-gray-900 mb-4">Tagesordnung</h3>
+          {hasTops && onRegenerateSummaries && (
+            <div className="mb-4 space-y-2 text-sm">
+              <div className="flex flex-wrap gap-2">
+                <button type="button" disabled={busy} onClick={() => setSelectedIds(tops.map((_, i) => topIdAt(i)))} className="text-blue-700 disabled:opacity-50">Alle auswählen</button>
+                <button type="button" disabled={busy || !selectedIndexes.length} onClick={() => setSelectedIds([])} className="text-blue-700 disabled:opacity-50">Auswahl aufheben</button>
+              </div>
+              <button type="button" disabled={busy || !selectedIndexes.length || editingTop !== null}
+                onClick={() => setRegenerationCandidate(selectedIndexes)}
+                className="rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-50">
+                Auswahl neu generieren ({selectedIndexes.length})
+              </button>
+            </div>
+          )}
           <div className="space-y-2">
             {!hasTops ? (
               <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
@@ -381,8 +415,11 @@ export default function SummaryStep({
               const hasSummary = summaries[index] && summaries[index].trim();
               const state = summaryStates[index]?.status;
               return (
+                <div key={topIdAt(index)} className="flex items-center gap-2">
+                  {onRegenerateSummaries && <input type="checkbox" aria-label={`${top} auswählen`}
+                    disabled={busy} checked={jobActive ? Boolean(summaryJob?.top_ids.includes(topIdAt(index))) : selectedIds.includes(topIdAt(index))}
+                    onChange={(event) => setSelectedIds(current => event.target.checked ? [...current, topIdAt(index)] : current.filter(id => id !== topIdAt(index)))} />}
                 <button
-                  key={index}
                   onClick={() => setSelectedTop(index)}
                   className={`w-full text-left px-3 py-3 rounded-lg border-2 transition-all ${
                     isSelected
@@ -409,9 +446,11 @@ export default function SummaryStep({
                       >
                         {top || 'Unbenannter Tagesordnungspunkt'}
                       </div>
+                      {jobActive && summaryJob?.top_ids.includes(topIdAt(index)) && <div className="text-xs text-blue-700">Im laufenden Auftrag</div>}
                     </div>
                   </div>
                 </button>
+                </div>
               );
             })}
           </div>
@@ -472,15 +511,15 @@ export default function SummaryStep({
                       <button
                         type="button"
                         onClick={() => void onAcceptSummary(selectedSummaryIndex)}
-                        disabled={isGenerating}
+                        disabled={busy}
                         className="rounded bg-green-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
                       >
                         Bestehende übernehmen
                       </button>
                     )}
                     <button
-                      onClick={() => setRegenerationCandidate(selectedSummaryIndex)}
-                      disabled={isGenerating}
+                      onClick={() => setRegenerationCandidate([selectedSummaryIndex])}
+                      disabled={busy}
                       className="rounded border border-blue-300 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
                     >
                       Neu generieren
@@ -672,10 +711,10 @@ export default function SummaryStep({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="regeneration-title">
           <div className="max-w-lg rounded-xl bg-white p-6 shadow-xl">
             <h3 id="regeneration-title" className="text-lg font-semibold text-gray-950">
-              TOP-Zusammenfassung wirklich neu generieren?
+              {regenerationCandidate.length === 1 ? 'TOP-Zusammenfassung wirklich neu generieren?' : `${regenerationCandidate.length} TOP-Zusammenfassungen wirklich neu generieren?`}
             </h3>
             <p className="mt-3 text-sm text-gray-700">
-              Es wird ausschließlich {hasTops ? tops[regenerationCandidate] : 'das Gesamtgespräch'} verarbeitet.
+              Ausgewählt: {hasTops ? regenerationCandidate.map(index => tops[index]).join(', ') : 'Gesamtes Gespräch'}.
               Im CPU-Modus kann dies mehrere Stunden dauern und erhebliche Serverleistung beanspruchen.
               Prüfen Sie vorher, ob die vorhandene Zusammenfassung nicht bereits ausreicht.
             </p>
@@ -689,9 +728,10 @@ export default function SummaryStep({
               <button
                 type="button"
                 onClick={async () => {
-                  const index = regenerationCandidate;
+                  const indexes = regenerationCandidate;
                   setRegenerationCandidate(null);
-                  await onRegenerateSummary(index);
+                  if (onRegenerateSummaries) await onRegenerateSummaries(indexes);
+                  else await onRegenerateSummary(indexes[0]!);
                 }}
                 className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
               >
@@ -720,7 +760,7 @@ export default function SummaryStep({
                 <button
                   key={format}
                   onClick={() => handleExport(format)}
-                  disabled={exportingFormat !== null || !summariesAreFresh}
+                  disabled={exportingFormat !== null || !summariesAreFresh || busy || editingTop !== null}
                   className={`px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 ${
                     format === 'docx' && !exportBlocked
                       ? 'bg-blue-600 text-white hover:bg-blue-700'

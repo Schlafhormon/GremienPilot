@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -15,9 +15,10 @@ import {
   pollSummaryJob,
   acceptExistingSummary,
   saveSession,
+  exportProtocol,
   startPipeline,
 } from './api';
-import type { PipelineJob, PipelineResultResponse } from './types';
+import type { PipelineJob, PipelineResultResponse, SessionResponse, SummaryJob } from './types';
 import { agendaSource } from './agendaProposals';
 
 vi.mock('./api', () => ({
@@ -303,6 +304,95 @@ describe('App pipeline flow', () => {
     expect(startSummaryJob).not.toHaveBeenCalled();
   });
 
+  it('merges a delayed single-job result before stopping polling and exports and saves that result', async () => {
+    const user = userEvent.setup();
+    const original = pipelineResult({ revision: 1, summary_reviews: {
+      0: { source_links: [], review_warnings: [], duration_seconds: 99, llm_usage: { calls: 1 } },
+    } }).session;
+    const review = { structured: null, source_links: [], review_warnings: [], fallback_used: true,
+      chunks_processed: 3, duration_seconds: 12, llm_usage: { calls: 3 } };
+    const refreshed = { ...original, revision: 4, summaries: { 0: 'Aktuelle Einzelzusammenfassung' },
+      summary_reviews: { 0: review } };
+    let finishLoad!: (value: SessionResponse) => void;
+    vi.mocked(loadSession).mockResolvedValueOnce(original).mockImplementationOnce(() =>
+      new Promise(resolve => { finishLoad = resolve; }));
+    vi.mocked(saveSession).mockImplementation(async payload => ({ ...payload,
+      session_id: 'session-1', revision: (payload.revision ?? 0) + 1 }));
+    vi.mocked(exportProtocol).mockResolvedValue(new Blob(['Protokoll']));
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:test') });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    window.history.replaceState(null, '', '/sessions/session-1');
+    render(<App />);
+    await screen.findByText(original.summaries[0]!);
+    await user.click(screen.getByRole('button', { name: 'Neu generieren' }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+    await waitFor(() => expect(finishLoad).toBeDefined());
+    await act(async () => { finishLoad(refreshed); });
+    expect(await screen.findByText('Aktuelle Einzelzusammenfassung')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Neu generieren' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Text (.txt)' }));
+    expect(exportProtocol).toHaveBeenCalledWith(expect.objectContaining({
+      summaries: refreshed.summaries, summaryReviews: refreshed.summary_reviews,
+    }));
+    await waitFor(() => expect(saveSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      revision: 4, summaries: refreshed.summaries, summary_reviews: refreshed.summary_reviews,
+    })));
+    expect(startSummaryJob).toHaveBeenCalledWith('session-1', expect.objectContaining({ topIds: ['top-1'] }));
+  });
+
+  it('refreshes partial results while retaining local text, unselected TOPs and export metadata', async () => {
+    const user = userEvent.setup();
+    const original = pipelineResult({ revision: 1, tops: ['Haushalt', 'Schulbau', 'Sport'],
+      top_ids: ['top-1', 'top-2', 'top-3'],
+      summaries: { 0: 'Alt Haushalt', 1: 'Alt Schulbau', 2: 'Alt Sport' },
+    }).session;
+    const job: SummaryJob = { summary_job_id: 'batch', session_id: 'session-1', status: 'processing',
+      top_ids: ['top-1', 'top-2'], total_tops: 2, current_top: 1, progress: 0,
+      completed_tops: 0, current_top_id: 'top-1' };
+    let report!: (job: SummaryJob) => void | Promise<void>;
+    let finish!: (job: SummaryJob) => void;
+    vi.mocked(startSummaryJob).mockResolvedValue({ ...job, status: 'pending' });
+    vi.mocked(pollSummaryJob).mockImplementation((_id, callback) => {
+      report = callback!;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    vi.mocked(saveSession).mockImplementation(async payload => ({ ...payload,
+      session_id: 'session-1', revision: (payload.revision ?? 0) + 1 }));
+    vi.mocked(loadSession).mockResolvedValue(original);
+    window.history.replaceState(null, '', '/sessions/session-1');
+    render(<App />);
+    await screen.findByText('Alt Haushalt');
+    await user.click(screen.getByRole('checkbox', { name: 'Haushalt auswählen' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Schulbau auswählen' }));
+    await user.click(screen.getByRole('button', { name: 'Auswahl neu generieren (2)' }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+    await waitFor(() => expect(report).toBeDefined());
+    expect(startSummaryJob).toHaveBeenCalledWith('session-1', expect.objectContaining({ topIds: ['top-1', 'top-2'] }));
+    fireEvent.change(screen.getByLabelText('Gremium'), { target: { value: 'Manuelles Gremium' } });
+    await user.click(screen.getByRole('button', { name: /Schulbau/ }));
+    await user.click(screen.getByTitle('Bearbeiten'));
+    fireEvent.change(screen.getAllByRole('textbox').find(element => (element as HTMLTextAreaElement).value === 'Alt Schulbau')!,
+      { target: { value: 'Manueller Schulbau' } });
+    await user.click(screen.getByRole('button', { name: 'Speichern' }));
+    const remote = { ...original, revision: 5, summaries: { ...original.summaries, 0: 'Neu Haushalt' } };
+    vi.mocked(loadSession).mockResolvedValue(remote);
+    await act(async () => { await report({ ...job, progress: 50, completed_tops: 1, current_top_id: 'top-2' }); });
+    expect(screen.getByText('Manueller Schulbau')).toBeInTheDocument();
+    expect(screen.getByText('1 von 2 TOPs abgeschlossen')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Haushalt/ }));
+    expect(screen.getByText('Neu Haushalt')).toBeInTheDocument();
+    await act(async () => { finish({ ...job, status: 'failed', progress: 100, completed_tops: 1,
+      current_top_id: null, error: '1 von 2 TOPs fehlgeschlagen',
+      outcomes: { 'top-1': { status: 'completed' }, 'top-2': { status: 'failed', error: 'Modellfehler' } } }); });
+    expect(await screen.findByText('Regenerierung mit Fehlern beendet')).toBeInTheDocument();
+    expect(screen.getByLabelText('Gremium')).toHaveValue('Manuelles Gremium');
+    await waitFor(() => expect(saveSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      summaries: { 0: 'Neu Haushalt', 1: 'Manueller Schulbau', 2: 'Alt Sport' },
+      export_metadata: expect.objectContaining({ committee: 'Manuelles Gremium' }),
+    })));
+  });
+
   it('sets agenda detection from the pipeline result', async () => {
     vi.mocked(getPipelineResult).mockResolvedValue(
       pipelineResult(
@@ -393,6 +483,11 @@ describe('App pipeline flow', () => {
 
   it('keeps a pipeline summary when only the TOP title changes', async () => {
     const user = userEvent.setup();
+    // Autosave may fire during typing on a busy test runner. Echo the saved
+    // payload instead of returning the default empty-session stub.
+    vi.mocked(saveSession).mockImplementation(async payload => ({
+      ...payload, session_id: 'session-1', revision: (payload.revision ?? 0) + 1,
+    }));
     vi.mocked(getPipelineResult).mockResolvedValue(
       pipelineResult({ speaker_names: { SPEAKER_00: 'SPEAKER_00' } })
     );

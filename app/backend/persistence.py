@@ -1620,6 +1620,9 @@ def load_session(
     db_path: Path | None = None,
 ) -> dict[str, Any] | None:
     with connect(db_path) as db:
+        # A summary worker can commit between these SELECTs. Read the revision,
+        # text, reviews and metadata from one consistent database snapshot.
+        db.execute("BEGIN")
         row = db.execute(
             "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()
