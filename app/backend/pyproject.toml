@@ -32,6 +32,7 @@ test = [
 py-modules = [
     "agenda_detection",
     "agenda_llm",
+    "agenda_context",
     "llm_transport",
     "gpu_resources",
     "summary_grounding",

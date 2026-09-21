@@ -1376,7 +1376,7 @@ export default function App() {
     setPipelineNotice(null);
   };
 
-  const handleDetectAgenda = async () => {
+  const handleDetectAgenda = async (fresh = false) => {
     const requestId = ++agendaRequestRef.current;
     const inputEpoch = agendaInputEpochRef.current;
     const source = agendaSource(tops, topIds, transcript);
@@ -1385,6 +1385,7 @@ export default function App() {
     try {
       const result = await detectAgenda({
         tops, transcript, model: llmSettings.model,
+        fresh, topIds,
         preserveTranscriptStructure: true,
       });
       if (requestId !== agendaRequestRef.current) return;

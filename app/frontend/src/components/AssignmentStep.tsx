@@ -8,6 +8,7 @@ import type {
 import AudioPlayer from './AudioPlayer';
 import { useAudioSync } from '../hooks/useAudioSync';
 import SpeakerNameEditor from './SpeakerNameEditor';
+import { mergedTiming } from '../transcriptTiming';
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -348,6 +349,9 @@ export default function AssignmentStep({
       ...currentLine,
       line_id: index === 0 ? currentLine.line_id ?? createStableId() : createStableId(),
       text,
+      timing: text === currentLine.text ? currentLine.timing : {
+        source: 'manual_estimate', words: [], segments: currentLine.timing?.segments ?? [],
+      },
       start: currentLine.start + splitDuration * index,
       end:
         index === texts.length - 1
@@ -396,6 +400,7 @@ export default function AssignmentStep({
     const mergedLine = {
       ...previousLine,
       text: [previousLine.text, currentLine.text].filter(Boolean).join(' '),
+      timing: mergedTiming(previousLine, currentLine),
       start: Math.min(previousLine.start, currentLine.start),
       end: Math.max(previousLine.end, currentLine.end),
     };
@@ -427,6 +432,7 @@ export default function AssignmentStep({
     const mergedLine = {
       ...currentLine,
       text: [currentLine.text, nextLine.text].filter(Boolean).join(' '),
+      timing: mergedTiming(currentLine, nextLine),
       start: Math.min(currentLine.start, nextLine.start),
       end: Math.max(currentLine.end, nextLine.end),
     };
@@ -469,6 +475,7 @@ export default function AssignmentStep({
         mergedTranscript[mergedTranscript.length - 1] = {
           ...previousLine,
           text: [previousLine.text, line.text].filter(Boolean).join(' '),
+          timing: mergedTiming(previousLine, line),
           start: Math.min(previousLine.start, line.start),
           end: Math.max(previousLine.end, line.end),
         };
@@ -901,10 +908,17 @@ export default function AssignmentStep({
           <div className="flex flex-wrap gap-2">
             {onDetectAgenda && <button
               type="button"
-              onClick={onDetectAgenda}
+              onClick={() => onDetectAgenda()}
               disabled={isDetectingAgenda || !hasTops || !transcript.length}
               className="px-4 py-2 border rounded-lg disabled:text-gray-400"
             >{isDetectingAgenda ? 'TOP-Erkennung läuft …' : 'TOP-Erkennung erneut berechnen'}</button>}
+            {onDetectAgenda && <button
+              type="button"
+              onClick={() => onDetectAgenda(true)}
+              disabled={isDetectingAgenda || !hasTops || !transcript.length}
+              className="px-4 py-2 border rounded-lg disabled:text-gray-400"
+              title="Neue Modellantworten verwenden; vorhandene Ergebnisse bleiben im Cache erhalten"
+            >Frische TOP-Berechnung</button>}
             <button
               type="button"
               onClick={applyAllSafeSuggestions}
@@ -927,6 +941,14 @@ export default function AssignmentStep({
         {agendaDetection?.warnings?.map((warning) => (
           <p key={warning} role="status" className="text-amber-700">{warning}</p>
         ))}
+        {agendaDetection?.llm?.chunks && (
+          <p className="text-sm text-gray-600">
+            {agendaDetection.llm.status === 'success' ? 'Technisch vollständig verarbeitet' : 'Technische Verarbeitung prüfen'}
+            {' · '}{agendaDetection.llm.attempted_calls} neue Modellaufrufe
+            {' · '}{agendaDetection.llm.chunks.filter((c) => c.status === 'cached').length} Cache-Treffer.
+            {' '}Die fachliche Zuordnung bleibt prüfpflichtig.
+          </p>
+        )}
         {!agendaDetectionStale && Boolean(agendaDetection?.llm?.gaps?.length) && (
           <details className="mb-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
             <summary>Gründe für unzugeordnete Zeilen</summary>

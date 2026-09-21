@@ -4,8 +4,8 @@ export function agendaSource(tops: string[], top_ids: string[], transcript: Tran
   return {
     tops,
     top_ids,
-    transcript: transcript.map(({ line_id, speaker, text, start, end }) => ({
-      line_id, speaker, text, start, end,
+    transcript: transcript.map(({ line_id, speaker, text, start, end, timing }) => ({
+      line_id, speaker, text, start, end, ...(timing ? { timing } : {}),
     })),
   };
 }

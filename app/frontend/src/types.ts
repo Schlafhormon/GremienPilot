@@ -11,6 +11,11 @@ export interface TranscriptLine {
   text: string;
   start: number;  // Start time in seconds
   end: number;    // End time in seconds
+  timing?: {
+    source: string;
+    words: { text: string; char_start: number; char_end: number; start: number; end: number }[];
+    segments: { segment_id: string; start: number; end: number }[];
+  } | null;
 }
 
 export interface AudioMetadata {
@@ -114,6 +119,7 @@ export interface PipelineJob {
 }
 
 export interface PipelineStartOptions {
+  agendaFresh?: boolean;
   sessionId?: string | null;
   tops?: string[];
   pdfFile?: File | null;
@@ -330,6 +336,9 @@ export interface AssignmentSuggestionsResponse {
 }
 
 export interface AgendaDetectionRequest {
+  topIds?: string[];
+  fresh?: boolean;
+  cacheNamespace?: string;
   preserveTranscriptStructure?: boolean;
   useLlm?: boolean | null;
   tops?: string[];
@@ -339,6 +348,7 @@ export interface AgendaDetectionRequest {
 }
 
 export interface AgendaLLMUsage {
+  provenance?: { model?: string; digest?: string; cache_namespace?: string; prompt_version?: string };
   enabled: boolean;
   source: "server_default" | "request";
   timeout_seconds: number;
@@ -457,7 +467,7 @@ export interface AssignmentStepProps {
   agendaDetectionError?: string | null;
   agendaDetectionStale?: boolean;
   isDetectingAgenda?: boolean;
-  onDetectAgenda?: () => void;
+  onDetectAgenda?: (fresh?: boolean) => void;
   onTranscriptStructureChange?: () => void;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;

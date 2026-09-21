@@ -34,7 +34,7 @@ def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, ef
         extract("Einladung: 1. Haushalt", system_prompt="/no_think\nFachlicher Kontext")
     else:
         fake_openai_module.content = json.dumps({"tops": [{
-            "top_id": "agenda:0", "top_title": "1. Haushalt",
+            "top_id": "unspecified:1", "top_title": "1. Haushalt",
             "start_index": 0, "end_index": 0, "confidence": 0.9,
             "evidence_index": 0, "evidence_text": "Ich rufe TOP 1 Haushalt auf.", "reason": "Aufruf Haushalt",
         }]})

@@ -425,7 +425,7 @@ def _transcribe_audio(
         )
 
         if progress_callback:
-            progress_callback(85, "Segmente werden zusammengeführt...")
+            progress_callback(85, "Sprecher und Zeitmarken werden übernommen...")
 
         # Assign speakers to segments
         logger.info("Assigning speakers to segments...")
@@ -435,8 +435,8 @@ def _transcribe_audio(
         if progress_callback:
             progress_callback(95, "Transkript wird erstellt...")
 
-        # Convert to our format and merge consecutive segments from same speaker
-        # Keep timestamps for audio sync - extend end time when merging
+        # Preserve original segment and alignment boundaries for audio review.
+        from transcript_splitter import aligned_segment_line
         logger.info("Creating transcript output...")
         transcript = []
         raw_segment_count = len(result["segments"])
@@ -444,19 +444,9 @@ def _transcribe_audio(
             speaker = segment.get("speaker", "UNKNOWN")
             text = segment.get("text", "").strip()
             if text:
-                # Merge with previous segment if same speaker
-                if transcript and transcript[-1]["speaker"] == speaker:
-                    transcript[-1]["text"] += " " + text
-                    transcript[-1]["end"] = segment.get("end", transcript[-1]["end"])
-                else:
-                    transcript.append({
-                        "speaker": speaker,
-                        "text": text,
-                        "start": segment.get("start", 0.0),
-                        "end": segment.get("end", 0.0),
-                    })
+                transcript.append(aligned_segment_line(segment))
 
-        logger.info(f"Transcription finished: {len(transcript)} lines (merged from {raw_segment_count} segments)")
+        logger.info(f"Transcription finished: {len(transcript)} lines (preserved from {raw_segment_count} alignment segments)")
         return TranscriptionResult(
             transcript=transcript,
             audio_duration_seconds=audio_duration_seconds,

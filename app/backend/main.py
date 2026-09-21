@@ -34,7 +34,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, model_serializer
 
 from transcribe import (
     transcribe_audio,
@@ -921,6 +921,14 @@ class TranscriptLine(BaseModel):
     # speech boundaries. Decimal places do not indicate timestamp accuracy.
     start: float
     end: float
+    timing: Optional[Dict[str, Any]] = None
+
+    @model_serializer(mode='wrap')
+    def serialize_line(self, handler):
+        value = handler(self)
+        if value.get('timing') is None:
+            value.pop('timing', None)
+        return value
 
 
 class AudioMetadata(BaseModel):
@@ -1253,6 +1261,9 @@ class AssignmentSuggestionsRequest(BaseModel):
 
 
 class AgendaDetectionRequest(BaseModel):
+    fresh: StrictBool = False
+    cache_namespace: str = Field(default='', max_length=128)
+    top_ids: List[str] = Field(default_factory=list)
     preserve_transcript_structure: StrictBool = False
     use_llm: Optional[StrictBool] = None
     transcript: List[TranscriptLine]
@@ -1282,6 +1293,7 @@ class AssignmentSuggestionsResponse(BaseModel):
 
 
 class AgendaLLMUsageResponse(BaseModel):
+    provenance: Dict[str, Any] = Field(default_factory=dict)
     enabled: bool
     source: str
     timeout_seconds: float
@@ -2204,6 +2216,7 @@ def line_to_dict(line: Any) -> dict[str, Any]:
             "text": str(line.get("text", "")),
             "start": float(line.get("start", 0)),
             "end": float(line.get("end", 0)),
+            **({'timing': line['timing']} if line.get('timing') else {}),
         }
     return {
         "line_id": str(getattr(line, "line_id", None) or uuid.uuid4()),
@@ -2211,6 +2224,7 @@ def line_to_dict(line: Any) -> dict[str, Any]:
         "text": str(getattr(line, "text", "")),
         "start": float(getattr(line, "start", 0)),
         "end": float(getattr(line, "end", 0)),
+        **({'timing': line.timing} if getattr(line, 'timing', None) else {}),
     }
 
 
@@ -2356,6 +2370,7 @@ def reconcile_session_summaries(
     if state.get("transcript") is None:
         state["transcript"] = previous_lines
     normalized_lines: list[dict[str, Any]] = []
+    previous_by_id = {line.get('line_id'): line for line in previous_lines if line.get('line_id')}
     for index, raw_line in enumerate(state.get("transcript") or []):
         normalized = line_to_dict(raw_line)
         supplied_id = (
@@ -2372,6 +2387,14 @@ def reconcile_session_summaries(
                 normalized["line_id"] = str(
                     previous.get("line_id") or normalized["line_id"]
                 )
+        prior = previous_by_id.get(normalized['line_id'])
+        if prior and prior.get('timing'):
+            unchanged = all(prior.get(k) == normalized.get(k) for k in ('text', 'start', 'end'))
+            if unchanged and not normalized.get('timing'):
+                normalized['timing'] = prior['timing']  # Older clients omit this optional field.
+            elif not unchanged and normalized.get('timing') == prior['timing']:
+                normalized['timing'] = {'source': 'manual_estimate', 'words': [],
+                                        'segments': prior['timing'].get('segments', [])}
         normalized_lines.append(normalized)
     state["transcript"] = normalized_lines
     state["top_ids"] = ensure_session_top_ids(state, existing)
@@ -2892,6 +2915,7 @@ def detect_pipeline_agenda(
                 model=model,
                 system_prompt=system_prompt,
                 use_llm=options.get("agenda_use_llm"),
+                cache_namespace=options.get('agenda_cache_namespace', ''),
                 progress_callback=lambda usage: save_pipeline_state(
                     pipeline_id, result_refs={"agenda_progress": asdict(usage)}),
             )
@@ -3195,6 +3219,8 @@ def run_pipeline_job(
             options=options,
         )
         top_ids = [str(uuid.uuid4()) for _ in tops]
+        for identity in ((agenda_info.get('llm') or {}).get('provenance') or {}).get('identities', []):
+            identity['top_uid'] = top_ids[identity['top_index']]
         # Freeze the exact detector input and result before manual editing begins.
         agenda_proposals = {
             "version": 1,
@@ -3396,6 +3422,7 @@ async def start_pipeline(
     summary_system_prompt: Optional[str] = Form(None),
     agenda_system_prompt: Optional[str] = Form(None),
     agenda_use_llm: Optional[bool] = Form(None),
+    agenda_fresh: bool = Form(False),
     pdf_system_prompt: Optional[str] = Form(None),
     remember_speakers: bool = Form(False),
     skip_agenda_detection: bool = Form(False),
@@ -3423,6 +3450,8 @@ async def start_pipeline(
     transcription_job_id = str(uuid.uuid4())
     effective_session_id = session_id or str(uuid.uuid4())
     parsed_options = parse_pipeline_options(options)
+    if agenda_fresh:
+        parsed_options['agenda_cache_namespace'] = str(uuid.uuid4())
     if agenda_use_llm is not None:
         parsed_options["agenda_use_llm"] = agenda_use_llm
     if model:
@@ -4653,6 +4682,9 @@ def agenda_detection_endpoint(request: AgendaDetectionRequest):
     )
     transcript = transcript_utterances(split_transcript)
     valid_tops = [top.strip() for top in request.tops if top.strip()]
+    if request.top_ids and (len(request.top_ids) != len(valid_tops) or
+                           len(set(request.top_ids)) != len(valid_tops) or not all(request.top_ids)):
+        raise HTTPException(status_code=400, detail='TOP-IDs müssen vollständig und eindeutig sein')
     if valid_tops:
         result = segment_known_agenda(
             transcript,
@@ -4660,6 +4692,7 @@ def agenda_detection_endpoint(request: AgendaDetectionRequest):
             model=request.model,
             system_prompt=request.system_prompt,
             use_llm=request.use_llm,
+            cache_namespace=str(uuid.uuid4()) if request.fresh else request.cache_namespace,
         )
     else:
         result = detect_agenda_from_transcript(
@@ -4669,6 +4702,9 @@ def agenda_detection_endpoint(request: AgendaDetectionRequest):
             use_llm=request.use_llm,
         )
 
+    if result.llm and request.top_ids:
+        for identity in result.llm.provenance.get('identities', []):
+            identity['top_uid'] = request.top_ids[identity['top_index']]
     return AgendaDetectionResponse(
         llm=asdict(result.llm) if result.llm else None,
         warnings=result.llm.warnings if result.llm else [],

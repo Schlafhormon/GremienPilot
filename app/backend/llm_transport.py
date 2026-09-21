@@ -153,6 +153,26 @@ def cache_write(key, value):
     os.replace(temporary, target)
 
 
-def cache_key(config, messages, purpose):
+def model_fingerprint(config):
+    """Resolve a mutable local tag once per classification, never log credentials.
+
+    An unresolved digest disables agenda caching for this run, so two unknown
+    model installations cannot accidentally share a trusted cache entry.
+    """
+    native = os.environ.get('LLM_OLLAMA_NATIVE', 'true' if config.uses_ollama else 'false').lower() == 'true'
+    if not native:
+        return {'model': config.model, 'digest': None, 'provider': 'openai-compatible'}
+    import httpx
+    response = httpx.get(config.base_url.removesuffix('/v1') + '/api/tags', timeout=10,
+                         headers={'Authorization': 'Bearer ' + config.api_key})
+    response.raise_for_status()
+    normalize = lambda name: name if ':' in name else name + ':latest'
+    entry = next((m for m in response.json().get('models', [])
+                  if normalize(m.get('name', '')) == normalize(config.model)), None)
+    return {'model': config.model, 'digest': entry.get('digest') if entry else None, 'provider': 'ollama'}
+
+
+def cache_key(config, messages, purpose, provenance=None):
     return json.dumps([purpose, config.base_url, config.model, config.reasoning_effort,
-                       context_tokens(), messages], ensure_ascii=False, sort_keys=True)
+                       context_tokens(), messages] + ([provenance] if provenance is not None else []),
+                      ensure_ascii=False, sort_keys=True)

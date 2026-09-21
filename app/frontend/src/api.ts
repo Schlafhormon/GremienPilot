@@ -165,6 +165,7 @@ export async function startPipeline(
     if (prompt !== undefined) formData.append(field, prompt);
   }
   formData.append("remember_speakers", String(Boolean(options.rememberSpeakers)));
+  if (options.agendaFresh) formData.append('agenda_fresh', 'true');
   if (options.agendaUseLlm != null) {
     formData.append("agenda_use_llm", String(options.agendaUseLlm));
   }
@@ -603,6 +604,9 @@ export async function detectAgenda(
       system_prompt: request.systemPrompt,
       use_llm: request.useLlm,
       preserve_transcript_structure: request.preserveTranscriptStructure,
+      fresh: request.fresh,
+      cache_namespace: request.cacheNamespace,
+      top_ids: request.topIds,
     }),
   });
 

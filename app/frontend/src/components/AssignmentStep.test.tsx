@@ -139,9 +139,19 @@ describe('AssignmentStep', () => {
     await user.click(screen.getByRole('button', { name: /^speichern$/i }));
 
     expect(setTranscript).toHaveBeenCalledWith([
-      { ...transcript[0]!, text: 'Hallo korrigiert' },
+      { ...transcript[0]!, text: 'Hallo korrigiert', timing: { source: 'manual_estimate', words: [], segments: [] } },
       transcript[1],
     ]);
+  });
+
+  it('requests fresh model answers explicitly without replacing assignments', async () => {
+    const user = userEvent.setup();
+    const onDetectAgenda = vi.fn();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ onDetectAgenda, setAssignments });
+    await user.click(screen.getByRole('button', { name: 'Frische TOP-Berechnung' }));
+    expect(onDetectAgenda).toHaveBeenCalledWith(true);
+    expect(setAssignments).not.toHaveBeenCalled();
   });
 
   it('splits a corrected transcript line by line breaks and keeps assignments aligned', async () => {
@@ -160,8 +170,8 @@ describe('AssignmentStep', () => {
     await user.click(screen.getByRole('button', { name: /^speichern$/i }));
 
     expect(setTranscript).toHaveBeenCalledWith([
-      { ...transcript[0]!, text: 'Hallo', start: 0, end: 2 },
-      { ...transcript[0]!, line_id: expect.any(String), text: 'zusammen', start: 2, end: 4 },
+      { ...transcript[0]!, text: 'Hallo', start: 0, end: 2, timing: { source: 'manual_estimate', words: [], segments: [] } },
+      { ...transcript[0]!, line_id: expect.any(String), text: 'zusammen', start: 2, end: 4, timing: { source: 'manual_estimate', words: [], segments: [] } },
       transcript[1],
     ]);
     expect(setAssignments).toHaveBeenCalledWith([0, 0, 1]);

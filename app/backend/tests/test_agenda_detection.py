@@ -235,7 +235,7 @@ def test_explicit_decision_overrides_default_without_content_side_effects(
     monkeypatch, fake_openai_module, known_tops, server_default, decision, context,
 ):
     monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_USE_LLM", server_default)
-    fake_openai_module.content = '{"tops":[{"top_id":"agenda:0","reason":"Haushalt aufgerufen","top_title":"Haushalt","start_index":0,"end_index":0,"evidence_index":0,"evidence_text":"TOP 1 Haushalt."}]}'
+    fake_openai_module.content = '{"tops":[{"top_id":"unspecified:unnumbered","reason":"Haushalt aufgerufen","top_title":"Haushalt","start_index":0,"end_index":0,"evidence_index":0,"evidence_text":"TOP 1 Haushalt."}]}'
     transcript = [TranscriptUtterance("MOD", "TOP 1 Haushalt.")]
     result = (segment_known_agenda(transcript, ["Haushalt"], use_llm=decision, **context)
               if known_tops else detect_agenda_from_transcript(transcript, use_llm=decision, **context))
@@ -712,8 +712,8 @@ def test_prompt_uses_request_ids_independent_of_original_numbering(fake_openai_m
                          ['[Öffentlich] 02.10 Schule', '[Nichtöffentlich] 02.10 Schule'], use_llm=True)
     request = fake_openai_module.instances[0].calls[0]
     prompt = request['messages'][1]['content']
-    assert '"top_id": "agenda:0", "title": "[Öffentlich] 02.10 Schule"' in prompt
-    assert '"top_id": "agenda:1", "title": "[Nichtöffentlich] 02.10 Schule"' in prompt
+    assert '"top_id": "public:02.10", "title": "Schule"' in prompt
+    assert '"top_id": "nonpublic:02.10", "title": "Schule"' in prompt
     assert 'Zeilennummer' in request['messages'][0]['content']
 
 

@@ -124,6 +124,7 @@ class AgendaLLMUsage:
     processed_lines: list[int] = field(default_factory=list)
     gaps: list[dict] = field(default_factory=list)
     chunks: list[dict] = field(default_factory=list)
+    provenance: dict = field(default_factory=dict)
 
     @property
     def warnings(self) -> list[str]:
@@ -247,6 +248,7 @@ def segment_known_agenda(
     *,
     use_llm: bool | None = None,
     progress_callback=None,
+    cache_namespace: str = '',
 ) -> AgendaDetectionResult:
     """Detect start/end lines for an already known TOP list."""
     usage = _llm_usage(use_llm)
@@ -256,7 +258,8 @@ def segment_known_agenda(
 
     if usage.enabled:
         from agenda_llm import classify
-        segments = classify(transcript, valid_tops, usage, model, system_prompt, progress_callback)
+        segments = classify(transcript, valid_tops, usage, model, system_prompt, progress_callback,
+                            cache_namespace=cache_namespace)
         strategy = "known_agenda_llm_complete" if usage.status == "success" else "known_agenda_llm_incomplete"
         return _result_from_segments(len(transcript), segments, strategy,
                                      tops=valid_tops, usage=usage)

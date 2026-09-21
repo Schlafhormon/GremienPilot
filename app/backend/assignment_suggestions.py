@@ -21,6 +21,7 @@ from agenda_labels import agenda_references, parse_agenda_label, reference_targe
 CALL = re.compile(
     r"^(?:(?:so|gut|also|dann|nun|jetzt|abschliessend|als n(?:a|ae)chstes)[,:]?\s+)*"
     r"(?:komme(?:n)?\s+(?:wir|ich)\s+(?:(?:jetzt|nun|wieder|zuruck)\s+)*(?:zu|zum|zur)\b"
+    r"|(?:wir\s+kommen|ich\s+komme)\s+(?:(?:jetzt|nun|wieder|zuruck)\s+)*(?:zu|zum|zur)\b"
     r"|(?:ich\s+rufe|rufe\s+ich|wir\s+rufen|rufen\s+wir)\b.+\bauf\b"
     r"|(?:ich\s+eroffne|wir\s+eroffnen)\b"
     r"|weiter\s+geht\s+es\s+(?:mit|um)\b"
@@ -56,6 +57,18 @@ def transition_kind(text: str) -> str:
     We intentionally do not try to assign two clauses within a single row.
     """
     normalized = normalize_text(text)
+    # Hedges before a present performative do not turn it into reported speech.
+    normalized = re.sub(r'^ich (?:denke|glaube|meine),?\s*(?:dass\s+)?', '', normalized)
+    if (agenda_references(text)
+            and re.search(r'\b(?:weitere|weiteren|noch)\s+(?:anfragen|fragen|informationen|wortmeldungen)\b', normalized)
+            and not NON_CURRENT.search(normalized) and not re.search(r'[„“"«»]', text)):
+        return 'continuation'
+    # A conditional invitation for further remarks is a current continuation,
+    # not a new call and not a prohibition on correcting a previous model label.
+    if (agenda_references(text) and re.search(r'\b(?:habe|hat|gibt)\b.{0,40}\b(?:hinweis|frage|anmerkung|wortmeldung)', normalized)
+            and not re.search(r'\b(?:gestern|damals|vorhin|protokoll|niederschrift|nachste\w* sitzung)\b', normalized)
+            and not re.search(r'[„“"«»]', text)):
+        return 'continuation'
     blocked = bool(NON_CURRENT.search(normalized) or "?" in text or re.search(r'[„“"«»]', text))
     if not blocked and STOP.search(normalized):
         return "stop"
@@ -75,6 +88,8 @@ def transition_kind(text: str) -> str:
     refs = agenda_references(text)
     if refs and refs[0].start == 0 and not HEADING_PREDICATE.search(normalized):
         return "heading"
+    if refs:
+        return 'mention'
     return "none"
 
 

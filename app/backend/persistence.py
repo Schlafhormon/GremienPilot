@@ -324,6 +324,11 @@ def init_db(db_path: Path | None = None) -> None:
         top_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(tops)").fetchall()
         }
+        # Additive migration: old rows keep their original timing semantics.
+        for table in ('transcript_lines', 'session_transcript_lines'):
+            columns = {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}
+            if 'timing_json' not in columns:
+                db.execute(f'ALTER TABLE {table} ADD COLUMN timing_json TEXT')
         if "top_uid" not in top_columns:
             db.execute("ALTER TABLE tops ADD COLUMN top_uid TEXT")
         legacy_tops = db.execute(
@@ -1287,9 +1292,9 @@ def save_job(job_id: str, job_data: dict[str, Any], db_path: Path | None = None)
             db.executemany(
                 """
                 INSERT INTO transcript_lines (
-                    job_id, line_index, speaker, text, start, end
+                    job_id, line_index, speaker, text, start, end, timing_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1299,6 +1304,7 @@ def save_job(job_id: str, job_data: dict[str, Any], db_path: Path | None = None)
                         str(line.get("text", "")),
                         float(line.get("start", 0)),
                         float(line.get("end", 0)),
+                        _to_json(line.get('timing')),
                     )
                     for index, line in enumerate(transcript)
                 ],
@@ -1324,7 +1330,7 @@ def load_job(job_id: str, db_path: Path | None = None) -> dict[str, Any] | None:
 
         lines = db.execute(
             """
-            SELECT speaker, text, start, end
+            SELECT speaker, text, start, end, timing_json
             FROM transcript_lines
             WHERE job_id = ?
             ORDER BY line_index
@@ -1335,7 +1341,7 @@ def load_job(job_id: str, db_path: Path | None = None) -> dict[str, Any] | None:
     job = dict(row)
     job["cancellation_requested"] = bool(job.get("cancellation_requested"))
     job["remember_speakers"] = bool(job.get("remember_speakers"))
-    job["transcript"] = [dict(line) for line in lines] if lines else None
+    job["transcript"] = [_transcript_row(line) for line in lines] if lines else None
     return job
 
 
@@ -1594,9 +1600,9 @@ def save_session(
             db.executemany(
                 """
                 INSERT INTO session_transcript_lines (
-                    session_id, line_index, line_uid, speaker, text, start, end
+                    session_id, line_index, line_uid, speaker, text, start, end, timing_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1607,6 +1613,7 @@ def save_session(
                         str(line.get("text", "")),
                         float(line.get("start", 0)),
                         float(line.get("end", 0)),
+                        _to_json(line.get('timing')),
                     )
                     for index, line in enumerate(state.get("transcript") or [])
                 ],
@@ -1679,7 +1686,7 @@ def load_session(
         ).fetchall()
         transcript = db.execute(
             """
-            SELECT line_uid AS line_id, speaker, text, start, end
+            SELECT line_uid AS line_id, speaker, text, start, end, timing_json
             FROM session_transcript_lines
             WHERE session_id = ?
             ORDER BY line_index
@@ -1711,8 +1718,16 @@ def load_session(
     }
     session["agenda_proposals"] = _from_json(session.pop("agenda_proposals_json", None))
     session["export_metadata"] = _from_json(session.get("export_metadata_json")) or {}
-    session["transcript"] = [dict(line) for line in transcript] if transcript else None
+    session["transcript"] = [_transcript_row(line) for line in transcript] if transcript else None
     return session
+
+
+def _transcript_row(row):
+    value = dict(row)
+    timing = _from_json(value.pop('timing_json', None))
+    if timing is not None:
+        value['timing'] = timing
+    return value
 
 
 def load_latest_pipeline_job_for_session(

@@ -4,11 +4,14 @@ import math
 import os
 import re
 import time
+import hashlib
+import uuid
 from dataclasses import replace
 
 from assignment_suggestions import AssignmentSegment, transition_kind, assignments_from_segments
 from agenda_labels import reference_targets, parse_agenda_label
-from llm_transport import complete, fits, input_bound, structured_output_budget, cache_key, cache_read, cache_write
+from agenda_context import model_agenda, EvidenceContext, closing_act
+from llm_transport import complete, fits, input_bound, structured_output_budget, cache_key, cache_read, cache_write, model_fingerprint
 from summarize import get_llm_config
 
 PROMPT = """Ordne JEDE Zielzeile eines deutschen Sitzungstranskripts ihrer aktuell behandelten Agenda zu.
@@ -69,13 +72,13 @@ def parse_response(content):
     return json.loads(content, object_pairs_hook=unique_object)
 
 
-def response_schema(start, end, top_count):
+def response_schema(start, end, identities):
     properties = {
         'classification_note': {'type': 'string', 'description':
             'Kurze fachliche Begründung des Sitzungsverlaufs: aktuell behandelte TOP-Identitäten, '
             'erkennbare Übergänge und Abgrenzung zu bloßen Erwähnungen. Vor der Einzelzuordnung ausgeben.'},
         'assignments': {'type': 'object', 'properties': {
-            str(i): {'enum': [None] + [f'agenda:{j}' for j in range(top_count)]}
+            str(i): {'enum': [None] + list(identities)}
             for i in range(start, end+1)}, 'required': [str(i) for i in range(start, end+1)],
             'additionalProperties': False},
         'uncertain_lines': {'type': 'array', 'items': {'type': 'integer', 'minimum': start, 'maximum': end}},
@@ -88,7 +91,7 @@ def response_schema(start, end, top_count):
                    'additionalProperties': False}}}
 
 
-def classify(transcript, tops, usage, model=None, system_prompt=None, progress_callback=None):
+def classify(transcript, tops, usage, model=None, system_prompt=None, progress_callback=None, *, cache_namespace=''):
     from openai import OpenAI
     config = get_llm_config(model)
     client = OpenAI(base_url=config.base_url, api_key=config.api_key,
@@ -96,24 +99,69 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
     segments = []
     previous = None
     overlap = max(0, int(os.environ.get('AGENDA_DETECTION_CHUNK_OVERLAP_LINES', '12')) // 2)
+    before = max(0, int(os.environ.get('AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE', str(overlap))))
+    after = max(0, int(os.environ.get('AGENDA_DETECTION_CONTEXT_WINDOW_AFTER', str(overlap))))
+    agenda = model_agenda(tops)
+    identities = {t['top_id']: i for i, t in enumerate(agenda)}
+    evidence_context = EvidenceContext(transcript, tops, agenda)
     limit = max(1, int(os.environ.get('AGENDA_DETECTION_CHUNK_LINES', '160')))
     char_limit = max(256, int(os.environ.get('LLM_CHUNK_CHARS', '7000')))
     output = 2048
     output_reserve = structured_output_budget(config, output)
+    try:
+        fingerprint = model_fingerprint(config)
+    except Exception as exc:
+        fingerprint = {'model': config.model, 'digest': None, 'error': type(exc).__name__}
+    provenance = {**fingerprint, 'prompt_version': 'known-agenda-evidence-v5', 'schema_version': 5,
+                  'temperature': 0.1, 'max_tokens': output, 'reasoning_effort': config.reasoning_effort,
+                  'seed': None, 'truncate': False, 'shift': False,
+                  'num_thread': int(os.environ.get('LLM_CPU_THREADS', '16')),
+                  'cache_namespace': cache_namespace, 'context_before': before, 'context_after': after}
+    if not fingerprint.get('digest') and fingerprint.get('provider') != 'openai-compatible':
+        provenance['unresolved_model_run'] = str(uuid.uuid4())
+    usage.provenance = {**provenance, 'identities': [dict(t, top_index=i) for i, t in enumerate(agenda)]}
     repairs = max(0, min(3, int(os.environ.get('LLM_REPAIR_SPLIT_DEPTH', '1'))))
     system = PROMPT + ('\nZusätzliche fachliche Vorgaben (Schema bleibt verbindlich):\n' + system_prompt if system_prompt else '')
+
+    def window_schema(start, end):
+        schema = response_schema(start, end, identities)
+        properties = schema['json_schema']['schema']['properties']['assignments']['properties']
+        for i in range(start, end+1):
+            state = evidence_context.at(i)
+            allowed = []
+            for identity, index in identities.items():
+                if state['section'] and agenda[index]['section'] not in {None, state['section']['section']}:
+                    continue
+                if re.search(r'Schließung|Sitzungsende', tops[index], re.I) and (
+                    not state['topic'] or state['topic']['kind'] != 'closing' or state['topic']['top_id'] != identity):
+                    continue
+                allowed.append(identity)
+            properties[str(i)] = {'enum': [None] + allowed}
+        return schema
 
     def messages(start, end):
         def rows(a, b):
             return [{'index': i, 'speaker': transcript[i].speaker, 'text': transcript[i].text}
                     for i in range(a, b)]
-        user = {'agenda': [{'top_id': f'agenda:{i}', 'title': t,
-                            'number': parse_agenda_label(t).number_key,
-                            'section': parse_agenda_label(t).section} for i, t in enumerate(tops)],
-                'target_start': start, 'target_end': end, 'previous_top': previous,
-                'context_before': rows(max(0, start-overlap), start),
+        user = {'agenda': agenda,
+                'target_start': start, 'target_end': end,
+                'previous_top': dict(previous, source='unverified_prediction') if previous else None,
+                'evidence_context': evidence_context.packet(start, end),
+                'context_before': rows(max(0, start-before), start),
                 'target_lines': rows(start, end+1),
-                'context_after': rows(end+1, min(len(transcript), end+overlap+1))}
+                'context_after': rows(end+1, min(len(transcript), end+after+1))}
+        if previous and previous.get('evidence_index') is not None:
+            origin = previous['evidence_index']
+            user['predicted_topic_origin'] = {
+                'source': 'unverified_model_boundary',
+                'instruction': 'Unbestätigter früherer Vorschlag, kein tatsächlicher Aufrufnachweis. '
+                'Prüfe an diesen Originalzeilen, ob ein indirekter neuer TOP begonnen hat.',
+                'original_lines': rows(max(0, origin-1), min(start, origin+4))}
+        user['scope_rules'] = ('Ein offener Informations-TOP umfasst mehrere Sachthemen, auch Gebühren. '
+            'Sachähnlichkeit ist kein Beleg für eine Wiederaufnahme. Rückfragen zu Punkten einer '
+            'früheren Niederschrift bleiben beim heutigen Niederschrifts-TOP. Ein nachfolgender '
+            'eigenständiger Informationspunkt kann auch indirekt beginnen. Schließung nur bei Vollzug '
+            'oder unmittelbar zugehöriger Verabschiedung. Bedingte Nachfragen können aktuelle Fortsetzungen sein.')
         if any(re.search(r"\b(?:schließe|beende)\b.{0,80}\bSitzung\b|"
                          r"\bSitzung\b.{0,60}\b(?:geschlossen|beendet)\b",
                          transcript[i].text, re.I) for i in range(start, end+1)):
@@ -157,8 +205,31 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                 "zum offenen Anfrage-/Informationspunkt desselben Sitzungsteils. "
                 "Bei unsicherer Grenze uncertain_lines verwenden."
             )
-        return [{'role': 'system', 'content': system},
-                {'role': 'user', 'content': json.dumps(user, ensure_ascii=False)}]
+        def encode():
+            return [{'role': 'system', 'content': system},
+                    {'role': 'user', 'content': json.dumps(user, ensure_ascii=False)}]
+        # Byte upper bound includes system, evidence, schema-output reserve and
+        # room for a same-window repair. Remove only optional neighbor context.
+        user['context_budget'] = {'before_requested': before, 'after_requested': after,
+                                  'omitted_indices': [], 'repair_reserve': 768}
+        while not fits(encode(), output_reserve + 768):
+            if user['context_after']:
+                removed = user['context_after'].pop()
+            elif user['context_before']:
+                removed = user['context_before'].pop(0)
+            elif (user.get('predicted_topic_origin') or {}).get('original_lines'):
+                removed = user['predicted_topic_origin']['original_lines'].pop()
+            else:
+                anchors = {e['index'] for e in [user['evidence_context']['section_anchor'],
+                           user['evidence_context']['topic_anchor'],
+                           user['evidence_context']['continuation_anchor']] if e}
+                extra = next((r for r in user['evidence_context']['original_evidence'] if r['index'] not in anchors), None)
+                if extra is None:
+                    break
+                user['evidence_context']['original_evidence'].remove(extra)
+                removed = extra
+            user['context_budget']['omitted_indices'].append(removed['index'])
+        return encode()
 
     def decode(data, start, end):
         if 'assignments' not in data:
@@ -193,13 +264,15 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
             raise AgendaValidationError('missing_segments')
         cursor = start
         checked = []
-        active_identity = previous['top_id'] if previous else None
+        # A preceding prediction may be wrong; it cannot veto a correction.
+        anchor = evidence_context.at(start-1)['topic']
+        active_identity = anchor['top_id'] if anchor else None
         for row in rows:
             a, b = row['start_index'], row['end_index']
             if type(a) is not int or type(b) is not int or a != cursor or not a <= b <= end:
                 raise AgendaValidationError('incomplete_or_overlapping_coverage')
             identity = row.get('top_id')
-            if identity is not None and identity not in {f'agenda:{i}' for i in range(len(tops))}:
+            if identity is not None and identity not in identities:
                 raise AgendaValidationError('unknown_top_id')
             reason = row.get('reason', '').strip()
             if not reason:
@@ -214,9 +287,14 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                 confidence = row.get('confidence', 0.5)
                 if not isinstance(confidence, (int, float)) or not math.isfinite(confidence):
                     raise AgendaValidationError('invalid_confidence')
-                chosen = int(identity.split(':')[1])
+                chosen = identities[identity]
                 kind = transition_kind(transcript[evidence_index].text)
                 _, mentioned_targets = reference_targets(transcript[evidence_index].text, tops)
+                original_topic = evidence_context.at(evidence_index)['topic']
+                if (kind == 'continuation' and original_topic and identity != original_topic['top_id']
+                        and chosen in mentioned_targets and re.search(r'Niederschrift|Protokoll',
+                            tops[identities[original_topic['top_id']]], re.I)):
+                    raise AgendaValidationError('protocol_reference_cannot_change_topic')
                 if (active_identity and identity != active_identity and kind == 'mention'
                         and chosen in mentioned_targets):
                     raise AgendaValidationError('noncurrent_reference_cannot_change_topic')
@@ -225,7 +303,16 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                     row['uncertain'] = True
                     row['confidence'] = min(confidence, 0.5)
                 for i in range(a, b+1):
+                    state = evidence_context.at(i)
+                    if state['section'] and agenda[chosen]['section'] not in {None, state['section']['section']}:
+                        raise AgendaValidationError('contradictory_section_evidence')
+                    is_closing = bool(re.search(r'Schließung|Sitzungsende', tops[chosen], re.I))
+                    if is_closing and (not state['topic'] or state['topic']['kind'] != 'closing'
+                                       or state['topic']['top_id'] != identity):
+                        raise AgendaValidationError('closing_without_evidence')
                     _, targets = reference_targets(transcript[i].text, tops)
+                    if state['section']:
+                        targets = {t for t in targets if agenda[t]['section'] in {None, state['section']['section']}}
                     if transition_kind(transcript[i].text) in {'call', 'heading'} and targets and chosen not in targets:
                         raise AgendaValidationError('contradictory_current_call')
                 active_identity = identity
@@ -235,30 +322,86 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
             raise AgendaValidationError('incomplete_coverage')
         return checked
 
-    def run(start, end, depth=0):
+    def obtain(request, start, end, detail, purpose):
+        key = cache_key(config, request, purpose, provenance)
+        detail.update(cache_key=hashlib.sha256(key.encode()).hexdigest(),
+                      evidence_context=json.loads(request[1]['content'])['evidence_context'],
+                      context_budget=json.loads(request[1]['content'])['context_budget'])
+        cached = cache_read(key)
+        if cached is not None:
+            data = cached.get('data', cached)
+            detail['cache_origin'] = cached.get('history', [])
+        else:
+            data = None
+        history = []
+        for attempt in range(2):
+            try:
+                if data is None:
+                    usage.attempted_calls += 1
+                    response = complete(client, config, model=config.model, messages=request,
+                                        temperature=0.1, max_tokens=output, timeout=usage.timeout_seconds,
+                                        response_format=window_schema(start, end), **config.reasoning_options)
+                    data = parse_response(response.choices[0].message.content)
+                rows = validate(decode(data, start, end), start, end)
+                detail['repair_history'] = history
+                detail['status'] = 'cached' if cached is not None else 'success'
+                if cached is None:
+                    cache_write(key, {'data': data, 'history': history, 'provenance': provenance})
+                return rows
+            except AgendaValidationError as exc:
+                if exc.code not in usage.validation_reasons:
+                    usage.validation_reasons.append(exc.code)
+                history.append({'attempt': attempt, 'reason': exc.code, 'repair': 'same_window'})
+                detail['repair_history'] = history
+                if attempt:
+                    raise
+                # Preserve every original context/evidence line. Repair a structural
+                # gap omission without permitting it to change existing assignments.
+                body = json.loads(request[1]['content'])
+                repair = {'error': exc.code, 'instruction': 'Korrigiere den genannten Fehler mit den Originalbelegen. Vollständiges JSON für dasselbe Fenster.'}
+                fixed_data = data
+                if exc.code == 'missing_gap_reason' and isinstance(data, dict):
+                    repair['fixed_assignments'] = data.get('assignments')
+                    repair['instruction'] = ('Antworte ausschließlich mit gap_reasons: Objekt aus den '
+                        'unveränderten null-Zeilenindizes und je einer konkreten Begründung. '
+                        'Keine assignments neu erzeugen. Alle null-Zeilen sind erforderlich.')
+                body['repair'] = repair
+                repaired_request = [request[0], {'role': 'user', 'content': json.dumps(body, ensure_ascii=False)}]
+                if not fits(repaired_request, output_reserve):
+                    raise
+                usage.attempted_calls += 1
+                schema = window_schema(start, end)
+                if repair.get('fixed_assignments'):
+                    gap_ids = [k for k, v in repair['fixed_assignments'].items() if v is None]
+                    schema['json_schema']['schema'] = {'type': 'object', 'properties': {
+                        'gap_reasons': {'type': 'object', 'properties': {
+                            k: {'type': 'string', 'minLength': 1} for k in gap_ids},
+                            'required': gap_ids, 'additionalProperties': False}},
+                        'required': ['gap_reasons'], 'additionalProperties': False}
+                response = complete(client, config, model=config.model, messages=repaired_request,
+                                    temperature=0.1, max_tokens=output, timeout=usage.timeout_seconds,
+                                    response_format=schema, **config.reasoning_options)
+                data = parse_response(response.choices[0].message.content)
+                if repair.get('fixed_assignments'):
+                    reasons = data.get('gap_reasons')
+                    if (not isinstance(reasons, dict) or set(reasons) != set(gap_ids)
+                            or any(not isinstance(v, str) or not v.strip() for v in reasons.values())):
+                        raise AgendaValidationError('missing_gap_reason')
+                    data = dict(fixed_data, gaps=[{'line_index': int(k), 'reason': v} for k, v in reasons.items()])
+                cached = None
+
+    def run(start, end, depth=0, parent=None):
         nonlocal previous
         request = messages(start, end)
-        key = cache_key(config, request, 'known-agenda-v3')
+        key = cache_key(config, request, 'known-agenda-v5', provenance)
         began = time.monotonic()
-        cached = cache_read(key)
         detail = {'start_index': start, 'end_index': end, 'depth': depth,
+                  'parent_cache_key': parent,
                   'input_token_bound': input_bound(request), 'max_output_tokens': output,
                   'reserved_output_tokens': output_reserve}
         rows = None
         try:
-            if cached is None:
-                usage.attempted_calls += 1
-                response = complete(client, config, model=config.model, messages=request,
-                                    temperature=0.1, max_tokens=output,
-                                    timeout=usage.timeout_seconds,
-                                    response_format=response_schema(start, end, len(tops)), **config.reasoning_options)
-                content = response.choices[0].message.content
-                data = parse_response(content)
-            else:
-                data = cached
-            rows = validate(decode(data, start, end), start, end)
-            cache_write(key, data)
-            detail.update(status='cached' if cached is not None else 'success')
+            rows = obtain(request, start, end, detail, 'known-agenda-v5')
             usage.processed_lines.extend(range(start, end+1))
             for row in rows:
                 identity = row.get('top_id')
@@ -268,8 +411,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                     # Keep the last known topic/section across empty moderation or pauses.
                     # It remains only a hint; an actual new call overrides it.
                     continue
-                index = int(identity.split(':')[1])
-                previous = {'top_id': identity, 'title': tops[index]}
+                index = identities[identity]
+                if not previous or previous['top_id'] != identity:
+                    previous = {'top_id': identity, 'title': tops[index], 'evidence_index': row['start_index']}
                 segments.append(AssignmentSegment(
                     top_index=index, top_title=tops[index], start_index=row['start_index'],
                     end_index=row['end_index'], confidence=max(0.0, min(1.0, float(row.get('confidence', 0.5)))),
@@ -286,13 +430,15 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
             detail.update(status='failed', reason=reason)
             if depth < repairs and start < end:
                 middle = (start + end) // 2
-                left = run(start, middle, depth+1)
-                right = run(middle+1, end, depth+1)
+                left = run(start, middle, depth+1, detail['cache_key'])
+                right = run(middle+1, end, depth+1, detail['cache_key'])
                 if left is not None and right is not None:
                     # Retain the validated repair as a whole. A resumed run must
                     # not repeat the known failed parent request before its cache hits.
                     rows = left + right
-                    cache_write(key, {'tops': rows})
+                    cache_write(key, {'data': {'tops': rows}, 'provenance': provenance,
+                                      'history': [detail, {'repair': 'split', 'children': [
+                                          c for c in usage.chunks if c.get('parent_cache_key') == detail['cache_key']]}]})
             else:
                 usage.gaps.append({'start_index': start, 'end_index': end, 'kind': 'technical',
                                    'reason': reason})
@@ -350,7 +496,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
     max_reviews = max(0, min(10, int(os.environ.get('AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS', '3'))))
     review_note = (
         "\nUnabhängige zweite fachliche Prüfung der Zielzeilen. Der bisher vorgeschlagene Sitzungskontext "
-        "steht in context_assignments. Ein TOP 'Anfragen', 'Informationen' oder 'Verschiedenes' "
+        "ist keine Evidenz. Nutze evidence_context und Originalzeilen. Ein TOP 'Anfragen', 'Informationen' oder 'Verschiedenes' "
         "kann mehrere Sachthemen umfassen. Ein im Titel genannter Spiegelstrich/Untertitel begrenzt "
         "einen solchen offenen TOP nicht zwingend auf dieses eine Sachthema. Entscheidend sind "
         "der tatsächliche Sitzungsverlauf und der öffentliche/nichtöffentliche Abschnitt. "
@@ -370,7 +516,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
             start, original_end = runs.pop(0)
             current = assignments_from_segments(len(transcript), segments)
             preceding = next((current[i] for i in range(start-1, -1, -1) if current[i] is not None), None)
-            previous = {'top_id': f'agenda:{preceding}', 'title': tops[preceding]} if preceding is not None else None
+            previous = None  # Reviews are independent: neighboring predictions are not evidence.
             end = original_end
             while True:
                 request = messages(start, end)
@@ -379,25 +525,23 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                     request[0]['content'] += '\nZusätzlicher Fachkontext:\n' + system_prompt
                 if phase == 'boundary_review':
                     request[0]['content'] += (
-                        '\nPrüfe hier besonders die formale Grenze. Die bisherigen context_assignments '
-                        'können falsch sein und sind nicht verbindlich. Ordne den tatsächlichen Vollzug '
+                        '\nPrüfe hier besonders die formale Grenze anhand der Originalbelege. '
+                        'Frühere Vorschläge sind nicht verbindlich. Ordne den tatsächlichen Vollzug '
                         'einer Schließung dem passenden eigenen Schließungs-TOP zu. Die Äußerung, '
                         'dass der nichtöffentliche Teil beginnt, gehört bereits in den nichtöffentlichen '
                         'Abschnitt. Vorankündigungen, Zitate und Negationen sind dagegen kein Vollzug.')
                 body = json.loads(request[1]['content'])
-                if phase == 'boundary_review' and previous:
-                    section = parse_agenda_label(previous['title']).section
+                section_anchor = evidence_context.at(start-1)['section']
+                if phase == 'boundary_review' and section_anchor:
+                    section = section_anchor['section']
                     body['section_review'] = {
                         'previous_section': section,
-                        'same_section_top_ids': [f'agenda:{i}' for i, title in enumerate(tops)
+                        'same_section_top_ids': [agenda[i]['top_id'] for i, title in enumerate(tops)
                                                  if parse_agenda_label(title).section == section],
                         'instruction': 'Gleiche TOP-Nummern verschiedener Sitzungsteile nicht verwechseln. '
                             'Ohne tatsächliche Rückkehr in den öffentlichen Teil bleiben nichtöffentliche '
                             'Sachfragen nichtöffentlich. Eine tatsächliche Rückkehr ist möglich; bloße '
                             'Rückblicke, Zitate oder Vorschauen sind kein Abschnittswechsel.'}
-                body['context_assignments'] = {str(i): f'agenda:{current[i]}'
-                    for i in range(max(0, start-overlap), min(len(transcript), end+overlap+1))
-                    if current[i] is not None and not start <= i <= end}
                 request[1]['content'] = json.dumps(body, ensure_ascii=False)
                 if fits(request, output_reserve) or end == start:
                     break
@@ -408,18 +552,8 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                       'input_token_bound': input_bound(request), 'max_output_tokens': output,
                       'reserved_output_tokens': output_reserve}
             began = time.monotonic()
-            key = cache_key(config, request, 'known-agenda-' + phase + '-v2')
             try:
-                data = cache_read(key)
-                cached = data is not None
-                if not cached:
-                    usage.attempted_calls += 1
-                    response = complete(client, config, model=config.model, messages=request,
-                                        temperature=0.1, max_tokens=output, timeout=usage.timeout_seconds,
-                                        response_format=response_schema(start, end, len(tops)), **config.reasoning_options)
-                    data = parse_response(response.choices[0].message.content)
-                rows = validate(decode(data, start, end), start, end)
-                cache_write(key, data)
+                rows = obtain(request, start, end, detail, 'known-agenda-' + phase + '-v5')
                 # Commit replacement only after the entire supplemental answer is valid.
                 kept_gaps = []
                 for gap in usage.gaps:
@@ -445,7 +579,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                         kept_gaps.append({'start_index': row['start_index'], 'end_index': row['end_index'],
                                           'kind': 'semantic', 'reason': row['reason']})
                     else:
-                        index = int(identity.split(':')[1])
+                        index = identities[identity]
                         if phase == 'boundary_review' and any(
                                 current[i] != index for i in range(row['start_index'], row['end_index']+1)):
                             row['uncertain'] = True
@@ -461,7 +595,6 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                     updated = assignments_from_segments(len(transcript), segments)
                     detail['changes'] = [{'line_index': i, 'before': current[i], 'after': updated[i]}
                                          for i in range(start, end+1) if current[i] != updated[i]]
-                detail['status'] = 'cached' if cached else 'success'
             except Exception as exc:
                 # Failure of a second opinion must not relabel an already evaluated
                 # semantic gap as technically unseen, or overwrite successful assignments.
@@ -470,6 +603,10 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                 if reason not in usage.failure_reasons:
                     usage.failure_reasons.append(reason)
                 detail.update(status='failed', reason=reason)
+                # Retain the first opinion, but expose the unresolved disagreement.
+                segments[:] = [replace(s, uncertain=True, confidence=min(s.confidence, 0.5),
+                    reason='Nachprüfung fehlgeschlagen; Grenze offen. ' + s.reason)
+                    if s.start_index <= end and s.end_index >= start else s for s in segments]
             detail['duration_seconds'] = round(time.monotonic()-began, 2)
             usage.chunks.append(detail)
             if progress_callback:

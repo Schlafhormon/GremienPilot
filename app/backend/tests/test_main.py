@@ -85,7 +85,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         fake_openai_module.responses.append('{"tops": ["Haushalt"], "metadata": {}}')
     fake_openai_module.responses.extend([
         json.dumps({"tops": [{
-            **({"top_id": "agenda:0"} if agenda_source != "transcript" else {}),
+            **({"top_id": "unspecified:unnumbered"} if agenda_source != "transcript" else {}),
             "top_title": "Haushalt", "start_index": 0, "end_index": 0,
             "confidence": 0.9, "evidence_index": 0, "evidence_text": "TOP 1 Haushalt.", "reason": "Aufruf Haushalt",
         }]}),

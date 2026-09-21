@@ -17,6 +17,33 @@ MIN_SPLIT_LINE_CHARS = 80
 MIN_SENTENCE_CHARS = 8
 
 
+def aligned_segment_line(segment):
+    """Retain measured word times and the raw segment interval independently."""
+    text = segment.get('text', '').strip()
+    identity = str(uuid.uuid4())
+    words, cursor = [], 0
+    for word in segment.get('words', []):
+        token = word.get('word', '').strip()
+        offset = text.find(token, cursor) if token else -1
+        if offset < 0:
+            continue
+        cursor = offset + len(token)
+        start, end = word.get('start'), word.get('end')
+        if (isinstance(start, (int, float)) and isinstance(end, (int, float))
+                and math.isfinite(start) and math.isfinite(end) and 0 <= start <= end):
+            words.append({'text': token, 'char_start': offset, 'char_end': cursor,
+                          'start': start, 'end': end})
+    start = _coerce_float(segment.get('start'), 0)
+    end = max(start, _coerce_float(segment.get('end'), start))
+    # Partial alignment is useful evidence, but cannot promise complete bounds.
+    complete = bool(words) and not text[:words[0]['char_start']].strip() and not text[words[-1]['char_end']:].strip()
+    return {'line_id': identity, 'speaker': segment.get('speaker', 'UNKNOWN'), 'text': text,
+            'start': words[0]['start'] if complete else start,
+            'end': words[-1]['end'] if complete else end,
+            'timing': {'source': 'word_alignment' if complete else 'segment', 'words': words,
+                       'segments': [{'segment_id': identity, 'start': start, 'end': end}]}}
+
+
 def split_transcript_for_agenda_detection(
     transcript: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -62,6 +89,16 @@ def split_transcript_for_agenda_detection(
                 if index == len(chunks) - 1
                 else start_time + duration * (end_offset / text_length)
             )
+            timing = line.get('timing') or {}
+            words = [dict(w, char_start=w['char_start']-start_offset, char_end=w['char_end']-start_offset)
+                     for w in timing.get('words', [])
+                     if w['char_start'] >= start_offset and w['char_end'] <= end_offset]
+            aligned = (bool(words) and not chunk[:words[0]['char_start']].strip()
+                       and not chunk[words[-1]['char_end']:].strip())
+            if aligned:
+                part_line['start'], part_line['end'] = words[0]['start'], words[-1]['end']
+            part_line['timing'] = {'source': 'word_alignment' if aligned else 'character_estimate',
+                                   'words': words, 'segments': timing.get('segments', [])}
             split_lines.append(part_line)
 
     return split_lines
