@@ -5,6 +5,7 @@ import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from gpu_resources import llm_gpu_slot
 
 
 class ContextBudgetError(ValueError):
@@ -39,7 +40,7 @@ _INFERENCE_LOCK = threading.Lock()
 
 def complete(client, config, **kwargs):
     # One backend process: PDF, agenda, and summary workers share the same slot.
-    with _INFERENCE_LOCK:
+    with _INFERENCE_LOCK, llm_gpu_slot(config):
         return _complete(client, config, **kwargs)
 
 

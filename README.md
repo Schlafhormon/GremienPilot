@@ -304,6 +304,8 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `TORCH_NUM_INTEROP_THREADS` | optionale PyTorch-Inter-op-Threads | leer |
 | `OMP_NUM_THREADS` / `MKL_NUM_THREADS` | optionale OpenMP/MKL-Threadlimits | leer |
 | `WHISPER_LANGUAGE` | Sprache | `de` |
+| `GPU_MODEL_SWITCHING` | Whisper und lokales Ollama abwechselnd auf einer GPU laden; erfordert einen Backend-Prozess | `false` |
+| `GPU_MODEL_UNLOAD_TIMEOUT_SECONDS` | Positives, endliches Zeitlimit für die bestätigte Ollama-Speicherfreigabe vor der Transkription | `120` |
 | `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://ollama:11434/v1`, lokale Backend-Entwicklung: `http://localhost:11434/v1` |
 | `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3:8b` |
 | `LLM_REASONING_EFFORT` | Reasoning für alle LLM-Aufgaben: leer = bisheriges Verhalten, `none` = aus, `low`/`medium`/`high`/`max` = an (modell-/serverabhängig) | leer |
@@ -321,6 +323,11 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `LLM_SUMMARY_GROUNDING_THINK` | Separater Ollama-Denkmodus für kurze Belegprüfungen | `false` |
 | `LLM_CACHE_DIR` | Cache validierter Antworten; enthält vertrauliche Sitzungsdaten, leer deaktiviert | Compose: `/app/data/llm-cache` |
 | `LLM_AUDIT_DIR` | Optionaler privater Diagnoseordner für vollständige Anfragen und Antworten | leer |
+| `OLLAMA_NUM_PARALLEL` | Gleichzeitige Anfragen je Ollama-Modell | Compose: `1` |
+| `OLLAMA_MAX_LOADED_MODELS` | Maximal gleichzeitig geladene Ollama-Modelle | Compose: `1` |
+| `OLLAMA_FLASH_ATTENTION` | Flash Attention für geringeren Kontext-Speicherbedarf aktivieren | Compose: `1` |
+| `OLLAMA_KV_CACHE_TYPE` | Präzision des Kontext-Caches; `q8_0` spart Speicher und benötigt Flash Attention | Compose: `f16` |
+| `OLLAMA_KEEP_ALIVE` | Wie lange Ollama Modelle nach einer Anfrage geladen hält | Compose: `5m` |
 | `SPEAKER_EMBEDDING_ENABLED` | lokale Sprecher-Embeddings für prüfbare Matches erzeugen | `true` |
 | `SPEAKER_EMBEDDING_MODEL` | primäres Embedding-Modell | `pyannote/embedding` |
 | `SPEAKER_EMBEDDING_FALLBACK_MODELS` | kommagetrennte Fallback-Modelle, falls das primäre Modell nicht lädt | `pyannote/wespeaker-voxceleb-resnet34-LM` |
@@ -376,8 +383,17 @@ Für NVIDIA-GPUs unter Windows oder Linux:
 3. Docker neu starten.
 4. Setup ausführen und GPU-Modus auswählen, wenn das Skript danach fragt.
 
-Der GPU-Override nutzt `docker-compose.gpu.yml` und setzt das Backend auf
-`WHISPER_DEVICE=cuda`. macOS unterstützt diesen NVIDIA-GPU-Modus nicht.
+`docker-compose.gpu.yml` stellt Backend und Ollama die NVIDIA-GPU bereit.
+Für GPU-Transkription `WHISPER_DEVICE=cuda` in `.env` setzen; der Wert hat
+Vorrang vor dem GPU-Override. macOS unterstützt diesen NVIDIA-GPU-Modus nicht.
+
+Bei knappem Grafikspeicher aktiviert `GPU_MODEL_SWITCHING=true` den automatischen
+Wechsel: Ollama wird vor der Transkription entladen, Whisper und seine Zusatzmodelle
+danach. Das erfordert einen Backend-Prozess und einen erreichbaren lokalen
+Ollama-Dienst (`ollama`, `localhost` oder Loopback-Adresse), der ausschließlich
+von dieser Anwendung genutzt wird. Modelle werden erst beim ersten Auftrag
+geladen; das Nachladen benötigt zusätzliche Zeit. Die Speicher- und
+Timeout-Einstellungen stehen unter [Konfiguration](#konfiguration).
 
 ## Fehlerbehebung
 

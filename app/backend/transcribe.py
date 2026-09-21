@@ -19,6 +19,13 @@ See: https://github.com/m-bain/whisperX/issues/902
 
 import os
 import gc
+import traceback
+from contextlib import contextmanager
+
+from gpu_resources import (
+    block_after_release_failure, gpu_slot, switching_enabled,
+    unload_local_ollama, unload_timeout,
+)
 
 # PyTorch 2.6+ changed torch.load() to use weights_only=True by default for security.
 # WhisperX uses pyannote-audio 3.x which stores OmegaConf configs in checkpoints.
@@ -120,12 +127,91 @@ class TranscriptionModels:
     speaker_embedding_model_name: str | None = None
     speaker_embedding_attempted_models: tuple[str, ...] = ()
     speaker_embedding_error: str | None = None
+    gpu_managed: bool = False
 
 
 def load_models() -> TranscriptionModels:
+    """Prepare a lazy GPU model holder, or eagerly load in legacy/CPU mode."""
+    managed = switching_enabled()
+    if managed:
+        unload_timeout()  # Validate configuration before accepting work.
+    device = WHISPER_DEVICE
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if managed and device == "cuda":
+        logger.info("GPU model switching enabled; transcription models load on demand")
+        return TranscriptionModels(None, None, None, None, device, gpu_managed=True)
+    return _load_models()
+
+
+@contextmanager
+def transcription_model_session(models, progress_callback=None):
+    """Hold the GPU through loading, inference and complete model release."""
+    if not getattr(models, "gpu_managed", False):
+        yield models
+        return
+
+    def check_cancel():
+        if progress_callback is not None:
+            progress_callback(10, "Warte auf GPU / bereite Modelle vor...")
+
+    check_cancel()
+    with gpu_slot(check_cancel):
+        from summarize import get_llm_config
+        unload_local_ollama(get_llm_config(), check_cancel)
+        try:
+            # The holder stays stable for queued jobs and diagnostic endpoints.
+            # Do not retain a second container with references to the GPU models.
+            _load_into_holder(models)
+            check_cancel()
+            yield models
+        except BaseException as exc:
+            # Inference/load tracebacks can retain GPU tensors after an error.
+            _clear_failure_frames(exc)
+            raise
+        finally:
+            models.gpu_managed = True
+            models.whisper_model = None
+            models.align_model = None
+            models.align_metadata = None
+            models.diarize_pipeline = None
+            models.speaker_embedding_inference = None
+            try:
+                gc.collect()
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                logger.info("Transcription models unloaded; GPU released for Ollama")
+            except BaseException:
+                block_after_release_failure()
+                raise
+
+
+def _load_into_holder(models):
+    loaded = _load_models()
+    for name, value in vars(loaded).items():
+        # Never transiently disable the gate for another queued worker.
+        if name != "gpu_managed":
+            setattr(models, name, value)
+
+
+def _clear_failure_frames(exc):
+    pending = [exc]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        traceback.clear_frames(current.__traceback__)
+        pending.extend(item for item in (current.__cause__, current.__context__)
+                       if item is not None)
+        pending.extend(getattr(current, "exceptions", ()))
+
+
+def _load_models() -> TranscriptionModels:
     """
     Load all models required for transcription.
-    Call this once at server startup to cache models in memory.
+    Called at startup in eager mode or inside an exclusive GPU session.
 
     Returns:
         TranscriptionModels containing all loaded models
@@ -249,6 +335,15 @@ class TranscriptionResult:
 
 
 def transcribe_audio(
+    file_path: str,
+    models: TranscriptionModels,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> TranscriptionResult:
+    with transcription_model_session(models, progress_callback):
+        return _transcribe_audio(file_path, models, progress_callback)
+
+
+def _transcribe_audio(
     file_path: str,
     models: TranscriptionModels,
     progress_callback: Optional[Callable[[int, str], None]] = None,

@@ -1,4 +1,5 @@
 import json
+import os
 from types import SimpleNamespace
 
 import httpx
@@ -76,7 +77,9 @@ def test_cache_is_private_and_bound_to_input_model_prompt(monkeypatch, tmp_path)
     transport.cache_write(key, {'complete': True})
     assert transport.cache_read(key) == {'complete': True}
     assert transport.cache_read(key + 'changed') is None
-    assert next(tmp_path.iterdir()).stat().st_mode & 0o777 == 0o600
+    # Windows permissions are ACL-based; POSIX mode bits are meaningful on Linux.
+    if os.name == 'posix':
+        assert next(tmp_path.iterdir()).stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.parametrize('actual', [None, 4096, 16384])

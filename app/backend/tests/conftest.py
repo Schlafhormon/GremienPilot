@@ -2,6 +2,7 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+from contextlib import nullcontext
 import re
 
 import pytest
@@ -15,6 +16,7 @@ def isolated_llm_transport(monkeypatch):
     monkeypatch.setenv("LLM_SUMMARY_GROUNDING_MAX_CALLS", "0")
     monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
     monkeypatch.delenv("LLM_AUDIT_DIR", raising=False)
+    monkeypatch.setenv("GPU_MODEL_SWITCHING", "false")
 
 
 @pytest.fixture
@@ -46,6 +48,7 @@ fake_transcribe.TranscriptionResult = FakeTranscriptionResult
 fake_transcribe.WHISPER_MODEL = "test-whisper"
 fake_transcribe.WHISPER_BATCH_SIZE = 1
 fake_transcribe.load_models = lambda: FakeTranscriptionModels()
+fake_transcribe.transcription_model_session = lambda models, progress_callback=None: nullcontext(models)
 fake_transcribe._cleanup_memory = lambda device: None
 fake_transcribe.transcribe_audio = lambda file_path, models, progress_callback=None: FakeTranscriptionResult(
     transcript=[],

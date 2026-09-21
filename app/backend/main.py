@@ -33,11 +33,13 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, StrictBool
 
 from transcribe import (
     transcribe_audio,
     load_models,
+    transcription_model_session,
     TranscriptionModels,
     _cleanup_memory,
 )
@@ -128,7 +130,7 @@ class CancellationRequested(Exception):
 async def lifespan(app: FastAPI):
     """
     FastAPI lifespan event handler.
-    Loads all ML models at startup and cleans up on shutdown.
+    Prepares models (on demand in GPU switching mode) and cleans up on shutdown.
     """
     logger.info("Server starting up - initializing persistence...")
 
@@ -143,13 +145,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize persistence: {e}", exc_info=True)
 
-    logger.info("Loading transcription models...")
+    logger.info("Preparing transcription models...")
 
     try:
-        # Load models at startup (this takes several minutes)
+        # Managed GPU models are prepared here and loaded only inside a job.
         app.state.models = load_models()
         app.state.models_loaded = True
-        logger.info("Models loaded successfully - server ready")
+        logger.info("Transcription model holder ready")
     except Exception as e:
         logger.error(f"Failed to load models: {e}", exc_info=True)
         app.state.models = None
@@ -1115,6 +1117,7 @@ class LocalSpeakerEmbeddingDiagnosticResponse(BaseModel):
 class SpeakerEmbeddingDiagnosticsResponse(BaseModel):
     enabled: bool
     loaded: bool
+    on_demand: bool = False
     model_name: Optional[str] = None
     attempted_model_names: List[str] = Field(default_factory=list)
     error: Optional[str] = None
@@ -1857,6 +1860,13 @@ def extract_job_speaker_embeddings_from_transcript(
     *,
     models: Any,
 ) -> list[LocalSpeakerEmbedding]:
+    with transcription_model_session(models):
+        return _extract_job_speaker_embeddings_from_transcript(job, models=models)
+
+
+def _extract_job_speaker_embeddings_from_transcript(
+    job: dict[str, Any], *, models: Any,
+) -> list[LocalSpeakerEmbedding]:
     embedding_inference = getattr(models, "speaker_embedding_inference", None)
     if embedding_inference is None:
         raise RuntimeError("Embedding-Modell nicht verfügbar")
@@ -1886,7 +1896,7 @@ def backfill_speaker_profile_embeddings(
     session_id: str | None = None,
 ) -> SpeakerEmbeddingBackfillResponse:
     diagnostics = speaker_embedding_diagnostics()
-    if not diagnostics.loaded:
+    if not diagnostics.loaded and not diagnostics.on_demand:
         raise HTTPException(
             status_code=409,
             detail={
@@ -2077,6 +2087,7 @@ def speaker_embedding_diagnostics(
     return SpeakerEmbeddingDiagnosticsResponse(
         enabled=config.enabled,
         loaded=loaded,
+        on_demand=config.enabled and bool(getattr(models, "gpu_managed", False)),
         model_name=model_name,
         attempted_model_names=attempted,
         error=error,
@@ -3410,15 +3421,18 @@ async def root():
 async def health_check():
     """
     Health check endpoint for Docker/Kubernetes.
-    Returns 200 only when models are loaded and server is ready.
+    Returns 200 when the model holder is ready (including on-demand mode).
     """
     if not getattr(app.state, "models_loaded", False):
         raise HTTPException(
             status_code=503, detail="Models not loaded yet - server starting up"
         )
+    models = getattr(app.state, "models", None)
+    on_demand = bool(getattr(models, "gpu_managed", False))
     return {
         "status": "healthy",
-        "models_loaded": True,
+        "models_loaded": bool(getattr(models, "whisper_model", None)) if on_demand else True,
+        "models_on_demand": on_demand,
         "version": "0.1.0",
         "speaker_embeddings": model_to_dict(speaker_embedding_diagnostics()),
     }
@@ -4045,11 +4059,11 @@ async def delete_speaker_profile_embeddings_endpoint(profile_id: str):
     "/api/speaker-embeddings/backfill",
     response_model=SpeakerEmbeddingBackfillResponse,
 )
-async def backfill_speaker_embeddings_endpoint(
+def backfill_speaker_embeddings_endpoint(
     profile_id: Optional[str] = None,
     session_id: Optional[str] = None,
 ):
-    """Create missing profile embeddings for explicit speaker assignments."""
+    """Run GPU backfill in the thread pool so waiting never blocks the event loop."""
     if profile_id is not None:
         get_required_active_profile(profile_id)
     if session_id is not None:
@@ -4619,7 +4633,8 @@ async def extract_tops_endpoint(
         logger.info("Saved uploaded PDF for TOP extraction (%s bytes)", size_bytes)
 
         # Extract TOPs and session metadata using LLM
-        extraction = extract_agenda_data_from_pdf(
+        extraction = await run_in_threadpool(
+            extract_agenda_data_from_pdf,
             str(file_path),
             model=model,
             system_prompt=system_prompt,

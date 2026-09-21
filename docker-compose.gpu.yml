@@ -10,7 +10,8 @@ services:
   backend:
     image: ${BACKEND_GPU_IMAGE:-ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:gpu-latest}
     environment:
-      - WHISPER_DEVICE=cuda
+      # Allow CPU transcription when the LLM needs the available VRAM.
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
     deploy:
       resources:
         reservations:
