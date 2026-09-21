@@ -220,10 +220,11 @@ def test_frontend_summary_prompt_cannot_replace_detection_contract(
         detect_agenda_from_transcript(transcript, model="test-model", use_llm=True, system_prompt=frontend_summary_prompt)
     request = fake_openai_module.instances[0].calls[0]
     prompt = request["messages"][0]["content"]
-    assert DEFAULT_AGENDA_DETECTION_PROMPT in prompt
+    from agenda_llm import PROMPT
+    assert (PROMPT if known_tops else DEFAULT_AGENDA_DETECTION_PROMPT) in prompt
     assert frontend_summary_prompt in prompt
-    assert "diese haben Vorrang" in prompt
-    assert "0: MOD" in request["messages"][1]["content"]
+    assert ("Schema bleibt verbindlich" if known_tops else "diese haben Vorrang") in prompt
+    assert ('"index": 0' if known_tops else "0: MOD") in request["messages"][1]["content"]
 
 
 @pytest.mark.parametrize("known_tops", [False, True])
@@ -234,7 +235,7 @@ def test_explicit_decision_overrides_default_without_content_side_effects(
     monkeypatch, fake_openai_module, known_tops, server_default, decision, context,
 ):
     monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_USE_LLM", server_default)
-    fake_openai_module.content = '{"tops":[{"top_title":"Haushalt","start_index":0,"end_index":0,"evidence_index":0,"evidence_text":"TOP 1 Haushalt."}]}'
+    fake_openai_module.content = '{"tops":[{"top_id":"agenda:0","reason":"Haushalt aufgerufen","top_title":"Haushalt","start_index":0,"end_index":0,"evidence_index":0,"evidence_text":"TOP 1 Haushalt."}]}'
     transcript = [TranscriptUtterance("MOD", "TOP 1 Haushalt.")]
     result = (segment_known_agenda(transcript, ["Haushalt"], use_llm=decision, **context)
               if known_tops else detect_agenda_from_transcript(transcript, use_llm=decision, **context))
@@ -268,6 +269,12 @@ def test_safe_observable_fallback(fake_openai_module, caplog, known_tops, respon
     transcript = [TranscriptUtterance("MOD", "TOP 1 Haushalt.")]
     result = (segment_known_agenda(transcript, ["Haushalt"], use_llm=True)
               if known_tops else detect_agenda_from_transcript(transcript, use_llm=True))
+    if known_tops:
+        assert result.assignments == [None]
+        assert result.llm.status == "failed"
+        assert result.llm.gaps[0]["kind"] == "technical"
+        assert "SECRET" not in str(result.llm)
+        return
     assert result.assignments == [0]
     assert "llm_fallback" in result.strategy
     assert result.llm.status == "fallback"
@@ -433,6 +440,10 @@ def test_known_fallback_preserves_gaps_order_and_resumption(fake_openai_module, 
     ]]
     result = segment_known_agenda(transcript, tops, use_llm=failure is not None)
     assert result.tops == tops
+    if failure is not None:
+        assert result.assignments == [None] * len(transcript)
+        assert result.llm.status == 'failed'
+        return
     assert result.assignments == [None, None, 2, 1, 1, None, None, 2]
     assert [s.top_index for s in result.segments] == [2, 1, 2]
     assert result.segments[1].evidence_index == 3
@@ -463,8 +474,8 @@ def test_llm_known_labels_are_resolved_by_identity_not_position(fake_openai_modu
         'Pause.', 'Kommen wir wieder zu TOP 3 Schulbau.',
     ]]
     result = segment_known_agenda(transcript, ['1 Begrüßung', '2 Haushalt', '3 Schulbau'], use_llm=True)
-    assert result.assignments == [None, 2, 1, None, 2]
-    assert [s.top_index for s in result.segments] == [2, 1, 2]
+    assert result.assignments == [None] * 5
+    assert result.llm.status == 'failed'
 
 
 def test_llm_cannot_promote_preview_to_safe_boundary(fake_openai_module):
@@ -475,10 +486,8 @@ def test_llm_cannot_promote_preview_to_safe_boundary(fake_openai_module):
         TranscriptUtterance('MOD', 'Den Haushalt behandeln wir später unter TOP 2.'),
         TranscriptUtterance('MOD', 'Anwesenheitsliste.'),
     ], ['1 Begrüßung', '2 Haushalt'], use_llm=True)
-    assert len(result.segments) == 1
-    assert result.segments[0].top_index == 1
-    assert result.segments[0].uncertain
-    assert result.segments[0].confidence <= 0.5
+    assert result.segments == []
+    assert result.llm.status == 'failed'
 
 
 def test_llm_missing_known_boundary_is_not_interpolated(fake_openai_module):
@@ -494,7 +503,9 @@ def test_known_llm_prompt_allows_omissions_and_revisits(fake_openai_module):
     segment_known_agenda([TranscriptUtterance('A', 'Diskussion.')], ['Haushalt'], use_llm=True)
     user_prompt = fake_openai_module.instances[0].calls[0]['messages'][1]['content']
     assert 'genau einen Eintrag' not in user_prompt
-    assert 'TOPs dürfen fehlen oder mehrfach auftreten' in user_prompt
+    from agenda_llm import PROMPT
+    assert 'beliebig oft' in PROMPT
+    assert 'target_start' in user_prompt
 
 
 @pytest.mark.parametrize('raw_segments', [
@@ -513,10 +524,17 @@ def test_known_llm_conflicting_identity_does_not_select_arbitrary_topic(fake_ope
 
 
 def known_llm_result(fake, tops, lines, segments):
-    fake.content = json.dumps({'tops': segments})
-    return segment_known_agenda(
-        [TranscriptUtterance('MOD', line) for line in lines], tops, use_llm=True,
-    )
+    # Unit tests of the legacy validator, still used for historical segment
+    # contracts. Full-coverage inference has its own tests in test_agenda_llm.py.
+    transcript = [TranscriptUtterance('MOD', line) for line in lines]
+    usage = agenda_detection._llm_usage(True)
+    raw = agenda_detection._parse_llm_segments(json.dumps({'tops': segments}))
+    from assignment_suggestions import suggest_assignments
+    validated, _ = agenda_detection._validate_known_segments(
+        transcript, tops, raw, list(suggest_assignments(transcript, tops).segments),
+        issues=usage.validation_reasons)
+    validated = agenda_detection._guard_number_evidence(transcript, tops, validated)
+    return agenda_detection._result_from_segments(len(lines), validated, 'legacy_validator', tops=tops, usage=usage)
 
 
 @pytest.mark.parametrize('with_ids', [False, True])
@@ -690,13 +708,13 @@ def test_missing_top_is_only_supplemented_with_independent_range(fake_openai_mod
 
 
 def test_prompt_uses_request_ids_independent_of_original_numbering(fake_openai_module):
-    known_llm_result(fake_openai_module, ['[Öffentlich] 02.10 Schule', '[Nichtöffentlich] 02.10 Schule'],
-                     ['Diskussion.'], [])
+    segment_known_agenda([TranscriptUtterance('A', 'Diskussion.')],
+                         ['[Öffentlich] 02.10 Schule', '[Nichtöffentlich] 02.10 Schule'], use_llm=True)
     request = fake_openai_module.instances[0].calls[0]
     prompt = request['messages'][1]['content']
-    assert '"top_id": "agenda:0", "top_title": "[Öffentlich] 02.10 Schule"' in prompt
-    assert '"top_id": "agenda:1", "top_title": "[Nichtöffentlich] 02.10 Schule"' in prompt
-    assert '"evidence_index"' in request['messages'][0]['content']
+    assert '"top_id": "agenda:0", "title": "[Öffentlich] 02.10 Schule"' in prompt
+    assert '"top_id": "agenda:1", "title": "[Nichtöffentlich] 02.10 Schule"' in prompt
+    assert 'Zeilennummer' in request['messages'][0]['content']
 
 
 def test_fallback_does_not_clip_ranges_to_fill_gaps(fake_openai_module):

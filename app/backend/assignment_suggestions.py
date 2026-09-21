@@ -34,7 +34,8 @@ NON_CURRENT = re.compile(
     r"hatten|haben|wurde\w*|war|waren|warst|wuerde\w*|"
     r"konnten|koennten|soll\w*|wollen|mochte\w*|moechte\w*|"
     r"bevor|wenn|falls|sobald|"
-    r"erwahnt\w*|erwaehnt\w*|zitiert\w*)\b"
+    r"erwahnt\w*|erwaehnt\w*|zitiert\w*|"
+    r"n(?:a|ae)chste[nr]?\s+(?:sitzung|woche|monat))\b"
 )
 STOP = re.compile(
     r"^(?:damit\s+)?(?:ich\s+schliesse|wir\s+(?:beenden|unterbrechen|vertagen))\b"

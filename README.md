@@ -76,6 +76,12 @@ automatisierten Ablauf.
    manuell bearbeitet oder selektiv neu generiert werden.
 7. Protokoll mit Sitzungsmetadaten als DOCX, PDF oder TXT exportieren.
 
+Bei aktivierter LLM-Zuordnung und bekannter Agenda werden alle Transkriptzeilen
+mit stabilen Zeilen- und TOP-Identitäten verarbeitet, auch über öffentliche und
+nichtöffentliche Abschnitte hinweg. Erst danach entstehen die TOP-Zusammenfassungen.
+Begrenzte Reparaturen und ein Cache vermeiden unnötige Neuberechnungen;
+fachliche Unsicherheiten und technische Ausfälle bleiben zur Prüfung sichtbar.
+
 ## Gemeinsamer Sitzungsverlauf
 
 Alle Sitzungen werden serverseitig in SQLite gespeichert und sind innerhalb der
@@ -303,6 +309,18 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `LLM_REASONING_EFFORT` | Reasoning für alle LLM-Aufgaben: leer = bisheriges Verhalten, `none` = aus, `low`/`medium`/`high`/`max` = an (modell-/serverabhängig) | leer |
 | `LLM_TIMEOUT_SECONDS` | Timeout für Zusammenfassungen, PDF-Extraktion und LLM-Diagnose (nicht TOP-Erkennung im Transkript) | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
+| `LLM_OLLAMA_NATIVE` | Native Ollama-API; für externe OpenAI-kompatible Anbieter `false` setzen | Compose: `true` |
+| `LLM_CONTEXT_TOKENS` | Gemeinsames Eingabe-/Ausgabebudget; wird an Ollama übermittelt | `16384` |
+| `LLM_CPU_THREADS` | Ollama-Inferenzthreads, unabhängig von Whisper | `16` |
+| `LLM_MAX_RETRIES` | Transportwiederholungen bei vorübergehenden Zusammenfassungsfehlern; auch SDK-Grenze der OpenAI-PDF-Extraktion | `2` |
+| `LLM_REPAIR_SPLIT_DEPTH` | Fehlerhafte Zuordnungs-/Zusammenfassungsteile durch Halbierung reparieren; `0` deaktiviert | `1` |
+| `LLM_SUMMARY_FACT_REVIEW_MAX_CALLS` | Zusätzliche Faktenprüfungen je TOP; `0` deaktiviert | `3` |
+| `LLM_SUMMARY_FACT_REVIEW_THINK` | Separater Ollama-Denkmodus für Faktenprüfungen; leer erbt die globale Einstellung | Compose: `true` |
+| `LLM_SUMMARY_FACT_REVIEW_MAX_TOKENS` | Ausgabetokens je Generierungsphase der Faktenprüfung | `5120` |
+| `LLM_SUMMARY_GROUNDING_MAX_CALLS` | Kurze Belegprüfungen je TOP; `0` deaktiviert | `32` |
+| `LLM_SUMMARY_GROUNDING_THINK` | Separater Ollama-Denkmodus für kurze Belegprüfungen | `false` |
+| `LLM_CACHE_DIR` | Cache validierter Antworten; enthält vertrauliche Sitzungsdaten, leer deaktiviert | Compose: `/app/data/llm-cache` |
+| `LLM_AUDIT_DIR` | Optionaler privater Diagnoseordner für vollständige Anfragen und Antworten | leer |
 | `SPEAKER_EMBEDDING_ENABLED` | lokale Sprecher-Embeddings für prüfbare Matches erzeugen | `true` |
 | `SPEAKER_EMBEDDING_MODEL` | primäres Embedding-Modell | `pyannote/embedding` |
 | `SPEAKER_EMBEDDING_FALLBACK_MODELS` | kommagetrennte Fallback-Modelle, falls das primäre Modell nicht lädt | `pyannote/wespeaker-voxceleb-resnet34-LM` |
@@ -316,9 +334,11 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL` | maximale globale Referenz-Embeddings je Profil und Modell | `16` |
 | `AGENDA_DETECTION_USE_LLM` | Serverstandard für LLM-TOP-Erkennung; explizite API-Entscheidung hat Vorrang | `false` |
 | `AGENDA_DETECTION_TIMEOUT_SECONDS` | Positiver, endlicher Timeout in Sekunden pro Agenda-Anfrage/Chunk; keine SDK-Retries | `8` |
-| `AGENDA_DETECTION_CHUNK_LINES` | Zeilen pro Chunk bei unbekannter Agenda | `160` |
+| `AGENDA_DETECTION_CHUNK_LINES` | Maximale Zielzeilen pro Chunk (zusätzlich begrenzt durch das Kontextbudget bei bekannter Agenda) | `160` |
 | `AGENDA_DETECTION_CHUNK_OVERLAP_LINES` | Überlappende Zeilen zwischen Chunks | `12` |
-| `AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE` / `AGENDA_DETECTION_CONTEXT_WINDOW_AFTER` | Kontextzeilen um Grenzen bei langer bekannter Agenda | `4` / `8` |
+| `AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS` | Zusätzliche Prüfungen fachlicher Zuordnungslücken; `0` deaktiviert | `3` |
+| `AGENDA_DETECTION_BOUNDARY_REVIEW_MAX_CALLS` | Zusätzliche Prüfungen von TOP-/Abschnittsgrenzen; `0` deaktiviert | `4` |
+| `AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE` / `AGENDA_DETECTION_CONTEXT_WINDOW_AFTER` | Historische Heuristikfenster; für vollständige LLM-Zuordnung nicht mehr verwendet | `4` / `8` |
 | `PERSISTENCE_DB_PATH` | SQLite-Pfad im Backend-Container | `/app/data/sessions.sqlite3` |
 | `MAX_UPLOAD_BYTES` | maximale Uploadgröße | `524288000` |
 | `TRANSCRIPTION_CONCURRENCY` | parallele Transkriptionsjobs | `1` |
@@ -332,70 +352,20 @@ lokale Backend-Entwicklung außerhalb von Docker sinnvoll. Externe
 OpenAI-kompatible Endpunkte müssen explizit mit vollständiger `/v1`-URL
 konfiguriert werden.
 
+Eingabe, Zusatzkontext und Ausgabe werden gemeinsam budgetiert; zu große
+Abschnitte werden geteilt, Kürzungen und unvollständige Antworten als Fehler
+behandelt. Reparaturen und Quellenprüfungen haben eigene, begrenzte Aufrufbudgets.
+Der Cache wird nicht automatisch geleert; nach einem Modellwechsel unter gleichem
+Modellnamen sollte er außerhalb laufender Jobs gelöscht werden.
+
 ### LLM-Nutzung für automatische TOP-Zuordnung
 
-`LLM_REASONING_EFFORT` wird als `reasoning_effort` an die OpenAI-kompatible
-Chat-API übergeben: bei PDF-Extraktion, TOP-Zuordnung und allen
-Zusammenfassungsaufrufen einschließlich Teilzusammenfassungen und Fallbacks.
-Ein leerer Wert lässt das API-Feld weg; die PDF-Extraktion behält dann ihre
-bisherige `/no_think`-Promptanweisung. Bei einem expliziten Wert steuert die API
-das Reasoning, ohne automatisch hinzugefügte `/no_think`-Anweisung.
-Ungültige Werte werden abgewiesen. Der Modellserver muss den gewählten Wert
-unterstützen; die Einstellung wird bei Fehlern nicht stillschweigend entfernt.
-Die unterstützten Werte sind in der [Ollama-API-Dokumentation](https://docs.ollama.com/api/openai-compatibility)
-beschrieben. Reasoning-Stufen können je nach Modell gleich behandelt werden.
-
-Für einen CPU-Test mit Qwen3.5 bietet sich `LLM_MODEL=qwen3.5:9b` mit
-`LLM_REASONING_EFFORT=none`, `AGENDA_DETECTION_USE_LLM=true` und großzügigen
-Timeouts an, beispielsweise jeweils `1800` Sekunden für
-`LLM_TIMEOUT_SECONDS` und `AGENDA_DETECTION_TIMEOUT_SECONDS`.
-Das sind Timeouts je Aufruf, keine Gesamtlaufzeitgrenze. Aktiviertes Reasoning
-kann zusätzliche Ausgabetokens benötigen; die vorhandenen `max_tokens`-Limits
-werden durch diese Variable nicht erhöht. `LLM_MAX_RETRIES=0` deaktiviert
-Wiederholungen bei Zusammenfassung und PDF-Extraktion. Die TOP-Zuordnung
-verwendet unabhängig davon keine SDK-Wiederholungen.
-
-`POST /api/agenda-detection` akzeptiert `use_llm`: `true` aktiviert das LLM,
-`false` erzwingt Heuristik, fehlend oder `null` übernimmt
-`AGENDA_DETECTION_USE_LLM` (Standard `false`). Der Serverwert ist ein Standard,
-keine administrative Sperre. Modellname und Prompt aktivieren das LLM niemals.
-
-Für `POST /api/pipeline/start` heißt die Option `agenda_use_llm`: entweder als
-boolescher Wert bzw. `null` im JSON-Feld `options` oder als Formularfeld
-`true`/`false`. Ein gesetztes Formularfeld hat Vorrang vor JSON-Optionen.
-`skip_agenda_detection=true` überspringt weiterhin die gesamte TOP-Zuordnung.
-Die React-App übernimmt ohne explizite Client-Option den Serverstandard;
-der TypeScript-Client unterstützt `useLlm` bzw. `agendaUseLlm`.
-PDF-Extraktion und Zusammenfassungen haben ihre eigenen Modellaufrufe und werden
-von diesem Agenda-Schalter nicht deaktiviert.
-
-**Migration:** Bestehende Request-Felder, Python-Argumente und `strategy`-Werte
-bleiben erhalten. Aufrufer, die bisher allein mit `model` oder `system_prompt`
-einen Agenda-Modellaufruf ausgelöst haben, müssen jetzt explizit aktivieren
-oder den Serverstandard auf `true` setzen. Vorhandene Python-Aufrufer können
-zusätzlich `use_llm=True`/`False` als Schlüsselwort übergeben.
-
-Die Antwort enthält zusätzlich `llm` mit wirksamer Aktivierung, Quelle
-(`request`/`server_default`), Timeout, Status (`disabled`, `skipped`, `success`,
-`fallback`, `partial_fallback`), Aufruf-/Fehleranzahl und festen Ursachencodes
-(`timeout`, `connection_error`, `request_error`, `invalid_response`, `empty_response`).
-`warnings` erläutert Ersatzverarbeitung; die Pipeline speichert diese Angaben,
-übernimmt die Warnungen und zeigt sie in der Prüfung an. Bestehende gespeicherte
-Ergebnisse ohne diese Angaben bleiben lesbar (`llm=null`). Reparierte Grenzen
-bleiben außerdem über `strategy`, Segmentbegründung und Unsicherheit erkennbar.
-Logs enthalten bei LLM-Ausfällen nur feste Ursachencodes und Aufrufnummern,
-keine Prompts, Transkripte, Provider-Antworten oder Zugangsdaten.
-
-Der Agenda-Timeout beträgt tatsächlich standardmäßig 8 Sekunden pro
-SDK-Anfrage/Chunk, ohne automatische SDK-Wiederholungen und ohne frühere
-30-Sekunden-Untergrenze. Er ist kein Zeitlimit für die gesamte Pipeline;
-mehrere Chunks und die übrigen Verarbeitungsschritte können länger dauern.
-Langsame Modelle benötigen gegebenenfalls einen höheren Agenda-Timeout.
-Ungültige Serverwerte für den LLM-Schalter (erlaubt: `true`/`false`) oder
-ein nicht positiver bzw. nicht endlicher Timeout verhindern den Backend-Start.
-Die Einstellungen werden beim Backend-Start geladen. Nach Änderungen Backend
-neu starten bzw. Container neu erstellen; CPU-Compose und GPU-Override reichen
-alle obigen Agenda-Variablen durch. Kubernetes verwendet die Backend-ConfigMap.
+`AGENDA_DETECTION_USE_LLM=true` aktiviert die LLM-Zuordnung. API-Aufrufe können
+mit `use_llm` bzw. `agenda_use_llm` den Serverstandard überschreiben;
+PDF-Extraktion und Zusammenfassungen sind davon unabhängig.
+Für CPU-Betrieb die Timeouts ausreichend hoch setzen: Sie gelten je Aufruf.
+Unsicherheiten und Fehler bleiben in der Prüfung sichtbar. Weitere Einstellungen
+stehen in der Konfigurationstabelle und in `.env.example`.
 
 ## GPU-Modus
 
@@ -574,6 +544,10 @@ npm test
 npm run typecheck
 npm run lint
 ```
+
+Ein isolierter LLM-Vergleich mit vorhandenem Transkript ist über
+[`scripts/verify_llm_snapshot.py`](scripts/verify_llm_snapshot.py) möglich:
+Die Quelldatenbank wird nur gelesen, Ergebnisse und Cache liegen separat.
 
 ### Lokale Docker-Images bauen
 

@@ -66,12 +66,41 @@ def test_txt_export_contains_metadata_agenda_sections_and_appendix():
     assert "Beschluss:" in content
     assert "- Der Haushalt wurde empfohlen." in content
     assert "Abstimmung:" in content
-    assert "Maßnahmen/offene Punkte:" in content
+    assert "Maßnahmen:" in content
     assert "Sprecherliste:" in content
     assert "Transkript:" in content
     assert "Ich eröffne die Sitzung." in content
     assert "Der Haushalt wird beraten." in content
     assert "Bearbeitungs-/Generierungshinweis:" in content
+
+
+def test_generated_actions_and_open_questions_keep_categories_through_export():
+    from summarize import StructuredSummary, render_structured_summary
+    from export_protocol import build_protocol_document, ProtocolMetadata, render_protocol
+    structured = StructuredSummary(action_items=['Die Verwaltung prüft den Antrag.'],
+                                   open_points=['Die Finanzierung bleibt offen.'])
+    text = render_structured_summary(structured)
+    sections = parse_summary_sections(text)
+    assert sections['action_items'] == structured.action_items
+    assert sections['open_points'] == structured.open_points
+    document = build_protocol_document(metadata=ProtocolMetadata(), tops=['Beratung'], summaries={0:text})
+    txt = render_protocol(document, 'txt').decode()
+    docx = Document(BytesIO(render_protocol(document, 'docx')))
+    docx_text = '\n'.join(p.text for p in docx.paragraphs)
+    import pdfplumber
+    with pdfplumber.open(BytesIO(render_protocol(document, 'pdf'))) as pdf:
+        pdf_text = '\n'.join(page.extract_text() or '' for page in pdf.pages)
+    for exported in [txt, docx_text, pdf_text]:
+        assert 'Maßnahmen' in exported and 'Offene Punkte' in exported
+        assert 'Finanzierung bleibt offen' in exported
+        assert 'Maßnahmen/offene Punkte' not in exported
+
+
+def test_legacy_combined_heading_is_preserved_without_guessing_categories():
+    from export_protocol import build_protocol_document, ProtocolMetadata, render_protocol
+    document = build_protocol_document(metadata=ProtocolMetadata(), tops=['Beratung'],
+        summaries={0:'Maßnahmen/offene Punkte:\nDie Finanzierung bleibt offen.'})
+    assert 'Maßnahmen/offene Punkte:' in render_protocol(document, 'txt').decode()
 
 
 def test_txt_export_can_group_full_transcript_by_top():

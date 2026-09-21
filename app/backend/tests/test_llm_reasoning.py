@@ -36,7 +36,7 @@ def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, ef
         fake_openai_module.content = json.dumps({"tops": [{
             "top_id": "agenda:0", "top_title": "1. Haushalt",
             "start_index": 0, "end_index": 0, "confidence": 0.9,
-            "evidence_index": 0, "evidence_text": "Ich rufe TOP 1 Haushalt auf.",
+            "evidence_index": 0, "evidence_text": "Ich rufe TOP 1 Haushalt auf.", "reason": "Aufruf Haushalt",
         }]})
         transcript = [TranscriptUtterance("MOD", "Ich rufe TOP 1 Haushalt auf.")]
         if task == "known_agenda":
@@ -78,8 +78,8 @@ def test_reasoning_applies_to_summary_chunks_reduce_and_fallback(monkeypatch, fa
     ])
     result = summarize.summarize_segment("Haushalt", transcript)
     calls = fake_openai_module.instances[0].calls
-    assert result.fallback_used
-    assert len(calls) == 6
+    assert not result.fallback_used
+    assert len(calls) == 2
     assert all(call["reasoning_effort"] == "none" for call in calls)
 
 

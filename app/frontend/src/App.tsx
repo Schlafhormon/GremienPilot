@@ -239,6 +239,15 @@ function hasAgendaUncertainty(
   );
 }
 
+function hasTechnicalProcessingFailure(session: SessionResponse, detection?: AgendaDetectionResponse | null): boolean {
+  const usage = (detection ?? session.agenda_proposals?.result)?.llm;
+  return Boolean(usage?.enabled && ['failed', 'partial_failure', 'fallback', 'partial_fallback'].includes(usage.status)) ||
+    Object.values(normalizeSummaryReviews(session.summary_reviews)).some(review =>
+      review.review_warnings?.some(warning => warning.kind === 'summary_failed'));
+}
+
+const INCOMPLETE_PIPELINE_NOTICE = "Automatische Verarbeitung technisch unvollständig. Bitte prüfen Sie die Fehlermeldungen und fehlenden Zuordnungen oder Zusammenfassungen.";
+
 function hasReviewUncertainty(
   session: SessionResponse,
   warnings: string[] = [],
@@ -652,8 +661,10 @@ export default function App() {
     setProcessingError(null);
     setDirectProtocolAvailable(false);
     setPipelineNotice(
-      shouldReviewBeforeProtocol
-        ? "Automatische Verarbeitung abgeschlossen. Prüfen Sie Sprecher und markierte Stellen, die Zusammenfassungen sind bereits erstellt."
+      hasTechnicalProcessingFailure(sessionWithSuggestedSpeakers, agendaDetectionResult)
+        ? INCOMPLETE_PIPELINE_NOTICE
+        : shouldReviewBeforeProtocol
+        ? "Automatische Verarbeitung beendet. Prüfen Sie Sprecher, Zuordnungen und Zusammenfassungen an den markierten Stellen."
         : "Automatische Verarbeitung abgeschlossen. Das Protokoll ist vorbereitet."
     );
     setCurrentStep(shouldReviewBeforeProtocol ? 2 : 3);
@@ -1053,7 +1064,7 @@ export default function App() {
             hasFreshSessionSummaries(restored) && !hasReviewUncertainty(restored);
           setDirectProtocolAvailable(canGoDirect);
           setPipelineNotice(
-            canGoDirect
+            hasTechnicalProcessingFailure(restored) ? INCOMPLETE_PIPELINE_NOTICE : canGoDirect
               ? "Automatische Verarbeitung abgeschlossen. Sie können direkt zum Protokoll wechseln oder die Zuordnung prüfen."
               : "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
           );
@@ -1073,7 +1084,7 @@ export default function App() {
             !hasReviewUncertainty(draftSession);
           setDirectProtocolAvailable(canGoDirect);
           setPipelineNotice(
-            canGoDirect
+            hasTechnicalProcessingFailure(draftSession) ? INCOMPLETE_PIPELINE_NOTICE : canGoDirect
               ? "Automatische Verarbeitung abgeschlossen. Sie können direkt zum Protokoll wechseln oder die Zuordnung prüfen."
               : "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
           );

@@ -46,6 +46,7 @@ from summarize import (
     StructuredOutputError,
     build_summary_review,
     llm_diagnostics,
+    meeting_context_from_transcript,
     summarize_segment,
 )
 from extract_tops import extract_agenda_data_from_pdf
@@ -1282,6 +1283,9 @@ class AgendaLLMUsageResponse(BaseModel):
     failed_calls: int
     failure_reasons: List[str] = Field(default_factory=list)
     validation_reasons: List[str] = Field(default_factory=list)
+    processed_lines: List[int] = Field(default_factory=list)
+    gaps: List[Dict[str, Any]] = Field(default_factory=list)
+    chunks: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class AgendaDetectionResponse(BaseModel):
@@ -2679,6 +2683,7 @@ def run_summary_job(summary_job_id: str) -> None:
                     text,
                     model=model,
                     system_prompt=system_prompt,
+                    meeting_context=meeting_context_from_transcript(transcript),
                 )
             if summary_job_cancelled(summary_job_id):
                 # A running local LLM call cannot be interrupted safely. Do not
@@ -2725,6 +2730,7 @@ def run_summary_job(summary_job_id: str) -> None:
                 "review_warnings": [warning.to_dict() for warning in review_result.warnings],
                 "fallback_used": result.fallback_used,
                 "chunks_processed": result.chunks_processed,
+                "llm_usage": getattr(result, "llm_usage", {}),
                 "duration_seconds": result.duration_seconds,
             }
             latest_states[top_index] = {
@@ -2952,6 +2958,8 @@ def detect_pipeline_agenda(
                 model=model,
                 system_prompt=system_prompt,
                 use_llm=options.get("agenda_use_llm"),
+                progress_callback=lambda usage: save_pipeline_state(
+                    pipeline_id, result_refs={"agenda_progress": asdict(usage)}),
             )
         else:
             result = detect_agenda_from_transcript(
@@ -2977,11 +2985,19 @@ def detect_pipeline_agenda(
             "Agenda Detection ergab keine belastbaren TOPs, nutze Fallback.",
         )
     except Exception as exc:
-        append_pipeline_warning(
-            pipeline_id,
-            "Agenda Detection fehlgeschlagen, nutze Fallback "
-            f"({safe_exception_label(exc)}).",
-        )
+        message = f"TOP-Erkennung technisch fehlgeschlagen ({safe_exception_label(exc)}); Zuordnung prüfen."
+        append_pipeline_warning(pipeline_id, message)
+        if agenda_tops:
+            return agenda_tops, [None] * len(transcript), {
+                "strategy": "known_agenda_failed", "segments": [], "uncertain_count": 0,
+                "warnings": [message], "llm": {
+                    "enabled": True, "source": "pipeline", "status": "failed",
+                    "timeout_seconds": 0, "attempted_calls": 0, "failed_calls": 0,
+                    "failure_reasons": [safe_exception_label(exc)], "processed_lines": [],
+                    "gaps": [{"start_index": 0, "end_index": len(transcript)-1,
+                              "kind": "technical", "reason": safe_exception_label(exc)}],
+                },
+            }, pdf_metadata
 
     tops, assignments, agenda_info = fallback_agenda(transcript, agenda_tops)
     agenda_info.update(detection_details)
@@ -3040,6 +3056,7 @@ def summarize_pipeline_segments(
                     "review_warnings": [warning.to_dict() for warning in review.warnings],
                     "fallback_used": result.fallback_used,
                     "chunks_processed": result.chunks_processed,
+                    "llm_usage": getattr(result, "llm_usage", {}),
                     "duration_seconds": result.duration_seconds,
                 }
             }
@@ -3102,6 +3119,7 @@ def summarize_pipeline_segments(
                     transcript_text,
                     model=model,
                     system_prompt=system_prompt,
+                    meeting_context=meeting_context_from_transcript(transcript),
                 )
             review = build_summary_review(
                 structured=result.structured,
@@ -3117,6 +3135,7 @@ def summarize_pipeline_segments(
                 "review_warnings": [warning.to_dict() for warning in review.warnings],
                 "fallback_used": result.fallback_used,
                 "chunks_processed": result.chunks_processed,
+                "llm_usage": getattr(result, "llm_usage", {}),
                 "duration_seconds": result.duration_seconds,
             }
         except Exception as exc:
@@ -3143,6 +3162,10 @@ def summarize_pipeline_segments(
                 ],
                 "error": safe_exception_label(exc),
             }
+
+        save_pipeline_state(pipeline_id, result_refs={
+            "summary_progress": {"completed_tops": top_index + 1, "total_tops": len(tops),
+                                 "summaries": summaries, "summary_reviews": summary_reviews}})
 
     return summaries, summary_reviews
 
@@ -3308,7 +3331,13 @@ def run_pipeline_job(
             stage=PIPELINE_STAGE_READY_FOR_REVIEW,
             progress=100,
             error=None,
-            result_refs={"ready_for_review": True},
+            result_refs={"ready_for_review": True,
+                         "processing_complete": (
+                             (agenda_info.get("llm") or {}).get("status") not in
+                             {"failed", "partial_failure", "fallback", "partial_fallback"}
+                             and not any(review.get("error") or (review.get("llm_usage") or {}).get("grounding_incomplete")
+                                         for review in summary_reviews.values())),
+                         "unassigned_line_count": assignments.count(None)},
         )
     except CancellationRequested:
         save_pipeline_state(

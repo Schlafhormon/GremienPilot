@@ -19,6 +19,7 @@ from typing import Optional
 
 from agenda_labels import label_from_json, parse_agenda_label, section_heading, with_section
 from summarize import LLM_MAX_RETRIES, get_llm_config
+from llm_transport import complete
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +407,7 @@ def extract_tops_from_text(
 TOPs:"""
 
     try:
-        response = client.chat.completions.create(
+        response = complete(client, config,
             model=actual_model,
             messages=[
                 {"role": "system", "content": actual_system_prompt},
@@ -606,7 +607,7 @@ def extract_agenda_data_from_text(
 JSON:"""
 
     try:
-        response = client.chat.completions.create(
+        response = complete(client, config,
             model=actual_model,
             messages=[
                 {"role": "system", "content": actual_system_prompt},

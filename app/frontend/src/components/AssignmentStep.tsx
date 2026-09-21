@@ -631,6 +631,19 @@ export default function AssignmentStep({
         {agendaDetection?.warnings?.map((warning) => (
           <p key={warning} role="status" className="text-amber-700">{warning}</p>
         ))}
+        {!agendaDetectionStale && Boolean(agendaDetection?.llm?.gaps?.length) && (
+          <details className="mb-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+            <summary>Gründe für unzugeordnete Zeilen</summary>
+            <ul className="mt-2 space-y-1">
+              {agendaDetection?.llm?.gaps?.map((gap) => (
+                <li key={`${gap.start_index}-${gap.end_index}`}>
+                  Zeilen {gap.start_index + 1}–{gap.end_index + 1}: {gap.kind === 'technical'
+                    ? 'Technisch nicht ausgewertet' : 'Inhaltlich unklar'} – {gap.reason}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {agendaDetectionError && (
           <div className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
             Automatische TOP-Erkennung fehlgeschlagen: {agendaDetectionError}. Die manuelle Zuordnung bleibt verfügbar.
@@ -648,7 +661,7 @@ export default function AssignmentStep({
               </div>
             )}
             <p className="text-xs text-gray-500">
-              Der Evidenzwert bewertet den Segmentanfang, nicht die Richtigkeit jeder Zeile.
+              Der Evidenzwert ist eine Einschätzung des Vorschlags. Bitte Grenzen und Inhalt anhand des Transkripts prüfen.
             </p>
             <div className="grid gap-2 md:grid-cols-2">
               {agendaDetection.segments.map((segment) => {

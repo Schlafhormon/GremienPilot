@@ -36,7 +36,7 @@ SECTION_LABELS = {
     "discussion": "Diskussion",
     "decisions": "Beschluss",
     "votes": "Abstimmung",
-    "action_items": "Maßnahmen/offene Punkte",
+    "action_items": "Maßnahmen",
     "open_points": "Offene Punkte",
     "uncertainties": "Unsicherheiten",
 }
@@ -62,6 +62,7 @@ class ProtocolTop:
     votes: list[str] = field(default_factory=list)
     action_items: list[str] = field(default_factory=list)
     open_points: list[str] = field(default_factory=list)
+    combined_action_heading: bool = False
 
 
 @dataclass
@@ -196,6 +197,8 @@ def build_protocol_document(
                 votes=sections["votes"],
                 action_items=sections["action_items"],
                 open_points=sections["open_points"],
+                combined_action_heading=bool(re.search(
+                    r'^\s*Ma(?:ß|ss)nahmen/offene Punkte:', editable_summary or '', re.I | re.M)),
             )
         )
 
@@ -242,7 +245,8 @@ def render_txt(document: ProtocolDocument) -> str:
         _append_text_section(lines, "Diskussion", top.discussion)
         _append_text_section(lines, "Beschluss", top.decisions)
         _append_text_section(lines, "Abstimmung", top.votes)
-        _append_text_section(lines, "Maßnahmen/offene Punkte", top.action_items + top.open_points)
+        _append_text_section(lines, "Maßnahmen/offene Punkte" if top.combined_action_heading else "Maßnahmen", top.action_items)
+        _append_text_section(lines, "Offene Punkte", top.open_points)
         lines.append("")
 
     _append_text_appendix(lines, document)
@@ -288,9 +292,10 @@ def render_docx(document: ProtocolDocument) -> bytes:
         _add_docx_section(doc, "Abstimmung", top.votes)
         _add_docx_section(
             doc,
-            "Maßnahmen/offene Punkte",
-            top.action_items + top.open_points,
+            "Maßnahmen/offene Punkte" if top.combined_action_heading else "Maßnahmen",
+            top.action_items,
         )
+        _add_docx_section(doc, "Offene Punkte", top.open_points)
 
     _add_docx_appendix(doc, document)
 
@@ -343,7 +348,8 @@ def render_pdf(document: ProtocolDocument) -> bytes:
         _append_pdf_section(story, styles, "Diskussion", top.discussion)
         _append_pdf_section(story, styles, "Beschluss", top.decisions)
         _append_pdf_section(story, styles, "Abstimmung", top.votes)
-        _append_pdf_section(story, styles, "Maßnahmen/offene Punkte", top.action_items + top.open_points)
+        _append_pdf_section(story, styles, "Maßnahmen/offene Punkte" if top.combined_action_heading else "Maßnahmen", top.action_items)
+        _append_pdf_section(story, styles, "Offene Punkte", top.open_points)
 
     _append_pdf_appendix(story, styles, document)
     doc.build(story)

@@ -121,9 +121,23 @@ class AgendaLLMUsage:
     failure_reasons: list[str] = field(default_factory=list)
     validation_reasons: list[str] = field(default_factory=list)
 
+    processed_lines: list[int] = field(default_factory=list)
+    gaps: list[dict] = field(default_factory=list)
+    chunks: list[dict] = field(default_factory=list)
+
     @property
     def warnings(self) -> list[str]:
         warnings = []
+        if self.chunks:
+            technical = sum(g['end_index'] - g['start_index'] + 1 for g in self.gaps if g['kind'] == 'technical')
+            semantic = sum(g['end_index'] - g['start_index'] + 1 for g in self.gaps if g['kind'] == 'semantic')
+            if technical:
+                warnings.append(f"TOP-Zuordnung technisch unvollständig: {technical} Zeilen nicht durch das LLM ausgewertet. Zusammenfassungen sind unvollständig.")
+            if semantic:
+                warnings.append(f"TOP-Zuordnung: {semantic} fachlich unklare Zeilen zur Prüfung; Begründungen im Erkennungsergebnis.")
+            if self.failed_calls:
+                warnings.append(f"TOP-Zuordnung: {self.failed_calls} fehlgeschlagene Teilaufrufe; abschließender Status: {self.status}.")
+            return warnings
         if self.failed_calls:
             warnings.append(
                 f"TOP-Erkennung: {self.failed_calls} von {self.attempted_calls} LLM-Aufrufen "
@@ -232,6 +246,7 @@ def segment_known_agenda(
     system_prompt: str | None = None,
     *,
     use_llm: bool | None = None,
+    progress_callback=None,
 ) -> AgendaDetectionResult:
     """Detect start/end lines for an already known TOP list."""
     usage = _llm_usage(use_llm)
@@ -239,37 +254,17 @@ def segment_known_agenda(
     if not transcript or not valid_tops:
         return AgendaDetectionResult(valid_tops, [None] * len(transcript), [], 0, "known_agenda_empty", usage)
 
+    if usage.enabled:
+        from agenda_llm import classify
+        segments = classify(transcript, valid_tops, usage, model, system_prompt, progress_callback)
+        strategy = "known_agenda_llm_complete" if usage.status == "success" else "known_agenda_llm_incomplete"
+        return _result_from_segments(len(transcript), segments, strategy,
+                                     tops=valid_tops, usage=usage)
+
     heuristic_result = suggest_assignments(transcript, valid_tops)
-    heuristic_segments = list(heuristic_result.segments)
-    llm_segments = _maybe_detect_with_llm(
-        transcript,
-        tops=valid_tops,
-        heuristic_segments=heuristic_segments,
-        model=model,
-        system_prompt=system_prompt,
-        usage=usage,
-    )
-
-    if llm_segments:
-        segments, repaired = _validate_known_segments(
-            transcript,
-            valid_tops,
-            llm_segments,
-            heuristic_segments,
-            issues=usage.validation_reasons,
-        )
-        strategy = "known_agenda_heuristic_llm_repaired" if repaired else "known_agenda_heuristic_llm"
-    else:
-        # Deterministic segments already preserve identity, gaps and revisits.
-        segments, repaired = heuristic_segments, False
-        strategy = "known_agenda_heuristic"
-        if usage.enabled:
-            strategy += "_llm_fallback"
-        if repaired:
-            strategy += "_repaired"
-
-    segments = _guard_number_evidence(transcript, valid_tops, segments)
-    return _result_from_segments(len(transcript), segments, strategy, tops=valid_tops, usage=usage)
+    segments = _guard_number_evidence(transcript, valid_tops, list(heuristic_result.segments))
+    return _result_from_segments(len(transcript), segments, "known_agenda_heuristic",
+                                 tops=valid_tops, usage=usage)
 
 
 def _guard_number_evidence(
@@ -511,7 +506,8 @@ def _detect_with_llm(
         max_retries=0,
     )
 
-    response = client.chat.completions.create(
+    from llm_transport import complete
+    response = complete(client, config,
         model=actual_model,
         messages=[
             {"role": "system", "content": actual_system_prompt},
@@ -547,7 +543,7 @@ def _build_llm_user_prompt(
     tops: list[str] | None,
     heuristic_segments: list[AssignmentSegment],
 ) -> str:
-    indexed_transcript, compacted = _indexed_transcript_for_llm(
+    indexed_transcript, _ = _indexed_transcript_for_llm(
         transcript,
         tops=tops,
         heuristic_segments=heuristic_segments,
@@ -572,15 +568,8 @@ def _build_llm_user_prompt(
             {"top_id": f"agenda:{index}", "top_title": top}
             for index, top in enumerate(tops)
         ], ensure_ascii=False)
-        compact_note = (
-            "Das Transkript ist auf relevante Kontextfenster gekuerzt; "
-            "die angezeigten Indizes bleiben die originalen Transkriptindizes. "
-            if compacted
-            else ""
-        )
         task = (
             "Bekannte TOP-Liste. Pruefe und verbessere die Segmentgrenzen. "
-            f"{compact_note}"
             "Gib belegte Segmente in Transkriptreihenfolge mit top_id und dem Originaltitel zurück. "
             "TOPs dürfen fehlen oder mehrfach auftreten; Lücken sind erlaubt.\n\n"
             f"TOPs:\n{agenda}"
@@ -604,57 +593,9 @@ def _indexed_transcript_for_llm(
     tops: list[str] | None,
     heuristic_segments: list[AssignmentSegment],
 ) -> tuple[str, bool]:
-    if not tops or len(transcript) <= AGENDA_DETECTION_CHUNK_LINES:
-        return (
-            "\n".join(
-                f"{index}: {line.speaker}: {line.text}"
-                for index, line in enumerate(transcript)
-            ),
-            False,
-        )
-
-    selected = _compact_known_agenda_indices(transcript, heuristic_segments)
-    return (
-        "\n".join(
-            f"{index}: {transcript[index].speaker}: {transcript[index].text}"
-            for index in selected
-        ),
-        True,
-    )
-
-
-def _compact_known_agenda_indices(
-    transcript: list[TranscriptUtterance],
-    heuristic_segments: list[AssignmentSegment],
-) -> list[int]:
-    selected: set[int] = set()
-    last_index = len(transcript) - 1
-    if last_index < 0:
-        return []
-
-    selected.update(range(0, min(last_index + 1, AGENDA_DETECTION_CONTEXT_WINDOW_AFTER)))
-    selected.update(
-        range(
-            max(0, last_index - AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE + 1),
-            last_index + 1,
-        )
-    )
-
-    for segment in heuristic_segments:
-        for anchor in {segment.start_index, segment.end_index, segment.evidence_index}:
-            if anchor is None:
-                continue
-            start = max(0, anchor - AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE)
-            end = min(last_index, anchor + AGENDA_DETECTION_CONTEXT_WINDOW_AFTER)
-            selected.update(range(start, end + 1))
-
-    for index, line in enumerate(transcript):
-        if has_transition_phrase(line.text):
-            start = max(0, index - AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE)
-            end = min(last_index, index + AGENDA_DETECTION_CONTEXT_WINDOW_AFTER)
-            selected.update(range(start, end + 1))
-
-    return sorted(selected)
+    # No heuristic may decide which transcript lines reach a model.
+    return ("\n".join(f"{index}: {line.speaker}: {line.text}"
+                      for index, line in enumerate(transcript)), False)
 
 
 def _parse_llm_segments(response_text: str) -> list[_RawSegment]:

@@ -544,4 +544,18 @@ describe('App pipeline flow', () => {
       await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')
     ).toBeInTheDocument();
   });
+  it('labels a completed pipeline with LLM failure as technically incomplete', async () => {
+    const result = pipelineResult({ assignments: [null], summaries: {} });
+    result.agenda_detection!.llm = {
+      enabled: true, source: 'request', status: 'failed', timeout_seconds: 1800,
+      attempted_calls: 1, failed_calls: 1, failure_reasons: ['TimeoutError'],
+      gaps: [{ start_index: 0, end_index: 0, kind: 'technical', reason: 'TimeoutError' }],
+    };
+    result.session.agenda_proposals!.result = result.agenda_detection!;
+    vi.mocked(getPipelineResult).mockResolvedValue(result);
+    await uploadAndStart();
+    expect(await screen.findByText(/Automatische Verarbeitung technisch unvollständig/)).toBeInTheDocument();
+    expect(screen.queryByText(/Das Protokoll ist vorbereitet/)).not.toBeInTheDocument();
+  });
+
 });

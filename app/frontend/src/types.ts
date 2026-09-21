@@ -336,11 +336,14 @@ export interface AgendaLLMUsage {
   enabled: boolean;
   source: "server_default" | "request";
   timeout_seconds: number;
-  status: "disabled" | "skipped" | "success" | "fallback" | "partial_fallback";
+  status: "disabled" | "skipped" | "success" | "fallback" | "partial_fallback" | "failed" | "partial_failure";
   attempted_calls: number;
   failed_calls: number;
   failure_reasons: string[];
   validation_reasons?: string[];
+  processed_lines?: number[];
+  gaps?: { start_index: number; end_index: number; kind: "semantic" | "technical"; reason: string }[];
+  chunks?: { start_index: number; end_index: number; status: string; duration_seconds: number }[];
 }
 
 export interface AgendaDetectionResponse {

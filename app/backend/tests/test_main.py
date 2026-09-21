@@ -87,7 +87,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         json.dumps({"tops": [{
             **({"top_id": "agenda:0"} if agenda_source != "transcript" else {}),
             "top_title": "Haushalt", "start_index": 0, "end_index": 0,
-            "confidence": 0.9, "evidence_index": 0, "evidence_text": "TOP 1 Haushalt.",
+            "confidence": 0.9, "evidence_index": 0, "evidence_text": "TOP 1 Haushalt.", "reason": "Aufruf Haushalt",
         }]}),
         json.dumps({"discussion": ["Der Haushalt wurde beraten."], "decisions": [], "votes": [],
                     "action_items": [], "open_points": [], "uncertainties": []}),
@@ -101,7 +101,8 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
 
     calls = [call for instance in fake_openai_module.instances for call in instance.calls]
     assert len(calls) == (3 if agenda_source == "pdf" else 2)
-    contracts = [agenda_detection.DEFAULT_AGENDA_DETECTION_PROMPT, summarize.DEFAULT_SYSTEM_PROMPT]
+    from agenda_llm import PROMPT
+    contracts = [agenda_detection.DEFAULT_AGENDA_DETECTION_PROMPT if agenda_source == "transcript" else PROMPT, summarize.DEFAULT_SYSTEM_PROMPT]
     prompt_keys = ["agenda_system_prompt", "summary_system_prompt"]
     if agenda_source == "pdf":
         contracts.insert(0, extract_tops.DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT)
@@ -115,7 +116,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         assert (frontend_summary_prompt in prompt) == (key == "summary_system_prompt" and prompt_mode.startswith("legacy"))
         for scoped_key, custom_prompt in scoped.items():
             assert (custom_prompt in prompt) == (prompt_mode.startswith("scoped_") and key == scoped_key)
-    assert "0: MOD" in calls[-2]["messages"][1]["content"]
+    assert ("0: MOD" if agenda_source == "transcript" else '"index": 0') in calls[-2]["messages"][1]["content"]
     expected_top = "TOP 1 Haushalt" if agenda_source == "transcript" else "Haushalt"
     assert f"TOP: {expected_top}" in calls[-1]["messages"][1]["content"]
     assert result["session"]["tops"] == [expected_top]
@@ -128,7 +129,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
     persisted = persistence.load_session(result["session"]["session_id"])
     assert persisted["agenda_proposals"] == proposals
     assert result["agenda_detection"]["strategy"] == (
-        "heuristic_transcript_llm" if agenda_source == "transcript" else "known_agenda_heuristic_llm"
+        "heuristic_transcript_llm" if agenda_source == "transcript" else "known_agenda_llm_complete"
     )
     assert result["session"]["summary_reviews"]["0"]["fallback_used"] is False
 
@@ -751,7 +752,7 @@ def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clea
             audio_duration_seconds=7.0,
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
         structured = summarize.StructuredSummary(
             discussion=[f"{top_title} wurde beraten."]
         )
@@ -893,7 +894,7 @@ def test_selective_summary_job_updates_requested_top_with_speaker_names(
         },
     )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
         captured.append(
             {
                 "top_title": top_title,
@@ -1155,7 +1156,7 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
             ),
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
         return summarize.SummarizationResult(
             summary=f"Zusammenfassung {top_title}",
             duration_seconds=0.01,
@@ -1235,7 +1236,7 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
             metadata=SimpleNamespace(to_dict=lambda: {"committee": "Nicht genutzt"}),
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
         return summarize.SummarizationResult(
             summary=f"Zusammenfassung {top_title}",
             duration_seconds=0.01,
@@ -1503,7 +1504,7 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
         ),
     )
 
-    def maybe_fail_summary(top_title, transcript_text, model=None, system_prompt=None):
+    def maybe_fail_summary(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
         if "Fehler" in top_title:
             raise RuntimeError("LLM nicht verfügbar")
         return summarize.SummarizationResult(
@@ -1534,6 +1535,28 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
     assert result["session"]["summary_reviews"]["1"]["review_warnings"][0]["severity"] == "error"
     assert result["warnings"]
     assert "LLM nicht verfügbar" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.parametrize('grounding_incomplete', [False, True])
+def test_pipeline_persists_incomplete_source_check_without_losing_draft(tmp_path, monkeypatch, grounding_incomplete):
+    configure_test_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, 'transcribe_audio', lambda *args, **kwargs: FakeTranscriptionResult(
+        transcript=[{'speaker': 'MOD', 'text': 'Kommen wir zu TOP 1 Haushalt.', 'start': 0, 'end': 2}],
+        audio_duration_seconds=2))
+    monkeypatch.setattr(main, 'summarize_segment', lambda *args, **kwargs: summarize.SummarizationResult(
+        summary='Entwurf bleibt prüfbar.', duration_seconds=0.01,
+        llm_usage={'grounding_incomplete': grounding_incomplete}))
+    with TestClient(main.app) as client:
+        started = client.post('/api/pipeline/start', data={
+            'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'false',
+        }, files={'audio': ('meeting.mp3', b'audio', 'audio/mpeg')})
+        pipeline_id = started.json()['pipeline_id']
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'completed')
+        result = client.get(f'/api/pipeline/{pipeline_id}/result').json()
+        session = client.get('/api/sessions/' + result['session']['session_id']).json()
+    assert main.load_pipeline_job(pipeline_id)['result_refs']['processing_complete'] is not grounding_incomplete
+    assert session['summaries']['0'] == 'Entwurf bleibt prüfbar.'
+    assert session['summary_reviews']['0']['llm_usage']['grounding_incomplete'] is grounding_incomplete
 
 
 def test_pipeline_fails_clearly_when_transcription_fails(tmp_path, monkeypatch):
@@ -1710,7 +1733,7 @@ def test_agenda_api_explicit_llm_policy(monkeypatch, fake_openai_module, known_t
     assert response.status_code == 200
     data = response.json()
     assert data["llm"]["enabled"] is enabled
-    assert data["llm"]["status"] == ("fallback" if enabled else "disabled")
+    assert data["llm"]["status"] == (("failed" if known_tops else "fallback") if enabled else "disabled")
     assert bool(data["warnings"]) is enabled
     assert "SECRET" not in response.text
 
@@ -1828,12 +1851,33 @@ def test_agenda_api_preserves_identity_and_validation_diagnostics(fake_openai_mo
     assert response.status_code == 200
     data = response.json()
     assert data['tops'] == ['Haushalt', 'Schulbau']
-    assert data['assignments'] == [expected]
-    assert data['llm']['validation_reasons']
+    assert data['assignments'] == [None]
+    assert data['llm']['gaps'][0]['kind'] == 'technical'
     assert data['warnings']
-    assert data['llm']['status'] == 'success'  # Transport success is separate from validation.
+    assert data['llm']['status'] == 'failed'  # Invalid evidence is not a successful LLM result.
     assert 'SECRET' not in response.text
-    if expected is not None:
-        assert data['segments'][0]['uncertain']
-        assert data['segments'][0]['evidence_index'] is None
-        assert data['segments'][0]['evidence_text'] is None
+    assert data['segments'] == []
+
+
+def test_known_agenda_total_failure_is_persisted_as_incomplete(tmp_path, monkeypatch, fake_openai_module):
+    configure_test_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, 'transcribe_audio', lambda *args, **kwargs: FakeTranscriptionResult(
+        transcript=[{'speaker': 'MOD', 'text': 'Kommen wir zu TOP 1 Haushalt.', 'start': 0, 'end': 2}],
+        audio_duration_seconds=2))
+    fake_openai_module.responses = [TimeoutError('SECRET')]
+    with TestClient(main.app) as client:
+        started = client.post('/api/pipeline/start', data={
+            'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'true', 'model': 'test-model',
+        }, files={'audio': ('meeting.mp3', b'audio', 'audio/mpeg')})
+        pipeline_id = started.json()['pipeline_id']
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'completed')
+        result = client.get(f'/api/pipeline/{pipeline_id}/result').json()
+        session = client.get('/api/sessions/' + result['session']['session_id']).json()
+    assert result['agenda_detection']['llm']['status'] == 'failed'
+    assert session['assignments'] == [None]
+    assert session['agenda_proposals']['result']['llm']['gaps'][0]['kind'] == 'technical'
+    assert not main.load_pipeline_job(pipeline_id)['result_refs']['processing_complete']
+    assert not session['summaries'].get('0')
+    assert result['warnings']
+    assert 'SECRET' not in str(result)
+    assert len(fake_openai_module.instances) == 1  # No summary over heuristic replacement text.

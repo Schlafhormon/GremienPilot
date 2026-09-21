@@ -2,6 +2,38 @@ import summarize
 import pytest
 
 
+@pytest.mark.parametrize('content', [
+    '{"discussion":["Erster Beitrag"],"discussion":["Zweiter Beitrag"]}',
+    '{"discussion":["Erster Beitrag"],"Diskussion":["Zweiter Beitrag"]}',
+])
+def test_summary_rejects_fields_that_would_silently_overwrite_content(content):
+    with pytest.raises(summarize.StructuredOutputError):
+        summarize.parse_structured_summary(content)
+
+
+def test_added_source_check_reuses_completed_primary_and_fact_calls(fake_openai_module, monkeypatch, tmp_path):
+    import json
+    monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path / 'cache'))
+    monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '3')
+    source = ('MOD: In der letzten Sitzung wurde beschlossen: Die Verwaltung erstellt einen Entwurf. '
+              'Ich lese wortwörtlich vor.')
+    draft = structured_response(action_items=['Die Verwaltung erstellt einen Entwurf.'])
+    fake_openai_module.responses = [draft, draft]
+    first = summarize.summarize_segment('Bericht', source, model='test-model')
+    assert first.llm_usage['fact_review_calls'] == 1
+    monkeypatch.setenv('LLM_SUMMARY_GROUNDING_MAX_CALLS', '1')
+    fake_openai_module.responses = [json.dumps({'0:action_items:0': {
+        'status': 'reported', 'evidence_id': 'target:0', 'scope_id': 'target:0'}})]
+    checked = summarize.summarize_segment('Bericht', source, model='test-model')
+    assert not checked.structured.action_items
+    assert checked.llm_usage['grounding_calls'] == 1
+    assert not checked.llm_usage.get('fact_review_calls')
+    assert len(fake_openai_module.instances[-1].calls) == 1
+    replay = summarize.summarize_segment('Bericht', source, model='test-model')
+    assert replay.llm_usage['cached_summary']
+    assert not fake_openai_module.instances[-1].calls
+
+
 def test_actual_frontend_prompt_preserves_summary_contract(fake_openai_module, frontend_summary_prompt):
     fake_openai_module.content = structured_response()
     result = summarize.summarize_segment(
@@ -106,7 +138,7 @@ def test_summarize_segment_uses_structured_output_and_returns_duration(
     assert "SPEAKER_00: Wir beraten den Haushalt." in request["messages"][1]["content"]
 
 
-def test_summarize_segment_uses_map_reduce_for_long_transcripts(
+def test_summarize_segment_preserves_all_partial_notes_for_long_transcripts(
     fake_openai_module,
     monkeypatch,
 ):
@@ -130,14 +162,13 @@ def test_summarize_segment_uses_map_reduce_for_long_transcripts(
     result = summarize.summarize_segment("Haushalt", transcript, model="test-model")
 
     assert result.chunks_processed == 2
-    assert "Die Beratung wurde zusammengefuehrt." in result.summary
-    assert "Die Verwaltung liefert Zahlen nach." in result.summary
+    assert "Teil 1 wurde beraten." in result.summary
+    assert "Teil 2 wurde beraten." in result.summary
 
     calls = fake_openai_module.instances[0].calls
-    assert len(calls) == 3
-    assert "Teil 1 von 2" in calls[0]["messages"][1]["content"]
-    assert "Teil 2 von 2" in calls[1]["messages"][1]["content"]
-    assert "Teilnotizen" in calls[2]["messages"][1]["content"]
+    assert len(calls) == 2
+    assert "Haushaltsansatz" in calls[0]["messages"][1]["content"]
+    assert "Nachfrage" in calls[1]["messages"][1]["content"]
 
 
 def test_summarize_segment_falls_back_to_freetext_on_malformed_structured_response(
@@ -296,3 +327,208 @@ def test_summary_review_warns_when_decision_keyword_is_missing_from_summary():
     assert warning.line_indices == [0]
     assert warning.start == 20
     assert "abgelehnt" in warning.message
+
+
+def test_failed_partial_repair_does_not_repeat_successful_summary(fake_openai_module, monkeypatch, tmp_path):
+    monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path))
+    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '1')
+    monkeypatch.setattr(summarize, 'LLM_MAX_RETRIES', 0)
+    monkeypatch.setattr(summarize, 'LLM_CHUNK_CHARS', 250)
+    text = 'A: ' + 'Haushaltsberatung. ' * 10 + '\nB: ' + 'Schulbaufinanzierung. ' * 10
+    fake_openai_module.responses = [structured_response(discussion=['Erfolgreicher Teil.']),
+                                    TimeoutError('offline'), TimeoutError('offline')]
+    with pytest.raises(summarize.LLMCallError, match='Teilzusammenfassung unvollständig'):
+        summarize.summarize_segment('Haushalt', text)
+    first_calls = fake_openai_module.instances[0].calls
+    assert len(first_calls) == 3
+    assert len(list(tmp_path.iterdir())) == 1
+    fake_openai_module.responses = [structured_response(discussion=['Zweiter Teil.'])]
+    result = summarize.summarize_segment('Haushalt', text)
+    assert 'Erfolgreicher Teil.' in result.summary
+    assert 'Zweiter Teil.' in result.summary
+    assert result.llm_usage['cached_calls'] == 1
+    assert result.llm_usage['attempted_calls'] == 1
+
+
+def test_summary_budget_splits_without_losing_text(fake_openai_module, monkeypatch):
+    monkeypatch.setenv('LLM_CONTEXT_TOKENS', '8192')
+    monkeypatch.setattr(summarize, 'LLM_CHUNK_CHARS', 10000)
+    fake_openai_module.content = structured_response(discussion=['Beratung.'])
+    text = 'A: ' + 'ä Haushaltsberatung. ' * 200
+    result = summarize.summarize_segment('Haushalt', text, system_prompt='Fachkontext')
+    calls = fake_openai_module.instances[0].calls
+    assert len(calls) > 1
+    from llm_transport import fits
+    assert all(fits(c['messages'], c['max_tokens']) for c in calls)
+    inputs = ''.join(c['messages'][-1]['content'].split('\nRandkontext')[0] for c in calls)
+    assert inputs.count('Haushaltsberatung.') == 200
+    assert result.chunks_processed == len(calls)
+
+
+def test_successful_summary_repair_is_reused_without_failed_parent(fake_openai_module, monkeypatch, tmp_path):
+    monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path))
+    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '1')
+    monkeypatch.setattr(summarize, 'LLM_MAX_RETRIES', 0)
+    text = 'A: ' + 'Beratung. ' * 30 + '\nB: ' + 'Abstimmung. ' * 30
+    fake_openai_module.responses = [TimeoutError('offline'),
+        structured_response(discussion=['Beratung.']), structured_response(votes=['Einstimmig.'])]
+    result = summarize.summarize_segment('Haushalt', text)
+    assert result.llm_usage['attempted_calls'] == 3
+    fake_openai_module.responses = []
+    resumed = summarize.summarize_segment('Haushalt', text)
+    assert resumed.summary == result.summary
+    assert resumed.llm_usage.get('attempted_calls', 0) == 0
+    assert resumed.llm_usage['cached_summary']
+    assert resumed.llm_usage['original_usage']['attempted_calls'] == 3
+
+
+def test_requested_off_record_passage_remains_visible_for_manual_review():
+    review = summarize.build_summary_review(
+        structured=None, summary='Sachdebatte.',
+        lines=[{'text': 'Das bitte außerhalb des Protokolls besprechen.', 'start': 12, 'end': 15}])
+    warning = next(w for w in review.warnings if w.kind == 'recording_scope')
+    assert warning.line_indices == [0]
+    assert warning.start == 12
+    assert 'außerhalb des Protokolls' in warning.excerpt
+
+
+def test_missing_vote_gets_bounded_fact_review_and_is_cached(fake_openai_module, monkeypatch, tmp_path):
+    monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '1')
+    monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path))
+    fake_openai_module.responses = [structured_response(discussion=['Rederecht wurde erörtert.']),
+        structured_response(decisions=['Das Rederecht wird erteilt.'], votes=['Einstimmige Zustimmung.'])]
+    text = 'Rederecht für den Gast. Bitte Handzeichen. Danke, das ist einstimmig.'
+    result = summarize.summarize_segment('Eröffnung', text, system_prompt='Anonymisierte Darstellung.')
+    assert result.structured.votes == ['Einstimmige Zustimmung.']
+    assert result.llm_usage['fact_review_calls'] == 1
+    assert result.llm_usage['attempted_calls'] == 2
+    assert 'Anonymisierte Darstellung.' in fake_openai_module.instances[0].calls[1]['messages'][0]['content']
+    resumed = summarize.summarize_segment('Eröffnung', text, system_prompt='Anonymisierte Darstellung.')
+    assert resumed.summary == result.summary
+    assert resumed.llm_usage.get('attempted_calls', 0) == 0
+    assert resumed.llm_usage['cached_summary']
+    assert resumed.llm_usage['original_usage']['fact_review_calls'] == 1
+
+
+def test_fact_review_may_confirm_only_a_retrospective_report(fake_openai_module, monkeypatch):
+    monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '1')
+    fake_openai_module.responses = [structured_response(decisions=['Die Satzung wurde beschlossen.']),
+        structured_response(discussion=['Bericht über den früheren Satzungsbeschluss der Verbandsversammlung.'])]
+    result = summarize.summarize_segment('Informationen', 'In der letzten Sitzung der Verbandsversammlung wurde die Satzung beschlossen.')
+    assert result.structured.decisions == []
+    assert result.structured.votes == []
+    assert 'früheren' in result.summary
+
+
+def test_fact_review_limit_is_visible_without_unbounded_calls(fake_openai_module, monkeypatch, tmp_path):
+    monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '1')
+    monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path))
+    monkeypatch.setattr(summarize, 'split_transcript_into_chunks', lambda text: ['Einstimmig zu A.', 'Einstimmig zu B.'])
+    fake_openai_module.responses = [structured_response(discussion=['Beratung A.']),
+        structured_response(votes=['Einstimmige Zustimmung A.']), structured_response(discussion=['Beratung B.'])]
+    result = summarize.summarize_segment('Anträge', 'Einstimmig zu A. Einstimmig zu B.')
+    assert result.llm_usage['fact_review_calls'] == 1
+    assert result.llm_usage['attempted_calls'] == 3
+    assert result.llm_usage['fact_review_limit_reached']
+    assert any('ausgeschöpft' in item for item in result.structured.uncertainties)
+    resumed = summarize.summarize_segment('Anträge', 'Einstimmig zu A. Einstimmig zu B.')
+    assert resumed.llm_usage['cached_summary']
+    assert resumed.llm_usage['attempted_calls'] == 0
+    assert resumed.summary == result.summary
+
+
+def test_omitted_negative_result_gets_source_review(fake_openai_module, monkeypatch):
+    monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '1')
+    fake_openai_module.responses = [structured_response(discussion=['Die Fragestunde wird eröffnet.']),
+        structured_response(discussion=['Es gibt keine Wortmeldungen der Einwohner.'])]
+    result = summarize.summarize_segment('Einwohnerfragestunde', 'Gibt es Wortmeldungen? Das ist nicht der Fall.')
+    assert 'keine Wortmeldungen' in result.summary
+    assert result.llm_usage['fact_review_calls'] == 1
+
+
+def test_person_mentioned_in_speech_is_not_automatically_its_speaker():
+    review = summarize.build_summary_review(
+        structured=summarize.StructuredSummary(discussion=['Frau Muster (SPEAKER_01) bestätigt die Prüfung.']),
+        summary='Frau Muster (SPEAKER_01) bestätigt die Prüfung.',
+        lines=[{'speaker': 'SPEAKER_01', 'text': 'Frau Muster wird das prüfen.', 'start': 1, 'end': 3}])
+    assert any(w.kind == 'speaker_reference' for w in review.warnings)
+
+
+def test_conflicting_centuries_remain_source_warnings_without_date_correction():
+    review = summarize.build_summary_review(
+        structured=None, summary='Ein Termin wird diskutiert.', lines=[
+            {'text': 'Vorgeschlagen ist 2028.', 'start': 1, 'end': 2},
+            {'text': 'Dann wäre das 1928.', 'start': 3, 'end': 4}])
+    warning = next(w for w in review.warnings if w.kind == 'date_conflict')
+    assert warning.line_indices == [0, 1]
+    assert '1928' in warning.message and '2028' in warning.message
+    assert '1928' in warning.excerpt
+
+
+def test_summary_boundary_keeps_quotation_context_without_duplicating_targets(fake_openai_module, monkeypatch):
+    first = 'A: Ich lese jetzt den Auftrag der früheren Sitzung vor.'
+    second = 'A: Der Vorsitzende beauftragt die Verwaltung.'
+    monkeypatch.setattr(summarize, 'LLM_CHUNK_CHARS', len(first)+1)
+    fake_openai_module.content = structured_response(discussion=['Bericht über einen früheren Auftrag.'])
+    result = summarize.summarize_segment('Informationen', first+'\n'+second)
+    calls = fake_openai_module.instances[0].calls
+    assert len(calls) == 2
+    user = calls[1]['messages'][-1]['content']
+    target, context = user.split('\nRandkontext')
+    assert first not in target and second in target
+    assert first in context and 'kein Auftrag der heutigen Sitzung' in context
+    assert result.llm_usage['source_parts'] == [
+        {'start_char': 0, 'end_char': len(first)},
+        {'start_char': len(first)+1, 'end_char': len(first)+1+len(second)}]
+
+
+def test_fact_budget_subdivision_does_not_require_failure_retries(fake_openai_module, monkeypatch):
+    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '0')
+    monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '3')
+    fake_openai_module.content = structured_response(discussion=['Beratung mit Abstimmung.'])
+    real_fits = summarize.fits
+    def limited_fact_budget(messages, output):
+        if messages[0]['content'].startswith('Lies die Quelle unabhängig'):
+            target = messages[-1]['content'].split('Vollständiger Quellausschnitt:\n')[1].split('\nRandkontext')[0]
+            return len(target) <= 500
+        return real_fits(messages, output)
+    monkeypatch.setattr(summarize, 'fits', limited_fact_budget)
+    text = '\n'.join('A: Einstimmig. ' + 'Beratung. ' * 20 for _ in range(4))
+    result = summarize.summarize_segment('Anträge', text)
+    assert result.llm_usage['budget_splits'] >= 1
+    assert result.llm_usage.get('repair_splits', 0) == 0
+    assert result.llm_usage['fact_review_calls'] <= 3
+    parts = result.llm_usage['source_parts']
+    normalized = '\n'.join(line.rstrip() for line in text.strip().splitlines())
+    assert parts[0]['start_char'] == 0 and parts[-1]['end_char'] == len(normalized)
+    assert all(a['end_char'] == b['start_char'] for a, b in zip(parts, parts[1:]))
+
+
+@pytest.mark.parametrize('status,category,transient', [(429, 'rate_limit', True), (503, 'server', True), (400, 'client', False)])
+def test_native_http_status_has_same_retry_classification(status, category, transient):
+    import httpx
+    response = httpx.Response(status, request=httpx.Request('POST', 'http://example.test/api/chat'))
+    error = httpx.HTTPStatusError('test', request=response.request, response=response)
+    result = summarize.classify_llm_error(error)
+    assert result.category == category
+    assert result.transient is transient
+
+
+def test_future_protocol_approval_does_not_trigger_missing_current_decision_review(fake_openai_module, monkeypatch):
+    monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '3')
+    fake_openai_module.content = structured_response(discussion=['Das Protokoll ist in einer späteren Sitzung zu behandeln.'])
+    result = summarize.summarize_segment('Verfahrensfragen',
+        'Das Protokoll muss in der nächsten Sitzung beschlossen werden.')
+    assert result.summary
+    assert not result.llm_usage.get('fact_review_calls')
+    assert len(fake_openai_module.instances[0].calls) == 1
+
+
+def test_conditional_closing_does_not_trigger_missing_negative_review(fake_openai_module, monkeypatch):
+    monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '3')
+    fake_openai_module.content = structured_response(discussion=['Die Sitzung wurde um 19:21 Uhr geschlossen.'])
+    result = summarize.summarize_segment('Schließung',
+        'Wenn das nicht der Fall ist, dann schließe ich die Sitzung um 19:21 Uhr. Danke allen.')
+    assert result.summary
+    assert not result.llm_usage.get('fact_review_calls')
+    assert len(fake_openai_module.instances[0].calls) == 1

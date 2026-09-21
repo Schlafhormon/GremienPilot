@@ -7,6 +7,16 @@ import re
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_llm_transport(monkeypatch):
+    # Unit tests must never accidentally contact a local model or reuse private caches.
+    monkeypatch.setenv("LLM_OLLAMA_NATIVE", "false")
+    monkeypatch.setenv("LLM_SUMMARY_FACT_REVIEW_MAX_CALLS", "0")
+    monkeypatch.setenv("LLM_SUMMARY_GROUNDING_MAX_CALLS", "0")
+    monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
+    monkeypatch.delenv("LLM_AUDIT_DIR", raising=False)
+
+
 @pytest.fixture
 def frontend_summary_prompt():
     """Read the actual UI default so this regression cannot drift from production."""

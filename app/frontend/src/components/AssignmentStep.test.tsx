@@ -346,3 +346,17 @@ it('applies reordered and resumed safe segments while leaving gaps and uncertain
   expect(screen.getByText('1 Zeilen ohne automatischen Zuordnungsvorschlag.')).toBeInTheDocument();
   expect(screen.getByText('Unsicher prüfen')).toBeInTheDocument();
 });
+
+it('distinguishes technical gaps from semantic uncertainty without replacing assignments', () => {
+  renderAssignmentStep({agendaDetection: {
+    ...defaultProps.agendaDetection!,
+    llm: { enabled: true, source: 'request', status: 'partial_failure', timeout_seconds: 1800,
+      attempted_calls: 2, failed_calls: 1, failure_reasons: ['TimeoutError'], gaps: [
+        {start_index: 0, end_index: 0, kind: 'technical', reason: 'TimeoutError'},
+        {start_index: 1, end_index: 1, kind: 'semantic', reason: 'Kein eindeutiger Themenbezug'},
+      ]},
+  }});
+  expect(screen.getByText(/Technisch nicht ausgewertet/)).toBeInTheDocument();
+  expect(screen.getByText(/Inhaltlich unklar/)).toBeInTheDocument();
+  expect(defaultProps.setAssignments).not.toHaveBeenCalled();
+});
