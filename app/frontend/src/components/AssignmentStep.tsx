@@ -113,7 +113,7 @@ export default function AssignmentStep({
 
   const counts = getAssignmentCounts();
 
-  const handleLineClick = (lineIndex: number, event: MouseEvent<HTMLDivElement>) => {
+  const handleLineClick = (lineIndex: number, event: Pick<MouseEvent, 'detail' | 'shiftKey'>) => {
     if (editingLine === lineIndex) {
       return;
     }
@@ -125,6 +125,8 @@ export default function AssignmentStep({
       seekToLine(lineIndex, line);
       return;
     }
+
+    if (tops.length === 0) return;
 
     if (event.shiftKey && selectionStart !== null) {
       // Range selection
@@ -517,8 +519,6 @@ export default function AssignmentStep({
     : !agendaDetection || agendaDetectionStale || agendaDetection.uncertain_count > 0 || uncertainSegmentCount > 0 || unassignedCount > 0
       ? 'Prüfen'
       : 'Bereit';
-  const speakerReviewStatus = openSpeakerCount > 0 ? 'Prüfen' : 'Bereit';
-  const protocolDraftStatus = hasSummaries ? 'Vorbereitet' : 'Wird nach Prüfung erstellt';
 
   const getDetectionSegmentForLine = (lineIndex: number) =>
     !agendaDetectionStale ? agendaDetection?.segments.find(
@@ -526,73 +526,376 @@ export default function AssignmentStep({
     ) ?? null : null;
 
   return (
-    <div className="space-y-6">
-      {/* Review overview */}
-      <div className="rounded-lg border border-blue-200 bg-blue-50 p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <p className="text-sm font-medium text-blue-700">Prüfung nach der Automatik</p>
-            <h2 className="mt-1 text-xl font-semibold text-gray-950">
-              Kontrollieren Sie nur die markierten Sprecher und TOP-Zuordnungen.
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm text-blue-900">
-              {hasTops
-                ? 'Die Transkription und der Protokollentwurf sind vorbereitet. Änderungen markieren nur betroffene TOPs zur späteren Prüfung.'
-                : 'Keine TOPs angelegt. Das gesamte Transkript wird ohne automatische TOP-Erkennung zusammengefasst.'}
-            </p>
-          </div>
-          <div className="grid min-w-0 gap-2 sm:grid-cols-3 lg:w-[520px]">
-            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
-              <div className="text-xs font-medium uppercase text-gray-400">Sprecher</div>
-              <div className={`mt-1 text-sm font-semibold ${openSpeakerCount > 0 ? 'text-yellow-700' : 'text-green-700'}`}>
-                {speakerReviewStatus}
-              </div>
-              <div className="mt-1 text-xs text-gray-500">
-                {openSpeakerCount > 0 ? `${openSpeakerCount} offen` : `${speakerIds.length} erkannt`}
-              </div>
-            </div>
-            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
-              <div className="text-xs font-medium uppercase text-gray-400">TOPs</div>
-              <div className={`mt-1 text-sm font-semibold ${topReviewStatus === 'Prüfen' ? 'text-yellow-700' : 'text-green-700'}`}>
-                {topReviewStatus}
-              </div>
-              <div className="mt-1 text-xs text-gray-500">
-                {hasTops ? `${assignedCount}/${totalCount} Zeilen` : 'Gesamtgespräch'}
-              </div>
-            </div>
-            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
-              <div className="text-xs font-medium uppercase text-gray-400">Entwurf</div>
-              <div className="mt-1 text-sm font-semibold text-gray-900">
-                {protocolDraftStatus}
-              </div>
-              <div className="mt-1 text-xs text-gray-500">
-                {hasSummaries ? 'Zusammenfassungen vorhanden' : 'Nächster Schritt'}
-              </div>
-            </div>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold text-gray-950">Transkript zuordnen</h2>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+          <a href="#speaker-review" className="rounded px-2 py-2 text-blue-700 hover:bg-blue-50">
+            Sprecher prüfen · {openSpeakerCount > 0 ? `${openSpeakerCount} offen` : `${speakerIds.length} benannt`}
+          </a>
+          <a href="#agenda-review" className="rounded px-2 py-2 text-blue-700 hover:bg-blue-50">
+            TOP-Vorschläge · {topReviewStatus}{uncertainSegmentCount > 0 ? ` · ${uncertainSegmentCount} unsicher` : ''}
+          </a>
+          <span className="text-gray-600">{hasSummaries ? 'Entwurf vorbereitet' : 'Entwurf nach Prüfung'}</span>
+        </div>
+      </div>
+      {isDetectingAgenda && <p role="status" className="text-sm text-blue-700">TOP-Erkennung läuft …</p>}
+      {agendaDetectionError && <p role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">TOP-Erkennung fehlgeschlagen: {agendaDetectionError}. Manuelle Zuordnung bleibt verfügbar.</p>}
+      {agendaDetectionStale && <p className="rounded border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900">Vorschläge veraltet oder ohne überprüfbaren Quellenstand. Übernehmen gesperrt; bitte erneut berechnen. Bisherige Unsicherheiten bleiben sichtbar, Zeilenangaben beziehen sich auf den alten Stand.</p>}
+
+      {/* Progress */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-gray-600">
+          <span>
+            {assignedCount} von {totalCount} Zeilen zugeordnet
+          </span>
+          {hasTops && unassignedCount > 0 && (
+            <span className="rounded-full bg-yellow-100 px-3 py-1 text-xs font-medium text-yellow-800">
+              {unassignedCount} Zeilen ohne TOP
+            </span>
+          )}
+          <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 sm:w-64">
+            <div
+              className="h-full bg-blue-500 transition-all"
+              style={{ width: `${totalCount ? (assignedCount / totalCount) * 100 : 0}%` }}
+            />
           </div>
         </div>
       </div>
 
+      {/* Main Layout */}
+      <div id="assignment-workspace" tabIndex={-1} className="review-workspace scroll-mt-4">
+        {/* TOPs Sidebar */}
+        <div className="review-pane flex flex-col bg-white rounded-lg border border-gray-200 p-3">
+          <h3 className="font-medium text-gray-900 mb-4">Tagesordnung</h3>
+          <div className="mb-4 space-y-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
+            <label className="block text-xs font-medium text-gray-600" htmlFor="selected-top-title">
+              Ausgewählter TOP
+            </label>
+            <input
+              id="selected-top-title"
+              type="text"
+              value={topTitleDraft}
+              onChange={(event) => setTopTitleDraft(event.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={renameSelectedTop}
+                disabled={!topTitleDraft.trim()}
+                className="px-2 py-2 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+              >
+                TOP umbenennen
+              </button>
+              <button
+                type="button"
+                onClick={addTop}
+                className="px-2 py-2 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100"
+              >
+                TOP hinzufügen
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelectedTop}
+                disabled={tops.length === 0}
+                className="px-2 py-2 text-sm bg-white border border-gray-300 rounded hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+              >
+                TOP löschen
+              </button>
+              <button
+                type="button"
+                onClick={mergeSelectedTopWithPrevious}
+                disabled={selectedTop <= 0}
+                className="px-2 py-2 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+              >
+                TOP zusammenlegen
+              </button>
+            </div>
+          </div>
+          <div className="review-scroll space-y-2" tabIndex={0} role="region" aria-label="Tagesordnung">
+            <details className="mb-3 text-sm text-gray-700">
+              <summary className="cursor-pointer font-medium">Hilfe zur Zuordnung</summary>
+              <div className="mt-2 space-y-2">
+                <p>TOP auswählen, dann eine Transkriptzeile anklicken oder mit Enter bzw. Leertaste zuordnen. Erneutes Aktivieren hebt die Zuordnung auf. Mit Umschalt wird der Bereich seit der letzten Zeile zugeordnet.</p>
+                <p>Segmentaktionen gelten für zusammenhängende Zeilen desselben TOPs. Zeilenumbrüche beim Bearbeiten teilen eine Zeile auf.</p>
+                <p>Automatische Vorschläge anhand des Transkripts prüfen: Auch innerhalb eines Segments können Themenwechsel vorkommen. Der Evidenzwert ist eine Einschätzung.</p>
+              </div>
+            </details>
+            {tops.length === 0 ? (
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+                Keine TOPs angelegt. Das gesamte Gespräch wird zusammengefasst.
+              </div>
+            ) : tops.map((top, index) => {
+              const color = getColor(index);
+              const isSelected = selectedTop === index;
+              return (
+                <button
+                  key={index}
+                  onClick={() => setSelectedTop(index)}
+                  aria-current={isSelected ? 'true' : undefined}
+                  className={`w-full text-left px-3 py-3 rounded-lg border-2 transition-all ${
+                    isSelected
+                      ? `${color.bg} ${color.border} ${color.text}`
+                      : 'border-transparent hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <div className={`w-3 h-3 rounded-full mt-1 ${color.dot}`} />
+                    <div className="flex-1 min-w-0">
+                      <div
+                        className="font-medium text-sm break-words"
+                        title={top || 'Unbenannter Tagesordnungspunkt'}
+                      >
+                        {top || 'Unbenannter Tagesordnungspunkt'}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {counts[index]} Zeilen
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Transcript */}
+        <div className="review-pane bg-white rounded-lg border border-gray-200 flex flex-col">
+          <div className="shrink-0 bg-gray-50 border-b border-gray-200 p-3 flex flex-wrap items-center gap-2 text-sm">
+            <span className="mr-1 font-medium text-gray-900">Korrektur</span>
+            <span className="text-gray-700">
+              {selectedLineIndex === null
+                ? 'Keine Zeile ausgewählt'
+                : `Zeile ${selectedLineIndex + 1} ausgewählt${
+                    selectedSegmentBounds
+                      ? ` · Segment ${selectedSegmentBounds.start + 1}-${selectedSegmentBounds.end + 1}`
+                      : ''
+                  }`}
+            </span>
+            <button
+              type="button"
+              onClick={assignCurrentSegmentToSelectedTop}
+              disabled={selectedLineIndex === null || !hasTops}
+              className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+            >
+              Segment zuordnen
+            </button>
+            <button
+              type="button"
+              onClick={splitCurrentSegmentAtSelectedLine}
+              disabled={selectedLineIndex === null || !hasTops}
+              className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+            >
+              Grenze ab hier setzen
+            </button>
+            <button
+              type="button"
+              onClick={mergeCurrentSegmentWithPrevious}
+              disabled={selectedLineIndex === null || selectedSegmentBounds?.start === 0}
+              className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+            >
+              Mit vorherigem Segment mergen
+            </button>
+            <button
+              type="button"
+              onClick={mergeCurrentSegmentWithNext}
+              disabled={
+                selectedLineIndex === null ||
+                !selectedSegmentBounds ||
+                selectedSegmentBounds.end >= assignments.length - 1
+              }
+              className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+            >
+              Mit nächstem Segment mergen
+            </button>
+            <span className="w-px h-6 bg-gray-300 mx-1" />
+            <button
+              type="button"
+              onClick={mergeLineWithPrevious}
+              disabled={selectedLineIndex === null || selectedLineIndex <= 0}
+              className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+            >
+              Zeile mit vorheriger verbinden
+            </button>
+            <button
+              type="button"
+              onClick={mergeLineWithNext}
+              disabled={selectedLineIndex === null || selectedLineIndex >= transcript.length - 1}
+              className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+            >
+              Zeile mit nächster verbinden
+            </button>
+            <button
+              type="button"
+              onClick={mergeConsecutiveSameSpeakerLines}
+              disabled={transcript.length <= 1}
+              className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+            >
+              Gleiche Sprecher zusammenführen
+            </button>
+          </div>
+
+          {/* Audio Player */}
+          {audioUrl && (
+            <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
+              <AudioPlayer
+                audioUrl={audioUrl}
+                currentTime={seekTime}
+                onTimeUpdate={handleTimeUpdate}
+              />
+            </div>
+          )}
+
+          <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
+            <h3 className="font-medium text-gray-900">Transkript</h3>
+          </div>
+          <div ref={transcriptContainerRef} className="review-scroll flex-1 p-2" tabIndex={0} role="region" aria-label="Transkript">
+            {transcript.map((line, index) => {
+              const assignedTo = assignments[index] ?? null;
+              const color = assignedTo !== null ? getColor(assignedTo) : null;
+              const isCurrentLine = index === currentLineIndex;
+              const isSelectedLine = index === selectedLineIndex;
+              const detectionSegment = getDetectionSegmentForLine(index);
+              return (
+                <div
+                  key={index}
+                  onClick={(e) => handleLineClick(index, e)}
+                  className={`px-3 py-2 rounded cursor-pointer transition-colors text-sm border-l-4 mb-1 ${
+                    color
+                      ? `${color.bg} ${color.border} hover:opacity-80`
+                      : 'border-transparent hover:bg-gray-100'
+                  } ${isCurrentLine ? 'ring-2 ring-blue-500 ring-offset-1' : ''} ${
+                    isSelectedLine ? 'outline outline-2 outline-gray-800' : ''
+                  } ${
+                    detectionSegment?.uncertain ? 'ring-2 ring-yellow-400 ring-offset-1' : ''
+                  }`}
+                >
+                  <span className="font-medium text-gray-600">
+                    {getDisplayName(line.speaker)}:
+                  </span>{' '}
+                  {editingLine === index ? (
+                    <div
+                      className="mt-2 space-y-2"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <textarea
+                        value={editText}
+                        onChange={(event) => setEditText(event.target.value)}
+                        className="w-full min-h-20 p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        aria-label={`Transkriptzeile ${index + 1} korrigieren`}
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={saveLineEdit}
+                          className="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+                        >
+                          Speichern
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelLineEdit}
+                          className="px-3 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+                        >
+                          Abbrechen
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        aria-label={`Zeile ${index + 1} zuordnen`}
+                        aria-pressed={assignedTo !== null && assignedTo === selectedTop}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleLineClick(index, event);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.shiftKey && (event.key === 'Enter' || event.key === ' ')) {
+                            event.preventDefault();
+                            handleLineClick(index, { detail: 0, shiftKey: true });
+                          }
+                        }}
+                        className="rounded py-1 text-left text-gray-800"
+                      >{line.text}</button>
+                      {detectionSegment?.uncertain && (
+                        <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded bg-yellow-200 text-yellow-900 text-xs font-medium">
+                          Unsicher
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          startLineEdit(index, line.text);
+                        }}
+                        className="ml-2 rounded px-2 py-1 text-sm text-gray-600 hover:text-blue-600"
+                      >
+                        Bearbeiten
+                      </button>
+                    </>
+                  )}
+                  {audioUrl ? (
+                    <button type="button" onClick={(event) => { event.stopPropagation(); seekToLine(index, line); }} className="ml-2 rounded px-2 py-1 text-sm text-blue-700 hover:bg-blue-50" aria-label={`Audio ab ${formatTime(line.start)}`}>
+                      Audio {formatTime(line.start)}
+                    </button>
+                  ) : <span className="ml-2 text-xs text-gray-500">[{formatTime(line.start)}]</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div className="flex flex-wrap justify-between gap-2">
+        <button
+          onClick={onBack}
+          className="px-6 py-3 rounded-lg font-medium text-gray-600 hover:bg-gray-100 transition-colors flex items-center gap-2"
+        >
+          <span>←</span>
+          Zurück
+        </button>
+        <button
+          onClick={onNext}
+          disabled={!canProceed}
+          className={`px-6 py-3 rounded-lg font-medium transition-colors flex items-center gap-2 ${
+            canProceed
+              ? 'bg-blue-600 text-white hover:bg-blue-700'
+              : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+          }`}
+        >
+          Zum Protokollentwurf
+          <span>→</span>
+        </button>
+      </div>
+
+      <div className="flex justify-end">
+        <a href="#assignment-workspace" className="rounded px-3 py-2 text-sm text-blue-700 hover:bg-blue-50">Zur Transkriptzuordnung ↑</a>
+      </div>
+
       {/* Speaker Name Editor */}
-      <SpeakerNameEditor
-        transcript={transcript}
-        setTranscript={setTranscript}
-        speakerNames={speakerNames}
-        setSpeakerNames={setSpeakerNames}
-        sessionId={sessionId}
-        rememberSpeakers={rememberSpeakers}
-        audioUrl={audioUrl}
-      />
+      <div id="speaker-review" tabIndex={-1} role="region" aria-label="Sprecherprüfung" className="scroll-mt-4">
+        <SpeakerNameEditor
+          transcript={transcript}
+          setTranscript={setTranscript}
+          speakerNames={speakerNames}
+          setSpeakerNames={setSpeakerNames}
+          sessionId={sessionId}
+          rememberSpeakers={rememberSpeakers}
+          audioUrl={audioUrl}
+        />
+      </div>
 
       {/* Agenda Detection */}
-      <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <div id="agenda-review" tabIndex={-1} className="scroll-mt-4 bg-white border border-gray-200 rounded-lg p-4">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <div>
             <h3 className="font-medium text-gray-900">Automatisch erkannte Segmente</h3>
             <p className="text-sm text-gray-600">
-              Aufrufe begründen Segmentanfänge. Gelbe Vorschläge und Zeilen ohne Zuordnung bitte prüfen;
-              auch innerhalb eines Segments können unangekündigte Themenwechsel vorkommen.
-              Neuberechnen ändert keine Zuordnungen. Übernehmen ersetzt manuelle Zuordnungen im gewählten Bereich.
+              Übernehmen ersetzt die Zuordnungen im gewählten Bereich.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -621,13 +924,6 @@ export default function AssignmentStep({
           </div>
         </div>
 
-        {agendaDetectionStale && (
-          <p role="status" className="mb-3 rounded border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900">
-            Vorschläge veraltet oder ohne überprüfbaren Quellenstand. Übernehmen ist gesperrt.
-            Bitte TOP-Erkennung erneut berechnen. Frühere Unsicherheiten bleiben unten sichtbar;
-            die alten Zeilenangaben beziehen sich auf den damaligen Stand.
-          </p>
-        )}
         {agendaDetection?.warnings?.map((warning) => (
           <p key={warning} role="status" className="text-amber-700">{warning}</p>
         ))}
@@ -644,11 +940,6 @@ export default function AssignmentStep({
             </ul>
           </details>
         )}
-        {agendaDetectionError && (
-          <div className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
-            Automatische TOP-Erkennung fehlgeschlagen: {agendaDetectionError}. Die manuelle Zuordnung bleibt verfügbar.
-          </div>
-        )}
         {agendaDetection ? (
           <div className="space-y-2">
             <div className="text-xs text-gray-500">
@@ -660,9 +951,6 @@ export default function AssignmentStep({
                 {undetectedTops.length > 0 && <p>Ohne Segmentnachweis: {undetectedTops.join(', ')}. Das belegt keine Absetzung.</p>}
               </div>
             )}
-            <p className="text-xs text-gray-500">
-              Der Evidenzwert ist eine Einschätzung des Vorschlags. Bitte Grenzen und Inhalt anhand des Transkripts prüfen.
-            </p>
             <div className="grid gap-2 md:grid-cols-2">
               {agendaDetection.segments.map((segment) => {
                 const color = getColor(segment.top_index);
@@ -721,311 +1009,6 @@ export default function AssignmentStep({
         )}
       </div>
 
-      {/* Progress */}
-      <div className="rounded-lg border border-gray-200 bg-white p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-gray-600">
-          <span>
-            {assignedCount} von {totalCount} Zeilen zugeordnet
-          </span>
-          {hasTops && unassignedCount > 0 && (
-            <span className="rounded-full bg-yellow-100 px-3 py-1 text-xs font-medium text-yellow-800">
-              {unassignedCount} Zeilen ohne TOP
-            </span>
-          )}
-          <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 sm:w-64">
-            <div
-              className="h-full bg-blue-500 transition-all"
-              style={{ width: `${totalCount ? (assignedCount / totalCount) * 100 : 0}%` }}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-wrap items-center gap-2 text-sm">
-        <span className="mr-1 font-medium text-gray-900">Erweiterte Korrektur</span>
-        <span className="text-gray-700">
-          {selectedLineIndex === null
-            ? 'Keine Zeile ausgewählt'
-            : `Zeile ${selectedLineIndex + 1} ausgewählt${
-                selectedSegmentBounds
-                  ? ` · Segment ${selectedSegmentBounds.start + 1}-${selectedSegmentBounds.end + 1}`
-                  : ''
-              }`}
-        </span>
-        <button
-          type="button"
-          onClick={assignCurrentSegmentToSelectedTop}
-          disabled={selectedLineIndex === null}
-          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-        >
-          Segment zuordnen
-        </button>
-        <button
-          type="button"
-          onClick={splitCurrentSegmentAtSelectedLine}
-          disabled={selectedLineIndex === null}
-          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-        >
-          Grenze ab hier setzen
-        </button>
-        <button
-          type="button"
-          onClick={mergeCurrentSegmentWithPrevious}
-          disabled={selectedLineIndex === null || selectedSegmentBounds?.start === 0}
-          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-        >
-          Mit vorherigem Segment mergen
-        </button>
-        <button
-          type="button"
-          onClick={mergeCurrentSegmentWithNext}
-          disabled={
-            selectedLineIndex === null ||
-            !selectedSegmentBounds ||
-            selectedSegmentBounds.end >= assignments.length - 1
-          }
-          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-        >
-          Mit nächstem Segment mergen
-        </button>
-        <span className="w-px h-6 bg-gray-300 mx-1" />
-        <button
-          type="button"
-          onClick={mergeLineWithPrevious}
-          disabled={selectedLineIndex === null || selectedLineIndex <= 0}
-          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-        >
-          Zeile mit vorheriger verbinden
-        </button>
-        <button
-          type="button"
-          onClick={mergeLineWithNext}
-          disabled={selectedLineIndex === null || selectedLineIndex >= transcript.length - 1}
-          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-        >
-          Zeile mit nächster verbinden
-        </button>
-        <button
-          type="button"
-          onClick={mergeConsecutiveSameSpeakerLines}
-          disabled={transcript.length <= 1}
-          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-        >
-          Gleiche Sprecher zusammenführen
-        </button>
-      </div>
-
-      {/* Main Layout */}
-      <div className="flex gap-6 h-[600px]">
-        {/* TOPs Sidebar */}
-        <div className="w-72 bg-white rounded-lg border border-gray-200 p-4 overflow-y-auto">
-          <h3 className="font-medium text-gray-900 mb-4">Tagesordnung</h3>
-          <div className="mb-4 space-y-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
-            <label className="block text-xs font-medium text-gray-600" htmlFor="selected-top-title">
-              Ausgewählter TOP
-            </label>
-            <input
-              id="selected-top-title"
-              type="text"
-              value={topTitleDraft}
-              onChange={(event) => setTopTitleDraft(event.target.value)}
-              className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={renameSelectedTop}
-                disabled={!topTitleDraft.trim()}
-                className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-              >
-                TOP umbenennen
-              </button>
-              <button
-                type="button"
-                onClick={addTop}
-                className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-gray-100"
-              >
-                TOP hinzufügen
-              </button>
-              <button
-                type="button"
-                onClick={deleteSelectedTop}
-                disabled={tops.length === 0}
-                className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
-              >
-                TOP löschen
-              </button>
-              <button
-                type="button"
-                onClick={mergeSelectedTopWithPrevious}
-                disabled={selectedTop <= 0}
-                className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-              >
-                TOP zusammenlegen
-              </button>
-            </div>
-          </div>
-          <div className="space-y-2">
-            {tops.length === 0 ? (
-              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
-                Keine TOPs vorhanden.
-              </div>
-            ) : tops.map((top, index) => {
-              const color = getColor(index);
-              const isSelected = selectedTop === index;
-              return (
-                <button
-                  key={index}
-                  onClick={() => setSelectedTop(index)}
-                  className={`w-full text-left px-3 py-3 rounded-lg border-2 transition-all ${
-                    isSelected
-                      ? `${color.bg} ${color.border} ${color.text}`
-                      : 'border-transparent hover:bg-gray-50'
-                  }`}
-                >
-                  <div className="flex items-start gap-2">
-                    <div className={`w-3 h-3 rounded-full mt-1 ${color.dot}`} />
-                    <div className="flex-1 min-w-0">
-                      <div
-                        className="font-medium text-sm truncate"
-                        title={top || 'Unbenannter Tagesordnungspunkt'}
-                      >
-                        {top || 'Unbenannter Tagesordnungspunkt'}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        {counts[index]} Zeilen
-                      </div>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Transcript */}
-        <div className="flex-1 bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
-          {/* Audio Player */}
-          {audioUrl && (
-            <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
-              <AudioPlayer
-                audioUrl={audioUrl}
-                currentTime={seekTime}
-                onTimeUpdate={handleTimeUpdate}
-              />
-            </div>
-          )}
-
-          <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
-            <h3 className="font-medium text-gray-900">Transkript</h3>
-          </div>
-          <div ref={transcriptContainerRef} className="flex-1 overflow-y-auto p-2">
-            {transcript.map((line, index) => {
-              const assignedTo = assignments[index] ?? null;
-              const color = assignedTo !== null ? getColor(assignedTo) : null;
-              const isCurrentLine = index === currentLineIndex;
-              const isSelectedLine = index === selectedLineIndex;
-              const detectionSegment = getDetectionSegmentForLine(index);
-              return (
-                <div
-                  key={index}
-                  onClick={(e) => handleLineClick(index, e)}
-                  className={`px-3 py-2 rounded cursor-pointer transition-colors text-sm border-l-4 mb-1 ${
-                    color
-                      ? `${color.bg} ${color.border} hover:opacity-80`
-                      : 'border-transparent hover:bg-gray-100'
-                  } ${isCurrentLine ? 'ring-2 ring-blue-500 ring-offset-1' : ''} ${
-                    isSelectedLine ? 'outline outline-2 outline-gray-800' : ''
-                  } ${
-                    detectionSegment?.uncertain ? 'ring-2 ring-yellow-400 ring-offset-1' : ''
-                  }`}
-                >
-                  <span className="font-medium text-gray-600">
-                    {getDisplayName(line.speaker)}:
-                  </span>{' '}
-                  {editingLine === index ? (
-                    <div
-                      className="mt-2 space-y-2"
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      <textarea
-                        value={editText}
-                        onChange={(event) => setEditText(event.target.value)}
-                        className="w-full min-h-20 p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        aria-label={`Transkriptzeile ${index + 1} korrigieren`}
-                      />
-                      <p className="text-xs text-gray-500">
-                        Mehrere Zeilen im Feld werden beim Speichern als getrennte Transkriptzeilen übernommen.
-                      </p>
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={saveLineEdit}
-                          className="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
-                        >
-                          Speichern
-                        </button>
-                        <button
-                          type="button"
-                          onClick={cancelLineEdit}
-                          className="px-3 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
-                        >
-                          Abbrechen
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <span className="text-gray-800">{line.text}</span>
-                      {detectionSegment?.uncertain && (
-                        <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded bg-yellow-200 text-yellow-900 text-xs font-medium">
-                          Unsicher
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          startLineEdit(index, line.text);
-                        }}
-                        className="ml-2 text-xs text-gray-500 hover:text-blue-600"
-                      >
-                        Bearbeiten
-                      </button>
-                    </>
-                  )}
-                  <span className="ml-2 text-xs text-gray-400">
-                    [{formatTime(line.start)}]
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* Actions */}
-      <div className="flex justify-between">
-        <button
-          onClick={onBack}
-          className="px-6 py-3 rounded-lg font-medium text-gray-600 hover:bg-gray-100 transition-colors flex items-center gap-2"
-        >
-          <span>←</span>
-          Zurück
-        </button>
-        <button
-          onClick={onNext}
-          disabled={!canProceed}
-          className={`px-6 py-3 rounded-lg font-medium transition-colors flex items-center gap-2 ${
-            canProceed
-              ? 'bg-blue-600 text-white hover:bg-blue-700'
-              : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-          }`}
-        >
-          Zum Protokollentwurf
-          <span>→</span>
-        </button>
-      </div>
     </div>
   );
 }

@@ -57,6 +57,15 @@ function readBlobAsText(blob: Blob): Promise<string> {
 }
 
 describe('SummaryStep', () => {
+  it('seeks a transcript source by keyboard', async () => {
+    const user = userEvent.setup();
+    renderSummaryStep({ audioUrl: '/audio/test.wav' });
+    await user.click(screen.getByRole('button', { name: 'Haushalt' }));
+    screen.getByRole('button', { name: 'Audio ab 0:05' }).focus();
+    await user.keyboard('{Enter}');
+    expect(document.querySelector('audio')?.currentTime).toBe(5);
+  });
+
   it('selects multiple TOPs, clears the selection and submits one job', async () => {
     const user = userEvent.setup();
     const regenerate = vi.fn().mockResolvedValue(undefined);

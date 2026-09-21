@@ -285,11 +285,10 @@ export default function SummaryStep({
     Boolean(summaries[selectedSummaryIndex]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       {!summariesAreFresh && (
         <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
-          Änderungen betreffen einzelne TOPs. Die vorhandenen Zusammenfassungen bleiben sichtbar.
-          Prüfen Sie die gelb markierten TOPs und übernehmen, bearbeiten oder regenerieren Sie nur diese.
+          Geänderte TOPs prüfen: Zusammenfassung übernehmen, bearbeiten oder neu generieren.
         </div>
       )}
 
@@ -346,51 +345,26 @@ export default function SummaryStep({
         </div>
       )}
 
-      <div className="rounded-lg border border-blue-200 bg-blue-50 p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <p className="text-sm font-medium text-blue-700">Exportfreigabe</p>
-            <h2 className="mt-1 text-xl font-semibold text-gray-950">
-              Protokoll prüfen und herunterladen
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm text-blue-900">
-              Zusammenfassungen, Belege und Exportdaten bleiben editierbar. Blockierende
-              Hinweise müssen akzeptiert oder durch Aktualisierung behoben werden.
-            </p>
-          </div>
-          <div className="grid min-w-0 gap-2 sm:grid-cols-2 lg:w-[520px]">
-            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
-              <div className="text-xs font-medium uppercase text-gray-400">Zusammenfassungen</div>
-              <div className={`mt-1 text-sm font-semibold ${summariesAreFresh && !summaryIssueState.hasMissingSummaries ? 'text-green-700' : 'text-yellow-700'}`}>
-                {summariesAreFresh && !summaryIssueState.hasMissingSummaries ? 'Aktuell' : 'Prüfen'}
-              </div>
-            </div>
-            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
-              <div className="text-xs font-medium uppercase text-gray-400">Hinweise</div>
-              <div className={`mt-1 text-sm font-semibold ${summaryIssueState.hasReviewWarnings && !acceptedSummaryWarnings ? 'text-yellow-700' : 'text-green-700'}`}>
-                {summaryIssueState.hasReviewWarnings && !acceptedSummaryWarnings ? 'Offen' : 'Erledigt'}
-              </div>
-            </div>
-            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
-              <div className="text-xs font-medium uppercase text-gray-400">Zuordnung</div>
-              <div className="mt-1 text-sm font-semibold text-gray-900">
-                {assignedLineCount}/{transcript.length} Zeilen
-              </div>
-            </div>
-            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
-              <div className="text-xs font-medium uppercase text-gray-400">Metadaten</div>
-              <div className={`mt-1 text-sm font-semibold ${metadataMissing ? 'text-yellow-700' : 'text-green-700'}`}>
-                {metadataMissing ? 'Unvollständig' : 'Bereit'}
-              </div>
-            </div>
-          </div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold text-gray-950">Protokoll prüfen</h2>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+          <span className={summariesAreFresh && !summaryIssueState.hasMissingSummaries ? 'text-green-700' : 'text-yellow-700'}>
+            Zusammenfassungen: {summariesAreFresh && !summaryIssueState.hasMissingSummaries ? 'Aktuell' : 'Prüfen'}
+          </span>
+          <span className={summaryIssueState.hasReviewWarnings && !acceptedSummaryWarnings ? 'text-yellow-700' : 'text-green-700'}>
+            Hinweise: {summaryIssueState.hasReviewWarnings && !acceptedSummaryWarnings ? 'Offen' : 'Erledigt'}
+          </span>
+          <span className="text-gray-600">{assignedLineCount}/{transcript.length} Zeilen zugeordnet</span>
+          <a href="#protocol-export" className="rounded border border-blue-300 px-3 py-2 text-blue-700 hover:bg-blue-50">
+            Export{metadataMissing ? ' · Sitzungsdaten ergänzen' : ''}
+          </a>
         </div>
       </div>
 
       {/* Main Layout */}
-      <div className="flex gap-6 h-[600px]">
+      <div className="review-workspace">
         {/* TOPs Sidebar */}
-        <div className="w-72 bg-white rounded-lg border border-gray-200 p-4 overflow-y-auto">
+        <div className="review-pane flex flex-col bg-white rounded-lg border border-gray-200 p-3">
           <h3 className="font-medium text-gray-900 mb-4">Tagesordnung</h3>
           {hasTops && onRegenerateSummaries && (
             <div className="mb-4 space-y-2 text-sm">
@@ -405,7 +379,7 @@ export default function SummaryStep({
               </button>
             </div>
           )}
-          <div className="space-y-2">
+          <div className="review-scroll space-y-2" tabIndex={0} role="region" aria-label="Tagesordnung">
             {!hasTops ? (
               <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
                 Keine TOPs vorhanden.
@@ -421,7 +395,8 @@ export default function SummaryStep({
                     onChange={(event) => setSelectedIds(current => event.target.checked ? [...current, topIdAt(index)] : current.filter(id => id !== topIdAt(index)))} />}
                 <button
                   onClick={() => setSelectedTop(index)}
-                  className={`w-full text-left px-3 py-3 rounded-lg border-2 transition-all ${
+                  aria-current={isSelected ? 'true' : undefined}
+                  className={`min-w-0 w-full text-left px-3 py-3 rounded-lg border-2 transition-all ${
                     isSelected
                       ? 'bg-blue-50 border-blue-300 text-blue-700'
                       : 'border-transparent hover:bg-gray-50'
@@ -441,7 +416,7 @@ export default function SummaryStep({
                     />
                     <div className="flex-1 min-w-0">
                       <div
-                        className="font-medium text-sm truncate"
+                        className="font-medium text-sm break-words"
                         title={top || 'Unbenannter Tagesordnungspunkt'}
                       >
                         {top || 'Unbenannter Tagesordnungspunkt'}
@@ -457,14 +432,14 @@ export default function SummaryStep({
         </div>
 
         {/* Summary Content */}
-        <div className="flex-1 flex flex-col gap-4">
+        <div className="summary-panes review-pane grid gap-3 lg:grid-rows-[minmax(0,3fr)_minmax(0,2fr)]">
           {/* Summary Box */}
-          <div className="flex-1 bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
-            <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+          <div className="review-pane bg-white rounded-lg border border-gray-200 flex flex-col">
+            <div className="shrink-0 rounded-t-lg px-4 py-3 border-b border-gray-200 bg-gray-50 flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-medium text-gray-900">
                 {hasTops ? tops[selectedTop] : 'Gesamtes Gespräch'}
               </h3>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 {editingTop === selectedSummaryIndex ? (
                   <>
                     <button
@@ -485,7 +460,7 @@ export default function SummaryStep({
                     <button
                       onClick={handleCopy}
                       disabled={!summaries[selectedSummaryIndex]}
-                      className="p-2 text-gray-600 hover:bg-gray-200 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="flex items-center gap-2 p-2 text-sm text-gray-600 hover:bg-gray-200 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                       title={copied ? 'Kopiert!' : 'In Zwischenablage kopieren'}
                     >
                       {copied ? (
@@ -497,15 +472,17 @@ export default function SummaryStep({
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                         </svg>
                       )}
+                      {copied ? 'Kopiert!' : 'Kopieren'}
                     </button>
                     <button
                       onClick={() => startEditing(selectedSummaryIndex)}
-                      className="p-2 text-gray-600 hover:bg-gray-200 rounded"
+                      className="flex items-center gap-2 p-2 text-sm text-gray-600 hover:bg-gray-200 rounded"
                       title="Bearbeiten"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                       </svg>
+                      Bearbeiten
                     </button>
                     {['review_required', 'failed'].includes(selectedSummaryState?.status ?? '') && summaries[selectedSummaryIndex]?.trim() && (
                       <button
@@ -530,8 +507,7 @@ export default function SummaryStep({
             </div>
             {selectedSummaryState?.status === 'review_required' && (
               <div className="border-b border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-900">
-                Die Eingabe dieses TOPs wurde geändert. Prüfen Sie den vorhandenen Text und übernehmen Sie ihn,
-                bearbeiten Sie ihn manuell oder starten Sie nur für diesen TOP eine Neugenerierung.
+                TOP geändert. Zusammenfassung prüfen, bearbeiten oder neu generieren.
                 {selectedSummaryState.change_reasons?.length ? (
                   <ul className="mt-2 list-disc pl-5">
                     {selectedSummaryState.change_reasons.map((reason) => (
@@ -541,12 +517,14 @@ export default function SummaryStep({
                 ) : null}
               </div>
             )}
-            <div className="flex-1 p-4 overflow-y-auto">
+            <div className={`review-scroll flex-1 p-4 ${editingTop === selectedSummaryIndex ? 'flex flex-col' : ''}`} tabIndex={editingTop === selectedSummaryIndex ? undefined : 0} role="region" aria-label="Zusammenfassung">
               {editingTop === selectedSummaryIndex ? (
                 <textarea
+                  autoFocus
                   value={editText}
                   onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setEditText(e.target.value)}
-                  className="w-full h-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                  aria-label="Zusammenfassung bearbeiten"
+                  className="w-full min-h-80 flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y lg:min-h-0 lg:resize-none"
                 />
               ) : hasReviewContent ? (
                 <div className="space-y-3">
@@ -651,7 +629,7 @@ export default function SummaryStep({
           </div>
 
           {/* Original Transcript for this TOP */}
-          <div className="h-64 bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
+          <div className="review-pane bg-white rounded-lg border border-gray-200 flex flex-col">
             {/* Audio Player */}
             {audioUrl && (
               <div className="px-4 py-2 border-b border-gray-200 bg-gray-50">
@@ -666,10 +644,9 @@ export default function SummaryStep({
             <div className="px-4 py-2 border-b border-gray-200 bg-gray-50">
               <h4 className="text-sm font-medium text-gray-700">
                 Originaltranskript ({topLines.length} Zeilen)
-                {audioUrl && <span className="text-gray-400 font-normal"> - Doppelklick zum Abspielen</span>}
               </h4>
             </div>
-            <div ref={transcriptContainerRef} className="flex-1 overflow-y-auto p-3 text-sm">
+            <div ref={transcriptContainerRef} className="review-scroll flex-1 p-3 text-sm" tabIndex={0} role="region" aria-label="Originaltranskript">
               {topLines.length > 0 ? (
                 topLines.map((line, index) => {
                   const originalIndex = transcript.indexOf(line);
@@ -691,9 +668,11 @@ export default function SummaryStep({
                         {getDisplayName(line.speaker)}:
                       </span>{' '}
                       <span className="text-gray-700">{line.text}</span>
-                      <span className="ml-2 text-xs text-gray-400">
-                        [{formatTime(line.start)}]
-                      </span>
+                      {audioUrl ? (
+                        <button type="button" onClick={() => handleLineDoubleClick(line)} className="ml-2 rounded px-2 py-1 text-sm text-blue-700 hover:bg-blue-50" aria-label={`Audio ab ${formatTime(line.start)}`}>
+                          Audio {formatTime(line.start)}
+                        </button>
+                      ) : <span className="ml-2 text-xs text-gray-500">[{formatTime(line.start)}]</span>}
                     </div>
                   );
                 })
@@ -709,7 +688,7 @@ export default function SummaryStep({
 
       {regenerationCandidate !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="regeneration-title">
-          <div className="max-w-lg rounded-xl bg-white p-6 shadow-xl">
+          <div className="max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-xl">
             <h3 id="regeneration-title" className="text-lg font-semibold text-gray-950">
               {regenerationCandidate.length === 1 ? 'TOP-Zusammenfassung wirklich neu generieren?' : `${regenerationCandidate.length} TOP-Zusammenfassungen wirklich neu generieren?`}
             </h3>
@@ -721,7 +700,7 @@ export default function SummaryStep({
             <p className="mt-2 text-sm text-gray-600">
               Der Job läuft serverseitig weiter. Sie können die Seite verlassen und später zurückkehren.
             </p>
-            <div className="mt-6 flex justify-end gap-3">
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
               <button type="button" onClick={() => setRegenerationCandidate(null)} className="rounded border border-gray-300 px-4 py-2 text-sm">
                 Abbrechen
               </button>
@@ -743,14 +722,11 @@ export default function SummaryStep({
       )}
 
       {/* Export Section */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div id="protocol-export" tabIndex={-1} className="scroll-mt-4 bg-white rounded-lg border border-gray-200 p-4">
         <div className="space-y-4">
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h3 className="font-medium text-gray-900">Export</h3>
-              <p className="text-sm text-gray-500">
-                Metadaten final prüfen und Protokoll als Datei herunterladen
-              </p>
               <p className="mt-1 text-xs text-gray-400">
                 {speakerCount} Sprecher erkannt · {hasTops ? `${tops.length} TOPs` : 'Gesamtes Gespräch'}
               </p>

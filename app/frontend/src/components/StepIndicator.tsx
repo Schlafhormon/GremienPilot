@@ -8,12 +8,12 @@ const steps = [
 
 export default function StepIndicator({ currentStep }: StepIndicatorProps) {
   return (
-    <div className="mb-8">
+    <div className="mb-4">
       <div className="flex items-center justify-center">
         {steps.map((step, index) => (
           <div key={step.id} className="flex items-center">
             {/* Step circle */}
-            <div className="flex flex-col items-center">
+            <div className="flex flex-col items-center gap-2 sm:flex-row" aria-current={step.id === currentStep ? 'step' : undefined}>
               <div
                 className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
                   step.id < currentStep
@@ -36,7 +36,7 @@ export default function StepIndicator({ currentStep }: StepIndicatorProps) {
                 )}
               </div>
               <span
-                className={`mt-2 text-sm font-medium ${
+                className={`text-sm font-medium ${
                   step.id === currentStep ? 'text-blue-600' : 'text-gray-500'
                 }`}
               >
@@ -47,7 +47,7 @@ export default function StepIndicator({ currentStep }: StepIndicatorProps) {
             {/* Connector line */}
             {index < steps.length - 1 && (
               <div
-                className={`w-24 h-1 mx-4 rounded ${
+                className={`w-6 sm:w-16 h-1 mx-2 sm:mx-4 rounded ${
                   step.id < currentStep ? 'bg-green-500' : 'bg-gray-200'
                 }`}
               />

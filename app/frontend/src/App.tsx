@@ -1509,6 +1509,7 @@ export default function App() {
 
   return (
     <Layout
+      wide={!isProcessing && currentStep > 1}
       onSettingsClick={() => setIsSettingsOpen(true)}
       onHistoryClick={() => navigate("/sessions")}
       onNewSessionClick={handleStartNewSession}
@@ -1541,7 +1542,7 @@ export default function App() {
         </div>
       )}
 
-      {(restoreCandidate || sessionId || sessionMessage) && (
+      {(restoreCandidate || sessionMessage) && (
         <div className="mb-4 bg-white border border-gray-200 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium text-gray-800">

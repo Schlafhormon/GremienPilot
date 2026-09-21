@@ -136,8 +136,7 @@ export default function ProcessingStep({
 
         {/* Tip */}
         <div className="mt-8 text-center text-sm text-gray-500">
-          Tipp: Sie können die Sitzung später fortsetzen; der Status wird nach
-          einem Reload wiederhergestellt.
+          Sie können die Sitzung später fortsetzen.
         </div>
       </div>
     </div>

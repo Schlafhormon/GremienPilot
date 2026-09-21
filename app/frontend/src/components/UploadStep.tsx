@@ -245,15 +245,9 @@ export default function UploadStep({
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <p className="text-sm font-medium text-blue-700">Automatischer Protokolllauf</p>
             <h2 className="mt-1 text-2xl font-semibold text-gray-950">
-              Aufnahme hochladen, Verarbeitung starten, nur offene Punkte prüfen.
+              Neue Sitzung
             </h2>
-            <p className="mt-2 max-w-3xl text-sm text-blue-900">
-              Die Pipeline transkribiert, erkennt Sprecher, ordnet TOPs zu und erzeugt
-              den Protokollentwurf. Danach bleiben nur Sprecher- und TOP-Prüfung sowie
-              eventuelle Warnhinweise.
-            </p>
           </div>
           <div className="rounded-md border border-blue-200 bg-white px-4 py-3 text-sm text-gray-700 lg:w-72">
             <div className="font-medium text-gray-900">Aktueller Modus</div>
@@ -448,9 +442,6 @@ export default function UploadStep({
       <div className="bg-white rounded-lg border border-gray-200 p-6">
         <div className="mb-4 flex flex-col gap-1">
           <h2 className="text-lg font-medium text-gray-900">Automatisierung</h2>
-          <p className="text-sm text-gray-500">
-            Standard ist: alles automatisch auswerten und nur markierte Unsicherheiten prüfen.
-          </p>
         </div>
 
         <div className="grid gap-3 lg:grid-cols-3">
@@ -473,9 +464,6 @@ export default function UploadStep({
             <span>
               <span className="block font-medium text-gray-900">
                 TOPs automatisch aus PDF erkennen und direkt verarbeiten
-              </span>
-              <span className="block text-gray-600">
-                PDF und Transkript werden in der Pipeline zusammen ausgewertet.
               </span>
             </span>
           </label>
@@ -540,7 +528,7 @@ export default function UploadStep({
               Sitzungsdaten für den Export
             </h2>
             <p className="mt-1 text-sm text-gray-500">
-              Optional jetzt erfassen, sonst am Ende vor dem Export prüfen.
+              Optional, vor dem Export ergänzbar.
             </p>
           </div>
           <button
@@ -652,15 +640,14 @@ export default function UploadStep({
           </div>
         </div>
 
-        <p className="text-sm text-gray-600 mb-3">
-          Originalnummer mit eingeben, z. B. 2.1 Schulbau. Bei wiederholten Nummern
-          den Abschnitt voranstellen: [Öffentlich] oder [Nichtöffentlich]. Ohne
-          Nummer erfolgt die Zuordnung anhand des Inhalts.
-        </p>
+        <details className="mb-3 text-sm text-gray-600">
+          <summary className="cursor-pointer font-medium">Hilfe zu TOP-Nummern</summary>
+          <p className="mt-2">Originalnummer mit eingeben, z. B. 2.1 Schulbau. Bei wiederholten Nummern [Öffentlich] oder [Nichtöffentlich] voranstellen. Ohne Nummer erfolgt die Zuordnung anhand des Inhalts.</p>
+        </details>
         {/* TOPs List */}
         {!shouldShowManualTops ? (
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
-            Keine manuelle Eingabe nötig. Die Pipeline erkennt TOPs automatisch oder nutzt das hochgeladene PDF.
+            TOPs werden automatisch erkannt.
           </div>
         ) : (
         <div className="space-y-3">

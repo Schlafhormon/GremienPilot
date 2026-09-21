@@ -91,7 +91,7 @@ export default function AudioPlayer({
   };
 
   return (
-    <div className="bg-gray-100 rounded-lg p-3 flex items-center gap-3">
+    <div className="bg-gray-100 rounded-lg p-3 flex flex-wrap items-center gap-2">
       <audio
         ref={audioRef}
         src={audioUrl}
@@ -117,7 +117,8 @@ export default function AudioPlayer({
       {/* Play/Pause button */}
       <button
         onClick={togglePlayPause}
-        className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 w-10 h-10 flex items-center justify-center"
+        aria-label={isPlaying ? 'Pause' : 'Abspielen'}
+        className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 w-10 h-10 shrink-0 flex items-center justify-center"
       >
         {isPlaying ? (
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -153,7 +154,8 @@ export default function AudioPlayer({
         max={duration || 0}
         value={internalTime}
         onChange={handleSeekBar}
-        className="flex-1 h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-blue-600"
+        aria-label="Audioposition"
+        className="min-w-24 flex-1 h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-blue-600"
       />
 
       {/* Playback rate button */}

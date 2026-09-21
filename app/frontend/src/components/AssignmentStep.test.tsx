@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AssignmentStepProps, TranscriptLine } from '../types';
@@ -74,6 +74,35 @@ describe('AssignmentStep', () => {
     fireEvent.click(screen.getByText('Hallo zusammen'));
 
     expect(setAssignments).toHaveBeenCalledWith([0, null]);
+  });
+
+  it('assigns and unassigns a line with the keyboard, including a range with Shift', async () => {
+    const user = userEvent.setup();
+    const setAssignments = vi.fn();
+    const { rerender } = renderAssignmentStep({ setAssignments });
+    const firstLine = screen.getByRole('button', { name: 'Zeile 1 zuordnen' });
+    firstLine.focus();
+    await user.keyboard('{Enter}');
+    expect(setAssignments).toHaveBeenLastCalledWith([0, null]);
+
+    rerender(<AssignmentStep {...defaultProps} setAssignments={setAssignments} assignments={[0, null]} />);
+    expect(firstLine).toHaveAttribute('aria-pressed', 'true');
+    await user.keyboard(' ');
+    expect(setAssignments).toHaveBeenLastCalledWith([null, null]);
+
+    screen.getByRole('button', { name: 'Zeile 2 zuordnen' }).focus();
+    await user.keyboard('{Shift>}{Enter}{/Shift}');
+    expect(setAssignments).toHaveBeenLastCalledWith([0, 0]);
+  });
+
+  it('seeks audio by keyboard without changing assignments', async () => {
+    const user = userEvent.setup();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ setAssignments, audioUrl: '/audio/test.wav' });
+    screen.getByRole('button', { name: 'Audio ab 0:05' }).focus();
+    await user.keyboard('{Enter}');
+    expect(document.querySelector('audio')?.currentTime).toBe(5);
+    expect(setAssignments).not.toHaveBeenCalled();
   });
 
   it('enables continuing once at least one line is assigned', async () => {
@@ -155,7 +184,7 @@ describe('AssignmentStep', () => {
       screen.getByLabelText('SPEAKER_01 mit Sprecher zusammenführen'),
       'SPEAKER_00'
     );
-    await user.click(screen.getAllByRole('button', { name: /mergen/i })[1]!);
+    await user.click(within(screen.getByRole('region', { name: 'Sprecherprüfung' })).getAllByRole('button', { name: /mergen/i })[1]!);
 
     expect(setTranscript).toHaveBeenCalledWith([
       transcript[0],

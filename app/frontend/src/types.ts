@@ -400,6 +400,7 @@ export type ExportFormat = 'txt' | 'docx' | 'pdf';
 // Component Props Types
 export interface LayoutProps {
   children: React.ReactNode;
+  wide?: boolean;
   onSettingsClick?: () => void;
   onHistoryClick?: () => void;
   onNewSessionClick?: () => void;
