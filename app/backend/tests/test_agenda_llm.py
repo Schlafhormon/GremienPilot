@@ -1,287 +1,258 @@
-"""Full-coverage contract: no heuristic input selection or silent fallback."""
+"""Model-only decisions; tests validate orchestration, never claim model quality."""
 import json
-from types import SimpleNamespace
-
 import pytest
-
-from agenda_detection import segment_known_agenda
-from assignment_suggestions import TranscriptUtterance
 import agenda_llm
+from agenda_detection import segment_known_agenda, detect_agenda_from_transcript
+from assignment_suggestions import TranscriptUtterance
+from llm_transport import LLMCancelledError
 
 
-def row(start, end, identity='unspecified:1', text='Beratung.', **extra):
-    return dict(top_id=identity, start_index=start, end_index=end, evidence_index=start,
-                evidence_text=text, reason='Inhaltliche Beratung', confidence=0.9, uncertain=False, **extra)
+def transcript(texts):
+    return [TranscriptUtterance('M', text, f'line-{i}', i, i+1) for i, text in enumerate(texts)]
 
 
-def classify(fake, rows, texts=None, tops=None):
-    fake.content = json.dumps({'tops': rows})
-    return segment_known_agenda([TranscriptUtterance('M', t) for t in (texts or ['Beratung.'])],
-                                tops or ['1 Haushalt'], use_llm=True)
+def run(texts, tops=None, **kwargs):
+    return segment_known_agenda(transcript(texts), tops or ['1 Haushalt', '2 Schulbau'], use_llm=True, **kwargs)
 
 
-@pytest.mark.parametrize('value', [True, False, None, 1.2, '0', -1, 9])
-@pytest.mark.parametrize('field', ['start_index', 'end_index', 'evidence_index'])
-def test_strict_global_indices(fake_openai_module, monkeypatch, value, field):
-    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '0')
-    proposal = row(0, 0)
-    proposal[field] = value
-    result = classify(fake_openai_module, [proposal])
-    assert result.assignments == [None]
-    assert result.llm.status == 'failed'
-    assert result.llm.processed_lines == []
-    assert result.llm.gaps[0]['kind'] == 'technical'
+@pytest.mark.parametrize('texts,labels', [
+    (['Zum Haushalt.', 'Wie sieht der Bauplan aus?', 'Die Schule wird erweitert.'], [0, 1, 1]),
+    (['Haushaltsberatung.', 'Später beraten wir TOP 2.', 'Weitere Haushaltsmittel.'], [0, 0, 0]),
+    (['Zum Protokoll.', 'Damals wurde über TOP 2 gesprochen.', 'Die Niederschrift wird geändert.'], [0, 0, 0]),
+    (['TOP 2 zuerst.', 'Danach Haushalt.', 'Zurück zum Bau.'], [1, 0, 1]),
+    (['Öffentliche Beratung.', 'Die Öffentlichkeit wird ausgeschlossen.', 'Personalberatung.'], [0, 1, 1]),
+])
+def test_full_independent_review_of_model_decisions(agenda_model, texts, labels):
+    agenda_model.labels = {i: [f'agenda:{label}'] for i, label in enumerate(labels)}
+    result = run(texts)
+    assert result.assignments == labels
+    assert result.llm.processing_complete and result.llm.review_complete
+    assert [r['review_status'] for r in result.llm.line_results] == ['agreed']*len(texts)
+    reviewed = [r['index'] for b, _ in agenda_model.calls if b['phase'] == 'independent:detail' for r in b['target_lines']]
+    assert reviewed == list(range(len(texts)))
+    for body, _ in agenda_model.calls:
+        if body['phase'].startswith('independent'):
+            assert body.get('opinions') is None
+            assert 'previous_top' not in body and 'evidence_context' not in body
 
 
-@pytest.mark.parametrize('rows', [[], [row(0, 0), row(0, 1)], [row(1, 1)],
-                                   [row(0, 0)], [row(0, 1, 'agenda:9')]])
-def test_missing_overlapping_or_unknown_identity_is_technical(fake_openai_module, monkeypatch, rows):
-    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '0')
-    result = classify(fake_openai_module, rows, ['Beratung.'] * 2)
-    assert result.assignments == [None, None]
-    assert result.llm.status == 'failed'
-
-
-def test_semantic_gap_is_successfully_processed_and_reasoned(fake_openai_module):
-    result = classify(fake_openai_module, [row(0, 0, None)])
-    assert result.llm.status == 'success'
-    assert result.llm.processed_lines == [0]
-    assert result.llm.gaps == [{'start_index': 0, 'end_index': 0, 'kind': 'semantic', 'reason': 'Inhaltliche Beratung'}]
-    assert result.assignments == [None]
-    assert result.llm.warnings
-
-
-def test_duplicate_line_key_is_not_silently_overwritten(fake_openai_module, monkeypatch):
-    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '0')
-    fake_openai_module.content = ('{"assignments":{"0":null,"0":"unspecified:1"},'
-                                  '"uncertain_lines":[],"gaps":[]}')
-    result = segment_known_agenda([TranscriptUtterance('M', 'Beratung.')], ['1 Haushalt'], use_llm=True)
-    assert result.llm.status == 'failed'
-    assert result.llm.processed_lines == []
-    assert 'duplicate_response_key' in result.llm.validation_reasons
-
-
-def test_repeated_numbers_and_revisits_use_stable_ids(fake_openai_module):
-    tops = ['[Öffentlich] 01 Haushalt', '[Nichtöffentlich] 01 Vergabe']
-    result = classify(fake_openai_module, [row(0, 0, 'public:01'), row(1, 1, 'nonpublic:01'), row(2, 2, 'public:01')], ['Beratung.'] * 3, tops)
+def test_no_language_rule_vetoes_model_or_restricts_schema(agenda_model):
+    agenda_model.labels = {0: ['top-public'], 1: ['top-private'], 2: ['top-public']}
+    result = run(['TOP 99 nicht behandeln.', 'Schließung angekündigt.', 'Wir bleiben nichtöffentlich.'],
+        ['[Öffentlich] 01 Haushalt', '[Nichtöffentlich] 01 Schließung'], top_ids=['top-public', 'top-private'])
     assert result.assignments == [0, 1, 0]
-    assert result.llm.processed_lines == [0, 1, 2]
+    assert not any(s.uncertain for s in result.segments)
+    for body, call in agenda_model.calls:
+        if body['phase'].endswith(':detail'):
+            schema = call['response_format']['json_schema']['schema']
+            assert schema['properties']['lines']['items']['properties']['top_ids']['items']['enum'] == ['top-public', 'top-private']
 
 
-def test_all_lines_are_sent_with_overlap_and_disjoint_ownership(monkeypatch, fake_openai_module):
+def test_joint_deliberation_has_multiple_ids_no_arbitrary_scalar(agenda_model):
+    agenda_model.labels = {0: ['agenda:0', 'agenda:1']}
+    result = run(['Wir beraten die beiden Punkte gemeinsam.'])
+    assert result.assignments == [None] and result.segments == []
+    assert result.llm.line_results[0]['status'] == 'assigned'
+    assert result.llm.line_results[0]['top_ids'] == ['agenda:0', 'agenda:1']
+    assert result.llm.gaps == []
+    assert result.llm.review_complete
+
+
+def test_all_semantic_gaps_reviewed_and_last_difference_resolved(agenda_model, monkeypatch):
     monkeypatch.setenv('AGENDA_DETECTION_CHUNK_LINES', '3')
-    monkeypatch.setenv('AGENDA_DETECTION_CHUNK_OVERLAP_LINES', '2')
-    seen = []
-    def complete(client, config, **kwargs):
-        prompt = json.loads(kwargs['messages'][1]['content'])
-        seen.append(prompt)
-        proposal = row(prompt['target_start'], prompt['target_end'])
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'tops': [proposal]})))])
-    monkeypatch.setattr(agenda_llm, 'complete', complete)
-    result = classify(fake_openai_module, [], ['Beratung.'] * 8)
-    assert result.assignments == [0] * 8
-    assert result.llm.processed_lines == list(range(8))
-    assert [(p['target_start'], p['target_end']) for p in seen] == [(0, 2), (3, 5), (6, 7)]
-    assert [r['index'] for r in seen[1]['context_before'] + seen[1]['target_lines'] + seen[1]['context_after']] == [2, 3, 4, 5, 6]
-    assert seen[1]['previous_top']['top_id'] == 'unspecified:1'
+    agenda_model.labels = {i: [] for i in range(50)}
+    agenda_model.review_labels = {49: ['agenda:1']}
+    agenda_model.resolve_labels = {49: ['agenda:1']}
+    result = run(['Diskussion.']*50)
+    assert result.assignments == [None]*49+[1]
+    assert result.llm.processing_complete and result.llm.review_complete
+    assert result.llm.line_results[49]['review_status'] == 'resolved'
+    assert len(result.llm.gaps) == 49 and all(g['kind'] == 'semantic' for g in result.llm.gaps)
+    assert sum(len(b['target_lines']) for b, _ in agenda_model.calls if b['phase'] == 'independent:detail') == 50
 
 
-def test_failed_chunk_is_split_once_successful_chunks_are_cached(monkeypatch, fake_openai_module, tmp_path):
-    monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path))
-    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '1')
-    fake_openai_module.responses = [TimeoutError('SECRET'), json.dumps({'tops': [row(0, 0)]}),
-                                    json.dumps({'tops': [row(1, 1)]})]
-    result = classify(fake_openai_module, [], ['Beratung.'] * 2)
-    assert result.assignments == [0, 0]
+def test_unresolved_semantic_difference_is_not_technical_failure(agenda_model):
+    agenda_model.uncertain = {0}
+    result = run(['Mehrdeutige Beratung.'])
     assert result.llm.status == 'success'
-    assert result.llm.attempted_calls == 3
-    assert result.llm.failed_calls == 1
-    assert 'SECRET' not in str(result.llm)
-    assert len(list(tmp_path.iterdir())) == 3
-    fake_openai_module.responses = []
-    resumed = classify(fake_openai_module, [], ['Beratung.'] * 2)
-    assert resumed.assignments == [0, 0]
-    assert resumed.llm.attempted_calls == 0
+    assert result.llm.processing_complete and result.llm.review_complete
+    assert result.llm.review_required and result.llm.line_results[0]['review_status'] == 'unresolved'
+    assert len([b for b, _ in agenda_model.calls if b['phase'] == 'resolve:detail']) == 1
 
 
-def test_exhausted_failure_is_never_heuristic_success(monkeypatch, fake_openai_module):
-    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '1')
-    fake_openai_module.responses = [TimeoutError('secret')] * 3
-    result = classify(fake_openai_module, [], ['Kommen wir zu TOP 1 Haushalt.'] * 2)
-    assert result.assignments == [None, None]
-    assert result.llm.attempted_calls == result.llm.failed_calls == 3
-    assert result.llm.status == 'failed'
+def test_failed_review_keeps_initial_assignment_and_reports_technical_review_gap(agenda_model):
+    agenda_model.overrides['independent:detail'] = TimeoutError('PRIVATE SECRET')
+    result = run(['TOP 1 Haushalt.'])
+    assert result.assignments == [0]
+    assert result.llm.processing_complete and not result.llm.review_complete
+    assert result.llm.line_results[0]['review_status'] == 'technical_pending'
+    assert result.llm.gaps == [] and result.llm.status == 'partial_failure'
+    assert 'PRIVATE' not in str(result)
+
+
+def test_initial_failure_never_becomes_semantic_gap_or_heuristic(agenda_model, monkeypatch):
+    monkeypatch.setenv('AGENDA_REPAIR_SPLIT_DEPTH', '0')
+    agenda_model.overrides['primary:detail'] = TimeoutError('secret')
+    result = run(['Kommen wir zu TOP 1 Haushalt.']*3)
+    assert result.assignments == [None]*3
+    assert result.llm.processed_lines == []
     assert all(g['kind'] == 'technical' for g in result.llm.gaps)
 
 
-def test_line_map_has_exact_global_id_set(fake_openai_module):
-    fake_openai_module.content = json.dumps({'assignments': {'0': None, '1': 'unspecified:1'},
-        'uncertain_lines': [], 'gaps': [{'line_index': 0, 'reason': 'Isolierte Dankesformel'}]})
-    result = segment_known_agenda([TranscriptUtterance('A', 'Danke.'), TranscriptUtterance('M', 'Begrüßung.')],
-                                  ['1 Eröffnung'], use_llm=True)
-    assert result.assignments == [None, 0]
-    assert result.llm.processed_lines == [0, 1]
-    assert result.llm.gaps[0]['reason'] == 'Isolierte Dankesformel'
-    assert result.segments[0].evidence_index == 1
-    assert result.segments[0].evidence_text == 'Begrüßung.'
-
-
-@pytest.mark.parametrize('mapping,gaps', [
-    ({'1': 'unspecified:1'}, []), ({'0': 'unspecified:1', '1': 'unspecified:1'}, []),
-    ({'0': None}, []), ({'0': 'agenda:99'}, []),
-    ({'0': None}, [{'line_index': 0, 'reason': ''}]),
-])
-def test_line_map_rejects_shifted_extra_missing_or_unexplained_lines(fake_openai_module, mapping, gaps):
-    fake_openai_module.content = json.dumps({'assignments': mapping, 'uncertain_lines': [], 'gaps': gaps})
-    result = segment_known_agenda([TranscriptUtterance('M', 'Beratung.')], ['1 Haushalt'], use_llm=True)
+@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'unknown_top', 'unknown_source', 'bad_quote', 'missing_reason'])
+def test_strict_coverage_identity_and_evidence_validation(agenda_model, monkeypatch, mutation):
+    monkeypatch.setenv('AGENDA_REPAIR_SPLIT_DEPTH', '0')
+    def bad(body):
+        data = agenda_model.answer(body)
+        if mutation == 'missing': data['lines'] = []
+        elif mutation == 'duplicate': data['lines'] *= 2
+        elif mutation == 'unknown_top': data['lines'][0]['top_ids'] = ['foreign']
+        elif mutation == 'unknown_source': data['lines'][0]['line_id'] = 'foreign'
+        elif mutation == 'bad_quote': data['lines'][0]['evidence'][0]['quote'] = 'invented'
+        else: data['lines'][0]['reason'] = ''
+        return data
+    agenda_model.overrides['primary:detail'] = bad
+    result = run(['Beratung.'])
     assert result.llm.status == 'failed'
-    assert result.llm.processed_lines == []
-
-
-@pytest.mark.parametrize('text', ['Später kommen wir zu TOP 1.', 'Wir behandeln TOP 1 nicht.',
-                                  'Gestern sagte er: „Kommen wir zu TOP 1.“'])
-def test_noncurrent_evidence_remains_reviewable(fake_openai_module, text):
-    fake_openai_module.content = json.dumps({'assignments': {'0': 'unspecified:1'}, 'uncertain_lines': [], 'gaps': []})
-    result = segment_known_agenda([TranscriptUtterance('M', text)], ['1 Haushalt'], use_llm=True)
-    assert result.segments[0].uncertain
-    assert result.segments[0].confidence <= 0.5
-
-
-def test_legacy_prompt_builder_never_filters_by_heuristic_hits():
-    from agenda_detection import _indexed_transcript_for_llm
-    transcript = [TranscriptUtterance('M', f'Sachbeitrag {i}.') for i in range(558)]
-    text, compacted = _indexed_transcript_for_llm(transcript, tops=['1 Haushalt'], heuristic_segments=[])
-    assert not compacted
-    assert text.splitlines() == [f'{i}: M: Sachbeitrag {i}.' for i in range(558)]
-
-
-def test_semantic_gap_keeps_last_nonpublic_context(monkeypatch, fake_openai_module):
-    monkeypatch.setenv('AGENDA_DETECTION_CHUNK_LINES', '1')
-    fake_openai_module.responses = [
-        json.dumps({'assignments': {'0': 'nonpublic:1'}, 'uncertain_lines': [], 'gaps': []}),
-        json.dumps({'assignments': {'1': None}, 'uncertain_lines': [], 'gaps': [{'line_index': 1, 'reason': 'Pause'}]}),
-        json.dumps({'assignments': {'2': 'nonpublic:1'}, 'uncertain_lines': [], 'gaps': []}),
-    ]
-    result = segment_known_agenda([TranscriptUtterance('M', t) for t in ['Beratung.', 'Pause.', 'Fortsetzung.']],
-                                  ['[Öffentlich] 1 Informationen', '[Nichtöffentlich] 1 Informationen'], use_llm=True)
-    assert result.assignments == [1, None, 1]
-    third = fake_openai_module.instances[0].calls[2]
-    assert json.loads(third['messages'][1]['content'])['previous_top']['top_id'] == 'nonpublic:1'
-
-
-def test_substantial_semantic_gaps_get_bounded_llm_second_opinion(monkeypatch, fake_openai_module):
-    monkeypatch.setenv('AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS', '1')
-    fake_openai_module.responses = [
-        json.dumps({'assignments': {'0': 'public:7', '1': None, '2': None, '3': None},
-                    'uncertain_lines': [], 'gaps': [{'line_index': i, 'reason': 'Anderes Sachthema'} for i in [1, 2, 3]]}),
-        json.dumps({'assignments': {'1': 'public:7', '2': 'public:7', '3': 'public:7'}, 'uncertain_lines': [], 'gaps': []}),
-    ]
-    result = segment_known_agenda([TranscriptUtterance('M', 'Information.') for _ in range(4)],
-                                  ['[Öffentlich] 7 Anfragen und Informationen - Satzung'], use_llm=True)
-    assert result.assignments == [0, 0, 0, 0]
-    assert result.llm.processed_lines == [0, 1, 2, 3]  # No double-counted coverage.
-    assert result.llm.attempted_calls == 2
-    assert result.llm.gaps == []
-    assert result.llm.chunks[-1]['phase'] == 'gap_review'
-    request = fake_openai_module.instances[0].calls[1]
-    assert 'offenen TOP' in request['messages'][0]['content']
-    assert 'context_assignments' not in json.loads(request['messages'][1]['content'])
-
-
-def test_failed_second_opinion_keeps_semantic_gap_and_successful_assignments(monkeypatch, fake_openai_module):
-    monkeypatch.setenv('AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS', '1')
-    fake_openai_module.responses = [
-        json.dumps({'assignments': {'0': 'unspecified:7', '1': None, '2': None, '3': None},
-                    'uncertain_lines': [], 'gaps': [{'line_index': i, 'reason': 'Unklar'} for i in [1, 2, 3]]}),
-        TimeoutError('secret'),
-    ]
-    result = segment_known_agenda([TranscriptUtterance('M', 'Information.') for _ in range(4)], ['7 Informationen'], use_llm=True)
-    assert result.assignments == [0, None, None, None]
-    assert all(gap['kind'] == 'semantic' for gap in result.llm.gaps)
-    assert result.llm.attempted_calls == 2
-    assert result.llm.failed_calls == 1
-    assert result.llm.status == 'success'  # First-pass coverage is intact; warning reports second-opinion failure.
-    assert result.llm.warnings
-
-
-def test_open_topic_scope_is_context_not_input_filter(monkeypatch, fake_openai_module):
-    monkeypatch.setenv('AGENDA_DETECTION_CHUNK_LINES', '1')
-    fake_openai_module.responses = [
-        json.dumps({'assignments': {'0': 'nonpublic:3'}, 'uncertain_lines': [], 'gaps': []}),
-        json.dumps({'assignments': {'1': 'nonpublic:3'}, 'uncertain_lines': [], 'gaps': []}),
-    ]
-    result = segment_known_agenda([TranscriptUtterance('M', 'Anfragen.'), TranscriptUtterance('M', 'Anderes Sachthema.')],
-                                  ['[Nichtöffentlich] 3 Anfragen und Informationen - Untertitel'], use_llm=True)
-    request = json.loads(fake_openai_module.instances[0].calls[1]['messages'][1]['content'])
-    assert request['target_lines'][0]['text'] == 'Anderes Sachthema.'
-    assert 'keine abschließende Themenbeschränkung' in request['active_topic_scope']
-    assert result.assignments == [0, 0]
-
-
-def test_explicit_current_number_cannot_be_assigned_to_different_top(fake_openai_module):
-    fake_openai_module.content = json.dumps({'assignments': {'0': 'unspecified:2'}, 'uncertain_lines': [], 'gaps': []})
-    result = segment_known_agenda([TranscriptUtterance('M', 'Kommen wir zu TOP 3 Schulbau.')],
-                                  ['2 Haushalt', '3 Schulbau'], use_llm=True)
-    assert result.assignments == [None]
-    assert result.llm.status == 'failed'
-    assert 'contradictory_current_call' in result.llm.validation_reasons
     assert result.llm.gaps[0]['kind'] == 'technical'
+    assert result.llm.validation_reasons
+    assert len([b for b, _ in agenda_model.calls if b['phase'] == 'primary:detail']) == 2
 
 
-def test_minutes_context_distinguishes_protocol_corrections_from_new_questions(monkeypatch, fake_openai_module):
+def test_duplicate_json_key_rejected():
+    with pytest.raises(agenda_llm.AgendaValidationError):
+        agenda_llm.parse_response('{"lines":[],"lines":[]}')
+
+
+def test_cancel_is_not_swallowed_or_cached(agenda_model):
+    agenda_model.overrides['primary:detail'] = LLMCancelledError()
+    with pytest.raises(LLMCancelledError):
+        run(['Beratung.'])
+
+
+def test_resume_reuses_successful_calls_not_failed_review(agenda_model, monkeypatch, tmp_path):
+    monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path))
+    agenda_model.overrides['independent:detail'] = TimeoutError()
+    first = run(['Beratung.'])
+    agenda_model.calls.clear()
+    agenda_model.overrides.clear()
+    second = run(['Beratung.'])
+    assert first.llm.status == 'partial_failure'
+    assert second.llm.status == 'success'
+    assert [b['phase'] for b, _ in agenda_model.calls] == ['independent:detail']
+
+
+def test_long_transcript_all_originals_read_twice_and_context_retained(agenda_model, monkeypatch):
+    monkeypatch.setenv('LLM_CONTEXT_TOKENS', '16384')
+    texts = [f'Beitrag {i}: ' + 'Unterschiedliche Sitzungsthemen. '*6 for i in range(180)]
+    result = run(texts)
+    assert result.llm.processing_complete and result.llm.review_complete
+    for role in ('primary', 'independent'):
+        read = [r['index'] for body, _ in agenda_model.calls if body['phase'] == role+':context'
+                for r in body['sources'] if 'index' in r]
+        assert read == list(range(180))
+        details = [b for b, _ in agenda_model.calls if b['phase'] == role+':detail']
+        assert [r['index'] for b in details for r in b['target_lines']] == list(range(180))
+        assert all(b['context']['coverage'] == [0, 179] for b in details)
+        assert all('model_notes' in b['context'] for b in details)
+    assert result.llm.provenance['context_archive']
+
+
+def test_source_retrieval_is_model_requested_and_bounded(agenda_model, monkeypatch):
     monkeypatch.setenv('AGENDA_DETECTION_CHUNK_LINES', '1')
-    fake_openai_module.responses = [
-        json.dumps({'assignments': {'0': 'nonpublic:2'}, 'uncertain_lines': [], 'gaps': []}),
-        json.dumps({'assignments': {'1': 'nonpublic:3'}, 'uncertain_lines': [], 'gaps': []}),
-    ]
-    result = segment_known_agenda([TranscriptUtterance('M', 'Niederschrift.'), TranscriptUtterance('M', 'Neue Sachfrage.')],
-                                  ['[Nichtöffentlich] 2 Niederschrift', '[Nichtöffentlich] 3 Anfragen'], use_llm=True)
-    request = json.loads(fake_openai_module.instances[0].calls[1]['messages'][1]['content'])
-    assert 'nicht automatisch alle folgenden Sachdebatten' in request['minutes_topic_scope']
-    assert result.assignments == [0, 1]
+    def request(body):
+        if body['target_start'] == 1 and 'requested_originals' not in body:
+            return {'source_ranges': [{'start': 0, 'end': 0}], 'lines': []}
+        return agenda_model.answer(body)
+    agenda_model.overrides['independent:detail'] = request
+    result = run(['Früherer Aufruf.', 'Fortsetzung.'])
+    assert result.llm.review_complete
+    reread = [b for b, _ in agenda_model.calls if 'requested_originals' in b]
+    assert reread[0]['requested_originals'][0]['line_id'] == 'line-0'
+    agenda_model.overrides['independent:detail'] = {'source_ranges': [{'start': 0, 'end': 0}], 'lines': []}
+    result = run(['Früherer Aufruf.'])
+    assert result.llm.processing_complete and not result.llm.review_complete
 
 
-@pytest.mark.parametrize('limit, fail', [(0, False), (1, False), (1, True)])
-def test_boundary_review_changes_only_validated_target_lines(monkeypatch, fake_openai_module, limit, fail):
-    monkeypatch.setenv('AGENDA_DETECTION_BOUNDARY_REVIEW_MAX_CALLS', str(limit))
-    texts = ['Beratung.', 'Keine weiteren Fragen.', 'Ich schließe die öffentliche Sitzung.', 'Guten Heimweg.']
-    initial = {'assignments': {str(i): 'public:1' for i in range(4)}, 'uncertain_lines': [], 'gaps': []}
-    reviewed = {'assignments': {'1': 'public:1', '2': 'public:2', '3': 'public:2'}, 'uncertain_lines': [], 'gaps': []}
-    fake_openai_module.responses = [json.dumps(initial), TimeoutError('offline') if fail else json.dumps(reviewed)]
-    result = segment_known_agenda([TranscriptUtterance('M', t) for t in texts],
-                                  ['[Öffentlich] 1 Informationen', '[Öffentlich] 2 Schließung'], use_llm=True)
-    assert result.llm.processed_lines == list(range(4))
-    assert result.assignments == ([0, 0, 1, 1] if limit and not fail else [0]*4)
-    assert result.llm.attempted_calls == 1 + limit
-    if limit and not fail:
-        assert result.llm.chunks[-1]['changes'] == [
-            {'line_index': 2, 'before': 0, 'after': 1}, {'line_index': 3, 'before': 0, 'after': 1}]
-        prompt = json.loads(fake_openai_module.instances[0].calls[1]['messages'][1]['content'])
-        assert 'context_assignments' not in prompt
-        assert all(s.uncertain for s in result.segments if s.top_index == 1)
-    assert result.llm.status == 'success'
+def test_status_disagreements_resolved_by_model(agenda_model):
+    agenda_model.states = {'agenda:0': 'deferred', 'agenda:1': 'not_evidenced'}
+    agenda_model.review_states = {'agenda:0': 'removed', 'agenda:1': 'not_evidenced'}
+    result = run(['Der Punkt entfällt.'])
+    assert result.llm.agenda_states[0]['status'] == 'deferred'  # scripted adjudicator, no keyword override
+    assert all(s['review_status'] == 'resolved' for s in result.llm.agenda_states)
+    assert any(b['phase'] == 'resolve:states' for b, _ in agenda_model.calls)
 
 
-def test_cross_section_jump_triggers_llm_review_not_heuristic_reassignment(monkeypatch, fake_openai_module):
-    monkeypatch.setenv('AGENDA_DETECTION_BOUNDARY_REVIEW_MAX_CALLS', '1')
-    initial = {'assignments': {str(i): 'nonpublic:3' if i < 3 else 'public:3' for i in range(5)},
-               'uncertain_lines': [], 'gaps': []}
-    reviewed = {'assignments': {str(i): 'nonpublic:3' for i in range(2, 5)}, 'uncertain_lines': [], 'gaps': []}
-    fake_openai_module.responses = [json.dumps(initial), json.dumps(reviewed)]
-    result = segment_known_agenda([TranscriptUtterance('M', 'Weitere Sachfrage.')]*5,
-        ['[Nichtöffentlich] 3 Anfragen', '[Öffentlich] 3 Verpflichtung'], use_llm=True)
-    assert result.assignments == [0]*5
-    assert result.llm.attempted_calls == 2
-    prompt = json.loads(fake_openai_module.instances[0].calls[1]['messages'][1]['content'])
-    assert 'section_review' not in prompt  # No original section evidence in this synthetic example.
+def test_discovery_precedes_common_reconstruction_without_invented_numbers(agenda_model):
+    result = detect_agenda_from_transcript(transcript(['Wir beraten den Haushalt.']), use_llm=True)
+    assert result.tops == ['Haushalt']
+    assert result.llm.provenance['identities'][0]['number'] is None
+    phases = [b['phase'] for b, _ in agenda_model.calls]
+    assert phases[:2] == ['primary:discover', 'independent:discover']
+    assert phases[-2:] == ['primary:detail', 'independent:detail']
 
 
-def test_preview_cannot_silently_switch_to_mentioned_topic(monkeypatch, fake_openai_module):
-    monkeypatch.setenv('LLM_REPAIR_SPLIT_DEPTH', '0')
-    fake_openai_module.content = json.dumps({'assignments': {'0': 'unspecified:1', '1': 'unspecified:2'},
-                                            'uncertain_lines': [], 'gaps': []})
-    result = segment_known_agenda([TranscriptUtterance('M', 'Wir beraten den Haushalt.'),
-        TranscriptUtterance('M', 'In der nächsten Sitzung behandeln wir TOP 2 Schulbau.')],
-        ['1 Haushalt', '2 Schulbau'], use_llm=True)
-    assert result.llm.status == 'failed'
-    assert 'noncurrent_reference_cannot_change_topic' in result.llm.validation_reasons
+def test_reconstruction_can_request_original_sources(agenda_model):
+    def reconstruct(body):
+        if 'requested_originals' not in body:
+            return {'source_ranges': [{'start': 0, 'end': 0}], 'narrative': 'Originalbeleg benötigt', 'episodes': [], 'agenda_states': []}
+        return agenda_model.answer(body)
+    agenda_model.overrides['independent:reconstruct'] = reconstruct
+    result = run(['Beratung.'])
+    assert result.llm.review_complete
+    calls = [b for b, _ in agenda_model.calls if b['phase'] == 'independent:reconstruct']
+    assert len(calls) == 2 and calls[1]['requested_originals'][0]['line_id'] == 'line-0'
+
+
+def test_oversized_single_source_never_silently_truncated(agenda_model):
+    result = run(['Extrem langer Originaltext. '*2000])
+    assert result.assignments == [None]
+    assert not result.llm.processing_complete
+    assert result.llm.gaps[0]['kind'] == 'technical'
+    assert 'ContextBudgetError' in result.llm.failure_reasons
+
+
+def test_source_change_invalidates_cache_even_with_same_model_notes(agenda_model, monkeypatch, tmp_path):
+    monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path))
+    first = run(['Unverändert.', 'Originalstand.'])
+    agenda_model.calls.clear()
+    second = run(['Unverändert.', 'Geänderter Quellenstand.'])
+    assert first.llm.provenance['source_sha256'] != second.llm.provenance['source_sha256']
+    assert second.llm.attempted_calls == 6
+
+
+def test_model_confidence_not_replaced_by_speech_patterns(agenda_model):
+    def confident(body):
+        result = agenda_model.answer(body)
+        for line in result['lines']:
+            line['confidence'] = 0.61
+        return result
+    agenda_model.overrides.update({'primary:detail': confident, 'independent:detail': confident})
+    result = run(['TOP 1 nicht beraten, später vielleicht.'])
+    assert result.segments[0].confidence == 0.61
+
+
+def test_output_budget_plans_detail_ownership(agenda_model, monkeypatch):
+    monkeypatch.setenv('AGENDA_OUTPUT_TOKENS', '1024')
+    monkeypatch.setenv('AGENDA_OUTPUT_TOKENS_PER_LINE', '256')
+    monkeypatch.setenv('LLM_CHUNK_CHARS', '1')  # obsolete character limit must not select/omit source input
+    result = run(['Beratung.']*9)
+    assert result.llm.review_complete
+    windows = [b for b, _ in agenda_model.calls if b['phase'] == 'primary:detail']
+    assert [len(b['target_lines']) for b in windows] == [2, 2, 2, 2, 1]
+    assert all(len(b['context']['original_transcript']) == 9 for b in windows)
+
+
+def test_known_agenda_can_gain_model_decided_addition_without_reindexing(agenda_model):
+    agenda_model.inventory = [{'title': 'Zusätzliche Beratung', 'number': None, 'section': None,
+        'evidence': [{'line_id': 'line-0', 'quote': 'Ein zusätzlicher Punkt wird beraten.'}]}]
+    def detail(body):
+        data = agenda_model.answer(body)
+        data['lines'][0]['top_ids'] = [body['agenda'][-1]['top_id']]
+        return data
+    agenda_model.overrides.update({'primary:detail': detail, 'independent:detail': detail})
+    result = run(['Ein zusätzlicher Punkt wird beraten.'], top_ids=['stable-a', 'stable-b'])
+    assert result.tops == ['1 Haushalt', '2 Schulbau', 'Zusätzliche Beratung']
+    assert result.assignments == [2]
+    assert [i['top_id'] for i in result.llm.provenance['identities'][:2]] == ['stable-a', 'stable-b']
+    assert result.llm.review_complete

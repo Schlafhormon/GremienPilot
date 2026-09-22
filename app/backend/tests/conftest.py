@@ -9,7 +9,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def isolated_llm_transport(monkeypatch):
+def isolated_llm_transport(monkeypatch, request):
     # Unit tests must never accidentally contact a local model or reuse private caches.
     monkeypatch.setenv("LLM_OLLAMA_NATIVE", "false")
     monkeypatch.setenv("LLM_MODEL", "qwen3:8b")
@@ -21,6 +21,13 @@ def isolated_llm_transport(monkeypatch):
     monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
     monkeypatch.delenv("LLM_AUDIT_DIR", raising=False)
     monkeypatch.setenv("GPU_MODEL_SWITCHING", "false")
+    import llm_transport
+    async def forbidden_network(*args, **kwargs):
+        raise AssertionError('Model transport must be mocked in tests')
+        yield  # async generator contract
+    if request.node.path.name not in {'test_llm_transport.py', 'test_llm_reasoning.py'}:
+        monkeypatch.setattr(llm_transport, '_openai_stream', forbidden_network)
+
 
 
 @pytest.fixture
@@ -145,3 +152,9 @@ def isolated_job_storage(tmp_path_factory, monkeypatch):
     persistence.init_db()
     if 'main' in sys.modules:
         monkeypatch.setattr(sys.modules['main'], 'UPLOAD_DIR', tmp_path / 'uploads')
+
+
+@pytest.fixture
+def agenda_model(monkeypatch, fake_openai_module):
+    from agenda_fixtures import AgendaModel
+    return AgendaModel(monkeypatch)

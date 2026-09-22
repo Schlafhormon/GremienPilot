@@ -313,7 +313,7 @@ def test_summary_crash_after_publication_does_not_regenerate_successful_top(monk
     assert set(final['refs']['outcomes']) == {'a', 'b'}
 
 
-def test_pipeline_snapshot_rejects_manual_edits_and_retains_computed_result(monkeypatch):
+def test_pipeline_snapshot_rejects_manual_edits_and_retains_computed_result(monkeypatch, agenda_model):
     from conftest import FakeTranscriptionResult
     from summarize import SummarizationResult
     monkeypatch.setattr(main, 'transcribe_audio', lambda *args, **kwargs: FakeTranscriptionResult(
@@ -330,7 +330,7 @@ def test_pipeline_snapshot_rejects_manual_edits_and_retains_computed_result(monk
     monkeypatch.setattr(main, 'summarize_segment', generate)
     with TestClient(main.app) as client:
         start = client.post('/api/pipeline/start', files={'audio': ('a.mp3', b'audio', 'audio/mpeg')},
-                            data={'tops': '["1 Haushalt"]', 'agenda_use_llm': 'false'}).json()
+                            data={'tops': '["1 Haushalt"]', 'agenda_use_llm': 'true'}).json()
         target.update(start)
         ready.set()
         wait(lambda: jobs.load(start['pipeline_id'])['state'] in jobs.TERMINAL)
@@ -467,3 +467,37 @@ def test_pipeline_restart_reuses_transcription_agenda_and_summaries(monkeypatch)
         wait(lambda: jobs.load(job_id)['state'] in {'completed', 'review_required'})
     assert calls == {'transcription': 1, 'agenda': 1, 'summary': 1}
     assert persistence.load_session(started['session_id'])['summaries'] == {0: 'Fertiges Ergebnis'}
+
+
+def test_agenda_resume_keeps_split_source_ids_and_successful_model_steps(agenda_model):
+    text = ('Dies ist ein ausführlicher Beitrag zur laufenden Beratung mit weiteren Einzelheiten. '
+            'Danach folgt eine ausführliche Rückfrage zur Planung und Finanzierung des Projektes. '
+            'Wir nehmen anschließend die ursprüngliche Beratung wieder auf.')
+    request = main.AgendaDetectionRequest(tops=['Haushalt'], use_llm=True, transcript=[
+        main.TranscriptLine(line_id='original', speaker='M', text=text, start=10, end=40)])
+    job = jobs.submit('agenda', {'request': request.model_dump()})
+    agenda_model.overrides['independent:detail'] = jobs.WorkerStopped()
+    with claimed(job):
+        with pytest.raises(jobs.WorkerStopped):
+            main.calculate_agenda(request)
+    original_ids = [r['line_id'] for b, _ in agenda_model.calls if b['phase'] == 'primary:detail' for r in b['target_lines']]
+    assert len(original_ids) == 3 and original_ids[0] == 'original'
+    agenda_model.calls.clear()
+    agenda_model.overrides.clear()
+    with claimed(job):
+        result = main.calculate_agenda(request)
+    assert result.llm.review_complete
+    assert [line.line_id for line in result.transcript] == original_ids
+    assert [b['phase'] for b, _ in agenda_model.calls] == ['independent:detail']
+    assert result.transcript[0].start == 10 and result.transcript[-1].end == 40
+
+
+def test_agenda_phase_and_coverage_survive_transport_progress():
+    job = jobs.submit('agenda', {})
+    with claimed(job):
+        jobs.progress({'phase': 'independent:detail', 'agenda_phase': 'independent:detail',
+                       'processed_lines': 12, 'total_lines': 24})
+        jobs.progress({'phase': 'generating', 'elapsed_seconds': 10})
+    progress = jobs.load(job['job_id'])['progress']
+    assert progress['agenda_phase'] == 'independent:detail'
+    assert progress['processed_lines'] == 12 and progress['total_lines'] == 24

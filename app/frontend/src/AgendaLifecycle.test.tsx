@@ -262,3 +262,22 @@ describe('agenda proposals across real editor state transitions', () => {
     expect(screen.queryByRole('button', { name: 'Direkt zum Protokoll' })).not.toBeInTheDocument();
   });
 });
+
+it('appends independently detected points while preserving existing IDs and manual assignments', async () => {
+  vi.mocked(detectAgenda).mockImplementation(async input => {
+    const result = detection(input);
+    result.tops = [...input.tops!, 'Zusätzliche Beratung'];
+    result.assignments = [0, 2];
+    result.llm = { enabled: true, source: 'request', timeout_seconds: 120, status: 'success',
+      attempted_calls: 6, failed_calls: 0, failure_reasons: [],
+      provenance: { identities: [{ top_id: 'new-top', top_index: 2, title: 'Zusätzliche Beratung' }] } };
+    return result;
+  });
+  render(<App />);
+  const button = await screen.findByRole('button', { name: 'TOP-Erkennung erneut berechnen' });
+  await userEvent.click(button);
+  await waitFor(() => expect(draft().tops).toEqual(['Haushalt', 'Schulbau', 'Zusätzliche Beratung']));
+  expect(draft().top_ids).toEqual(['top-a', 'top-b', 'new-top']);
+  expect(assignments()).toEqual([0, 1]);
+  expect(draft().agenda_proposals?.result.assignments).toEqual([0, 2]);
+});

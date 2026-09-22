@@ -27,7 +27,7 @@ def load_config(overrides):
 def test_unset_server_defaults():
     result = load_config({})
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == [False, 8, 160, 12, 4, 8]
+    assert json.loads(result.stdout) == [True, 8, 0, 12, 4, 8]
 
 
 @pytest.mark.parametrize("path", [ROOT / ".env.example", BACKEND / ".env.example"])
@@ -35,7 +35,7 @@ def test_documented_defaults_are_loaded(path):
     values = dict(line.split("=", 1) for line in path.read_text().splitlines() if line.startswith("AGENDA_DETECTION_"))
     result = load_config(values)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == [False, 8, 160, 12, 4, 8]
+    assert json.loads(result.stdout) == [True, 8, 0, 12, 4, 8]
 
 
 def test_startup_overrides_are_effective():

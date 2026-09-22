@@ -955,6 +955,8 @@ class AssignmentSuggestionSegmentResponse(BaseModel):
 
 
 class AssignmentSuggestionsResponse(BaseModel):
+    llm: Optional[Dict[str, Any]] = None
+    warnings: List[str] = Field(default_factory=list)
     suggested_assignments: List[Optional[int]]
     segments: List[AssignmentSuggestionSegmentResponse]
     strategy: str
@@ -962,6 +964,12 @@ class AssignmentSuggestionsResponse(BaseModel):
 
 
 class AgendaLLMUsageResponse(BaseModel):
+    line_results: List[Dict[str, Any]] = Field(default_factory=list)
+    agenda_states: List[Dict[str, Any]] = Field(default_factory=list)
+    reconstructions: List[Dict[str, Any]] = Field(default_factory=list)
+    processing_complete: bool = False
+    review_complete: bool = False
+    review_required: bool = True
     provenance: Dict[str, Any] = Field(default_factory=dict)
     enabled: bool
     source: str
@@ -1901,7 +1909,8 @@ def line_to_dict(line: Any) -> dict[str, Any]:
 
 def transcript_utterances(transcript: list[dict[str, Any]]) -> list[TranscriptUtterance]:
     return [
-        TranscriptUtterance(speaker=line.get("speaker", ""), text=line.get("text", ""))
+        TranscriptUtterance(speaker=line.get("speaker", ""), text=line.get("text", ""),
+                            line_id=line.get("line_id"), start=line.get("start"), end=line.get("end"))
         for line in transcript
     ]
 
@@ -2539,33 +2548,17 @@ def save_pipeline_session(
             bump_revision=True)
 
 
-def fallback_agenda(
-    transcript: list[dict[str, Any]],
-    known_tops: list[str] | None = None,
-) -> tuple[list[str], list[int | None], dict[str, Any]]:
-    tops = [top.strip() for top in known_tops or [] if top.strip()]
-    if not tops:
-        tops = ["Gesamtes Gespräch"]
-        return tops, [0 for _ in transcript], {
-            "strategy": "pipeline_fallback_full_conversation",
-            "segments": [],
-            "uncertain_count": 1 if transcript else 0,
-        }
-
-    try:
-        result = suggest_assignments(transcript_utterances(transcript), tops)
-        assignments = result.suggested_assignments
-        return tops, assignments, {
-            "strategy": f"{result.strategy}_pipeline_fallback",
-            "segments": [segment.__dict__ for segment in result.segments],
-            "uncertain_count": result.uncertain_count,
-        }
-    except Exception:
-        return tops, [None for _ in transcript], {
-            "strategy": "pipeline_fallback_known_tops",
-            "segments": [],
-            "uncertain_count": len(tops),
-        }
+def fallback_agenda(transcript, known_tops=None):
+    """Legacy entry point: technical nonprocessing, never an invented agenda."""
+    tops = list(known_tops or [])
+    return tops, [None] * len(transcript), {
+        "strategy": "agenda_not_processed", "segments": [], "uncertain_count": 0,
+        "llm": {"enabled": True, "source": "pipeline", "status": "failed",
+                "timeout_seconds": 0, "attempted_calls": 0, "failed_calls": 0,
+                "processing_complete": False, "review_complete": False,
+                "processed_lines": [], "gaps": [{"start_index": 0,
+                    "end_index": len(transcript)-1, "kind": "technical", "reason": "model_unavailable"}] if transcript else []},
+    }
 
 
 def detect_pipeline_agenda(
@@ -2576,7 +2569,7 @@ def detect_pipeline_agenda(
     pdf_path: str | None,
     options: dict[str, Any],
 ) -> tuple[list[str], list[int | None], dict[str, Any], dict[str, Any]]:
-    agenda_tops = [top.strip() for top in known_tops if top.strip()]
+    agenda_tops = list(known_tops)
     pdf_metadata: dict[str, Any] = {}
     pdf_incomplete = False
     model = options.get("agenda_model") or options.get("model")
@@ -2627,45 +2620,41 @@ def detect_pipeline_agenda(
                 model=model,
                 system_prompt=system_prompt,
                 use_llm=options.get("agenda_use_llm"),
+                cache_namespace=options.get('agenda_cache_namespace', ''),
+                progress_callback=lambda usage: save_pipeline_state(
+                    pipeline_id, result_refs={"agenda_progress": asdict(usage)}),
             )
         usage = result.llm
         warnings = usage.warnings if usage else []
         detection_details = {"pdf_incomplete": pdf_incomplete, "pdf_extraction": pdf_extraction, "llm": asdict(usage) if usage else None, "warnings": warnings}
         for warning in warnings:
             append_pipeline_warning(pipeline_id, warning)
-        if result.tops and result.assignments:
-            return result.tops, result.assignments, {
-                **detection_details,
-                "strategy": result.strategy,
-                "segments": [segment.__dict__ for segment in result.segments],
-                "uncertain_count": result.uncertain_count,
-            }, pdf_metadata
-        append_pipeline_warning(
-            pipeline_id,
-            "Agenda Detection ergab keine belastbaren TOPs, nutze Fallback.",
-        )
+        return result.tops, result.assignments, {
+            **detection_details, "strategy": result.strategy,
+            "segments": [segment.__dict__ for segment in result.segments],
+            "uncertain_count": result.uncertain_count,
+        }, pdf_metadata
     except LLMCancelledError:
         raise
     except Exception as exc:
         durable.raise_if_transient(exc)
         message = f"TOP-Erkennung technisch fehlgeschlagen ({safe_exception_label(exc)}); Zuordnung prüfen."
         append_pipeline_warning(pipeline_id, message)
-        if agenda_tops:
-            return agenda_tops, [None] * len(transcript), {
-                "strategy": "known_agenda_failed", "segments": [], "uncertain_count": 0,
-                "pdf_extraction": pdf_extraction,
-                "warnings": [message], "llm": {
-                    "enabled": True, "source": "pipeline", "status": "failed",
-                    "timeout_seconds": 0, "attempted_calls": 0, "failed_calls": 0,
-                    "failure_reasons": [safe_exception_label(exc)], "processed_lines": [],
-                    "gaps": [{"start_index": 0, "end_index": len(transcript)-1,
-                              "kind": "technical", "reason": safe_exception_label(exc)}],
-                },
-            }, pdf_metadata
+        return agenda_tops, [None] * len(transcript), {
+            "strategy": "known_agenda_failed", "segments": [], "uncertain_count": 0,
+            "pdf_extraction": pdf_extraction, "warnings": [message], "llm": {
+                "enabled": True, "source": "pipeline", "status": "failed",
+                "timeout_seconds": 0, "attempted_calls": 0, "failed_calls": 0,
+                "failure_reasons": [safe_exception_label(exc)], "processed_lines": [],
+                "processing_complete": False, "review_complete": False,
+                "line_results": [{"line_id": row['line_id'], "index": i, "top_ids": [],
+                    "status": "not_processed", "review_status": "technical_pending",
+                    "reason": safe_exception_label(exc), "evidence": []} for i, row in enumerate(transcript)],
+                "gaps": [{"start_index": 0, "end_index": len(transcript)-1,
+                          "kind": "technical", "reason": safe_exception_label(exc)}] if transcript else [],
+            },
+        }, pdf_metadata
 
-    tops, assignments, agenda_info = fallback_agenda(transcript, agenda_tops)
-    agenda_info.update(detection_details)
-    return tops, assignments, agenda_info, pdf_metadata
 
 
 def format_line_for_summary(
@@ -2931,15 +2920,16 @@ def _run_pipeline_job(
             stage=PIPELINE_STAGE_AGENDA_DETECT,
             progress=72,
         )
-        transcript = split_transcript_for_agenda_detection(transcript)
+        transcript = durable.checkpoint("pipeline:agenda-transcript:v1",
+            lambda: split_transcript_for_agenda_detection(transcript))
         tops, assignments, agenda_info, pdf_metadata = durable.checkpoint("pipeline:agenda", lambda: detect_pipeline_agenda(
             pipeline_id, transcript, known_tops=known_tops, pdf_path=pdf_path, options=options))
         pdf_extraction = agenda_info.get("pdf_extraction")
-        exact_pdf_agenda = bool(pdf_extraction and tops == pdf_extraction["tops"])
+        exact_pdf_agenda = bool(pdf_extraction and tops[:len(pdf_extraction["tops"])] == pdf_extraction["tops"])
         pdf_ids = [item["id"] for item in (pdf_extraction or {}).get("items", []) if item["kind"] == "agenda"] if exact_pdf_agenda else []
         if options.get("auto_detect_tops_from_pdf") and not known_tops and pdf_extraction and not exact_pdf_agenda:
             raise ValueError("Transkriptzuordnung hat die geprüfte PDF-Agenda verändert")
-        top_ids = durable.checkpoint("pipeline:top_ids", lambda: pdf_ids or [str(uuid.uuid4()) for _ in tops])
+        top_ids = durable.checkpoint("pipeline:top_ids", lambda: pdf_ids + [str(uuid.uuid4()) for _ in tops[len(pdf_ids):]])
         for identity in ((agenda_info.get('llm') or {}).get('provenance') or {}).get('identities', []):
             identity['top_uid'] = top_ids[identity['top_index']]
         # Freeze the exact detector input and result before manual editing begins.
@@ -2974,8 +2964,12 @@ def _run_pipeline_job(
             stage=PIPELINE_STAGE_SUMMARIZE,
             progress=82,
         )
-        summaries, summary_reviews = durable.checkpoint("pipeline:summaries", lambda: summarize_pipeline_segments(
-            pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options))
+        if not tops and not options.get('skip_agenda_detection'):
+            summaries, summary_reviews = {}, {}
+            append_pipeline_warning(pipeline_id, 'Keine belegte Agenda; keine automatische Ersatz-Zusammenfassung.')
+        else:
+            summaries, summary_reviews = durable.checkpoint("pipeline:summaries", lambda: summarize_pipeline_segments(
+                pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options))
         summaries = {int(k): v for k, v in summaries.items()}
         summary_reviews = {int(k): v for k, v in summary_reviews.items()}
         summary_states = build_generated_summary_states(
@@ -3006,7 +3000,7 @@ def _run_pipeline_job(
 
         ensure_pipeline_not_cancelled(pipeline_id)
         complete = (not agenda_info.get("pdf_incomplete") and (agenda_info.get("llm") or {}).get("status") not in
-                    {"failed", "partial_failure", "fallback", "partial_fallback"}
+                    {"disabled", "failed", "partial_failure", "fallback", "partial_fallback"}
                     and not any(review.get("error") or (review.get("llm_usage") or {}).get("grounding_incomplete")
                                 for review in summary_reviews.values()))
         save_pipeline_state(
@@ -4370,41 +4364,17 @@ async def extract_tops_endpoint(
 
 @app.post("/api/assignment-suggestions", response_model=AssignmentSuggestionsResponse)
 async def assignment_suggestions_endpoint(request: AssignmentSuggestionsRequest):
-    """
-    Suggest transcript-to-TOP assignments with explainable heuristic boundaries.
-    Users still review and accept/correct the suggestions in the frontend.
-    """
-    if not request.transcript:
-        raise HTTPException(status_code=400, detail="Kein Transkript vorhanden")
-    if not any(top.strip() for top in request.tops):
-        raise HTTPException(status_code=400, detail="Keine TOPs vorhanden")
-
-    transcript = [
-        TranscriptUtterance(speaker=line.speaker, text=line.text)
-        for line in request.transcript
-    ]
-    result = suggest_assignments(transcript, request.tops)
-
+    """Legacy shape, same durable model-only workflow as agenda detection."""
+    if not request.transcript or not request.tops:
+        raise HTTPException(400, 'Transkript und TOPs erforderlich')
+    job = await start_agenda_job(AgendaDetectionRequest(
+        transcript=request.transcript, tops=request.tops, use_llm=True,
+        preserve_transcript_structure=True))
+    result = await await_durable_result(job['job_id'])
     return AssignmentSuggestionsResponse(
-        suggested_assignments=result.suggested_assignments,
-        segments=[
-            AssignmentSuggestionSegmentResponse(
-                top_index=segment.top_index,
-                top_title=segment.top_title,
-                start_index=segment.start_index,
-                end_index=segment.end_index,
-                confidence=segment.confidence,
-                uncertain=segment.uncertain,
-                transition_type=segment.transition_type,
-                reason=segment.reason,
-                evidence_index=segment.evidence_index,
-                evidence_text=segment.evidence_text,
-            )
-            for segment in result.segments
-        ],
-        strategy=result.strategy,
-        uncertain_count=result.uncertain_count,
-    )
+        suggested_assignments=result['assignments'], segments=result['segments'],
+        llm=result.get('llm'), warnings=result.get('warnings', []),
+        strategy=result['strategy'], uncertain_count=result['uncertain_count'])
 
 
 def calculate_agenda(request: AgendaDetectionRequest):
@@ -4414,20 +4384,21 @@ def calculate_agenda(request: AgendaDetectionRequest):
     This synchronous endpoint runs in FastAPI's thread pool: model requests and
     CPU-bound detection must not block autosaves, health checks or cancellation.
 
-    If TOPs are supplied, only boundaries are detected/refined. Without TOPs,
-    the endpoint detects agenda titles from transcript transition signals and
-    optionally an LLM structured-output pass.
+    Known and unknown agendas use the same model-only reconstruction and
+    independent complete review. Without TOPs, models first establish the agenda.
     """
     if not request.transcript:
         raise HTTPException(status_code=400, detail="Kein Transkript vorhanden")
 
     input_transcript = [line_to_dict(line) for line in request.transcript]
-    split_transcript = (
+    split_transcript = durable.checkpoint('agenda:source:v1', lambda: (
         input_transcript if request.preserve_transcript_structure
         else split_transcript_for_agenda_detection(input_transcript)
-    )
+    ))
     transcript = transcript_utterances(split_transcript)
-    valid_tops = [top.strip() for top in request.tops if top.strip()]
+    valid_tops = list(request.tops)
+    if any(not top.strip() for top in valid_tops):
+        raise HTTPException(400, "Leere TOP-Titel sind nicht zulässig")
     if request.top_ids and (len(request.top_ids) != len(valid_tops) or
                            len(set(request.top_ids)) != len(valid_tops) or not all(request.top_ids)):
         raise HTTPException(status_code=400, detail='TOP-IDs müssen vollständig und eindeutig sein')
@@ -4439,6 +4410,7 @@ def calculate_agenda(request: AgendaDetectionRequest):
             system_prompt=request.system_prompt,
             use_llm=request.use_llm,
             cache_namespace=str(uuid.uuid4()) if request.fresh else request.cache_namespace,
+            top_ids=request.top_ids,
         )
     else:
         result = detect_agenda_from_transcript(
@@ -4446,11 +4418,13 @@ def calculate_agenda(request: AgendaDetectionRequest):
             model=request.model,
             system_prompt=request.system_prompt,
             use_llm=request.use_llm,
+            cache_namespace=str(uuid.uuid4()) if request.fresh else request.cache_namespace,
         )
 
     if result.llm and request.top_ids:
         for identity in result.llm.provenance.get('identities', []):
-            identity['top_uid'] = request.top_ids[identity['top_index']]
+            identity['top_uid'] = (request.top_ids[identity['top_index']] if identity['top_index'] < len(request.top_ids)
+                                   else identity['top_id'])
     return AgendaDetectionResponse(
         llm=asdict(result.llm) if result.llm else None,
         warnings=result.llm.warnings if result.llm else [],
@@ -4701,9 +4675,9 @@ def run_durable_job(job):
         result = durable.checkpoint('agenda:validated', lambda: calculate_agenda(
             AgendaDetectionRequest(**payload['request'])).model_dump())
         state = (result.get('llm') or {}).get('status')
-        if state in {'failed', 'partial_failure', 'fallback', 'partial_fallback'}:
+        if state in {'disabled', 'failed', 'partial_failure', 'fallback', 'partial_fallback'}:
             return result, 'failed'
-        return result, 'review_required' if result.get('uncertain_count') or None in result.get('assignments', []) else 'completed'
+        return result, 'review_required' if (result.get('llm') or {}).get('review_required', True) or result.get('uncertain_count') or None in result.get('assignments', []) else 'completed'
     if job['kind'] == 'pipeline':
         run_pipeline_job(job['job_id'], app.state.models)
         old = load_pipeline_job(job['job_id'])
@@ -4766,7 +4740,21 @@ async def cancel_model_job(job_id: str):
 async def start_agenda_job(request: AgendaDetectionRequest):
     if not request.transcript:
         raise HTTPException(400, 'Kein Transkript vorhanden')
-    return durable.public(durable.submit('agenda', {'request': request.model_dump()}))
+    data = request.model_dump()
+    data['transcript'] = [line_to_dict(line) for line in request.transcript]
+    from agenda_context import source_rows, model_agenda
+    try:
+        source_rows(transcript_utterances(data['transcript']))
+        model_agenda(request.tops, request.top_ids)
+        if any(not title.strip() for title in request.tops):
+            raise ValueError('invalid_agenda_title')
+    except (ValueError, TypeError):
+        raise HTTPException(400, 'Ungültige Quellenidentitäten, TOP-Titel oder Audiozeiten')
+
+    if request.fresh:
+        data['cache_namespace'] = str(uuid.uuid4())
+        data['fresh'] = False
+    return durable.public(durable.submit('agenda', {'request': data}))
 
 
 @app.post('/api/agenda-detection', response_model=AgendaDetectionResponse)

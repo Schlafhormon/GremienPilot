@@ -396,6 +396,31 @@ it('distinguishes technical gaps from semantic uncertainty without replacing ass
       ]},
   }});
   expect(screen.getByText(/Technisch nicht ausgewertet/)).toBeInTheDocument();
-  expect(screen.getByText(/Inhaltlich unklar/)).toBeInTheDocument();
+  expect(screen.getByText(/Fachlich begründet unzugeordnet/)).toBeInTheDocument();
   expect(defaultProps.setAssignments).not.toHaveBeenCalled();
+});
+
+it('shows joint model decisions, agenda status and technical review gaps without scalar reassignment', () => {
+  const setAssignments = vi.fn();
+  renderAssignmentStep({ setAssignments, agendaDetection: {
+    tops: defaultProps.tops, transcript, assignments: [null, null], segments: [],
+    strategy: 'model_agenda_v1', uncertain_count: 0,
+    llm: { enabled: true, source: 'request', timeout_seconds: 120, status: 'partial_failure',
+      attempted_calls: 4, failed_calls: 1, failure_reasons: ['TimeoutError'],
+      processing_complete: true, review_complete: false, chunks: [],
+      provenance: { identities: [{ top_id: 'a', top_index: 0, title: 'Begruessung' }, { top_id: 'b', top_index: 1, title: 'Haushalt' }] },
+      agenda_states: [{ top_id: 'b', status: 'deferred', reason: 'Weitere Beratung im Dezember.', review_status: 'agreed', evidence: [] }],
+      line_results: [
+        { line_id: 'line-0', index: 0, top_ids: ['a', 'b'], status: 'assigned', reason: 'Zusammen beraten.', review_status: 'agreed', evidence: [] },
+        { line_id: 'line-1', index: 1, top_ids: [], status: 'unassigned', reason: 'Pause.', review_status: 'technical_pending', evidence: [] },
+      ],
+    },
+  }});
+  expect(screen.getByText(/Technisch vollständig verarbeitet/)).toBeInTheDocument();
+  expect(screen.getByText(/Unabhängige Modellprüfung offen/)).toBeInTheDocument();
+  expect(screen.getByText(/Gemeinsame Beratung/)).toBeInTheDocument();
+  expect(screen.getByText(/Vertagt/)).toBeInTheDocument();
+  expect(screen.getByText(/Technische Prüflücke/)).toBeInTheDocument();
+  expect(setAssignments).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
 });

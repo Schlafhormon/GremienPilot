@@ -602,7 +602,7 @@ export interface ModelJob {
   job_id: string;
   kind: string;
   state: 'queued' | 'running' | 'retry_wait' | 'review_required' | 'failed' | 'completed' | 'cancelled' | 'superseded';
-  progress?: { phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number };
+  progress?: { phase?: string; agenda_phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number };
   error?: string | null;
   result?: unknown;
   documents?: { sha256: string; deleted_at?: number | null }[];

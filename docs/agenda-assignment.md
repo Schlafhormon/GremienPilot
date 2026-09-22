@@ -1,88 +1,62 @@
-# Bekannte Agenda: Zuordnung und Nachweis
+# Modellgestützte Agenda und Transkriptzuordnung
 
-Der bekannte-Agenda-Pfad verarbeitet jede Transkriptzeile. Ein erfolgreich
-verarbeitetes Fenster ist **kein fachlicher Richtigkeitsnachweis**. Nicht
-ausgewertete technische Lücken, begründete semantische Lücken und unsichere
-Zuordnungen werden getrennt in `llm`, `gaps` und `segments` gespeichert.
+Bekannte Agenden und Erkennung ohne Einladung verwenden denselben Ablauf.
+Zwei getrennte Modellaufrufe ermitteln zuerst belegbare Punkte bzw. zusätzliche
+Punkte einer bekannten Agenda; Unterschiede werden anhand der Quellen
+modellgestützt geklärt. Bestehende TOPs bleiben mit ihren Identitäten erhalten.
+Originalnummern werden nur aus Modellnachweisen übernommen, nie aus Positionen.
 
-## Identitäten
+Danach rekonstruieren zwei unabhängige Durchgänge den Sitzungsverlauf und den
+Status jedes TOPs (`treated`, `deferred`, `removed`, `not_evidenced`). Beide
+ordnen jede Transkriptzeile zu. Der zweite Durchgang sieht keine Zuordnungen
+des ersten. Sämtliche abweichenden oder unsicheren Entscheidungen erhalten
+eine begrenzte Klärung gegen die Originalquellen. Fachlich offene Ergebnisse
+bleiben offen; technisch fehlgeschlagene Prüfungen heißen `technical_pending`.
 
-SQLite und Sitzungs-API behalten unabhängige `top_ids` (UUIDs). Modell-IDs
-verwenden Abschnitt und unveränderte Originalnummer, etwa `public:07`,
-`nonpublic:07`, `unspecified:02.10`. Wiederholungen erhalten ausdrücklich
-`~occurrence-N`; nummernlose Einträge heißen `unnumbered`. Aus Listenpositionen
-wird keine Originalnummer abgeleitet. `llm.provenance.identities` dokumentiert
-die Zuordnung von Modell-ID, Originalnummer, Titel, Index und (in einer Sitzung
-bzw. bei mitgesendeten `top_ids`) stabiler TOP-UID.
+## Quellen, Kontext und technische Verträge
 
-## Kontext und Reparaturen
+Persistierte TOP-IDs und Transkript-IDs bleiben unverändert. Alte Aufrufer ohne
+IDs erhalten deterministische, an den Quellstand gebundene Transkriptverweise.
+Die API bindet fehlende IDs vor dem Speichern eines Jobs. Zeitwerte werden
+übernommen, niemals vom Modell neu erzeugt. Geprüft werden Identitäten,
+Abdeckung, Bereiche, Originalzitate und Quellenzeiten. Sprachmuster begrenzen
+weder Schema-IDs noch Antworten und erzeugen keine Ergänzungen.
 
-`agenda_context.py` erkennt konservative Originalbelege. Abschnitt und letzter
-TOP-Aufruf werden getrennt fortgeführt; indirekte neue TOPs bleiben möglich.
-Ein `previous_top` ist ausdrücklich eine unbestätigte Vorhersage. Reviews
-erhalten keine früheren Nachbarlabels. Ein ursprünglicher Aufruf samt
-Nachbarzeilen bleibt auch nach einem Reparatursplit verfügbar.
-Fortsetzungen werden zusätzlich gespeichert und ersetzen den ursprünglichen
-Aufruf nicht. Ein vermuteter indirekter Themenbeginn wird mit Originalzeilen
-als unbestätigte Hypothese mitgeführt. Bereits belegte Abschnittsgrenzen und
-fehlende Schließungsbelege begrenzen auch die pro Zeile erlaubten Schema-IDs;
-`null` bleibt möglich. Damit muss eine strukturell gültige Antwort nicht erst
-nachträglich wegen eines verbotenen Abschnitts verworfen werden.
+Wenn möglich enthält jeder Detailauftrag das vollständige Transkript und die
+Agenda. Größere Quellen werden in zwei unabhängigen Lesedurchgängen vollständig
+modellgestützt verdichtet. Die gesamte Quellenabdeckung und alle verdichteten
+Knoten bleiben im Prüfprotokoll erhalten. Detailaufträge behalten den globalen
+Kontext und können weitere Originalbereiche anfordern. Kontext, Schema,
+Thinking-Reserve und Ausgabebudget bestimmen die Aufteilung. Ein nicht mehr
+passender Einzelauftrag oder eine erfolglose Verdichtung erzeugt einen
+sichtbaren technischen Fehler; Quellen werden nicht still gekürzt.
 
-`AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE/AFTER` gelten auch für die bekannte
-Agenda. Fehlen diese Einstellungen, dient die Hälfte von
-`AGENDA_DETECTION_CHUNK_OVERLAP_LINES` als kompatibler Standard. Beim konservativen
-UTF-8-Bytebudget werden zuerst entferntere Kontextzeilen reduziert; Zieltext
-und eigentliche Anker werden nicht gekürzt. `context_budget` verzeichnet
-ausgelassene Indizes. Das Budget enthält 512 Tokens Chatreserve, Nachrichten,
-2048 Ausgabetokens (bei Thinking ggf. zwei Phasen) und Platz für Reparatur.
+Verdichtung kann fachliche Details verlieren. Quellenzitate und unabhängige
+Modelldurchgänge reduzieren dieses Risiko, beweisen aber keine Richtigkeit.
 
-Ein Validierungsfehler erhält zunächst einen Reparaturversuch im selben
-Fenster mit denselben Originalbelegen. Bei fehlenden Gap-Begründungen fordert
-ein eigenes kleines Schema ausschließlich die erforderlichen Gründe an;
-die Labels werden unverändert übernommen. Danach sind begrenzte Splits möglich;
-erschöpfte Fehler erzeugen technische Lücken, keine geratenen Ersatzlabels.
-Reviews werden atomar übernommen und bei Fehlern als offene Prüfung markiert.
+## Kompatible Speicherung und Darstellung
 
-## Frische Antworten und Cache
+`llm.line_results` enthält je `line_id` den Status `assigned`, `unassigned`
+(fachlich begründet) oder `not_processed` (technisch), `top_ids`, Begründung,
+Originalbelege und `review_status`. Mehrere IDs bedeuten gemeinsame Beratung.
+Die bisherige skalare `assignments`-Liste bildet nur Einzelzuordnungen ab;
+gemeinsame Beratungen erhalten dort `null` und keinen willkürlichen Einzel-TOP.
+Die Oberfläche zeigt die vollständigen Entscheidungen gesondert. Bestehende
+Einzel-TOP-Zusammenfassungen verwenden Mehrfachvorschläge noch nicht; der Job
+weist darauf ausdrücklich hin. Übernahme
+von Einzelvorschlägen bleibt eine explizite Nutzeraktion.
 
-- `POST /api/pipeline/start`: Multipart-Feld `agenda_fresh=true`.
-- `POST /api/agenda-detection`: JSON `fresh: true`; optional `top_ids`.
-- Oberfläche: **Frische TOP-Berechnung** erzeugt neue Antworten.
-- Für eine genaue Wiederholung `fresh` weglassen und den zurückgegebenen
-  `llm.provenance.cache_namespace` als `cache_namespace` mitsenden.
+`llm.agenda_states`, `reconstructions`, `processing_complete`, `review_complete`
+und `review_required` ergänzen die bestehende API. Sie werden im vorhandenen
+`agenda_proposals_json` gespeichert; Altdaten benötigen keine Umschreibung.
+Manuelle Zuordnungen und gespeicherte Vorschläge sind getrennt. Quellenänderungen
+sperren die Übernahme alter Vorschläge; Revisionen und Job-Leases verhindern
+überholte automatische Veröffentlichungen.
 
-Bestehende Caches werden nicht gelöscht. Der Schlüssel enthält Modell-Digest,
-Kontextgröße, Generierungsparameter, Prompt-/Schemaversion, Namensraum und
-Nachrichten. Bei nicht auflösbarem lokalem Digest wird die Wiederverwendung
-zwischen Läufen deaktiviert. Cache-Einträge bewahren Reparatur- und
-Split-Historie; `chunks` weist aktuelle Treffer und Parent-Schlüssel aus.
-`LLM_AUDIT_DIR` aktiviert private lokale Provider-Anfrage-/Antwortartefakte.
-Diese enthalten Sitzungsinhalte und gehören nicht ins Git-Repository.
+Erfolgreiche Modellschritte werden einzeln im persistenten Job checkpointed.
+Abbruch greift auch während Modellaufrufen. Fehlerantworten werden nicht als
+erfolgreiche Teilschritte gecacht. `fresh` trennt neue Antworten vom bisherigen
+Cache. Konfiguration und Codeversion gehören zum Job- und Cachevertrag.
 
-## Audiozeiten und Kompatibilität
-
-WhisperX-Segmente werden nicht mehr über lange Sprecherbeiträge verschmolzen.
-`timing.words` enthält Zeichenbereiche und Alignment-Zeiten,
-`timing.segments` die ursprünglichen Segment-IDs und Intervalle. Satzsplits
-verwenden ausgerichtete Wortgrenzen; ohne vollständige Randwörter bleibt eine
-explizit markierte Zeichenschätzung. Alignment kann selbst ungenau sein.
-
-Die additive SQLite-Spalte `timing_json` existiert in Job- und
-Sitzungstranskripten. Altdaten erhalten keine erfundenen Wortzeiten. Alte
-Clients dürfen das optionale Feld weglassen; bei unverändertem Text/Zeitbereich
-bleibt es erhalten. Textänderungen entwerten alte Wortzuordnungen; der Editor
-kennzeichnet neue Grenzen als Schätzungen. Zusammenführen erhält Wortzeiten
-mit angepassten Zeichenpositionen. Proposals berücksichtigen Zeitprovenienz
-bei der Prüfung auf veraltete Ergebnisse.
-
-## Prüfungen
-
-Backend: `cd app/backend; python -m pytest`. Frontend:
-`cd app/frontend; npm test; npm run build`.
-
-`test_agenda_evidence.py` deckt Identitäten, Sitzungsabschnitte,
-Niederschriftsrückblicke, offene Informationspunkte, nichtmonotone Aufrufe,
-Erhalt von Originalbelegen in Splits, strukturelle Reparatur, fehlerhafte
-Reviews, Cache-Isolation und Zeitpersistenz ab. Die bestehenden Vertrags-,
-API-, Persistenz- und UI-Tests ergänzen diese Tests.
+Technische Vollständigkeit bedeutet vollständige Verarbeitung bzw. Prüfung.
+Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**.

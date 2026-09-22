@@ -351,13 +351,13 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `SPEAKER_EMBEDDING_MAX_SEGMENT_SECONDS` | maximale Segmentdauer vor dem Cropping | `12.0` |
 | `SPEAKER_EMBEDDING_MAX_SEGMENTS` | maximale lokale Segmente pro Sprecher für die Extraktion | `8` |
 | `SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL` | maximale globale Referenz-Embeddings je Profil und Modell | `16` |
-| `AGENDA_DETECTION_USE_LLM` | Serverstandard für LLM-TOP-Erkennung; explizite API-Entscheidung hat Vorrang | `false` |
-| `AGENDA_DETECTION_TIMEOUT_SECONDS` | Veraltet; Netzwerk nutzt das gemeinsame Lese-/Inaktivitätslimit | `8` |
-| `AGENDA_DETECTION_CHUNK_LINES` | Maximale Zielzeilen pro Chunk (zusätzlich begrenzt durch das Kontextbudget bei bekannter Agenda) | `160` |
-| `AGENDA_DETECTION_CHUNK_OVERLAP_LINES` | Überlappende Zeilen zwischen Chunks | `12` |
-| `AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS` | Zusätzliche Prüfungen fachlicher Zuordnungslücken; `0` deaktiviert | `3` |
-| `AGENDA_DETECTION_BOUNDARY_REVIEW_MAX_CALLS` | Zusätzliche Prüfungen von TOP-/Abschnittsgrenzen; `0` deaktiviert | `4` |
-| `AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE` / `AGENDA_DETECTION_CONTEXT_WINDOW_AFTER` | Historische Heuristikfenster; für vollständige LLM-Zuordnung nicht mehr verwendet | `4` / `8` |
+| `AGENDA_DETECTION_USE_LLM` | Modellgestützte TOP-Erkennung; `false` lässt technische Lücken, ohne Ersatzzuordnung | `true` |
+| `AGENDA_DETECTION_TIMEOUT_SECONDS` | Veraltet; Netzwerk nutzt das gemeinsame Inaktivitätslimit | `8` |
+| `AGENDA_DETECTION_CHUNK_LINES` | Optionale zusätzliche Obergrenze für Detailausgaben; `0` plant nur nach Kontext-/Ausgabebudget | `0` |
+| `AGENDA_OUTPUT_TOKENS` / `AGENDA_OUTPUT_TOKENS_PER_LINE` | Antwortbudget und geschätzte Ausgabereserve je Detailzeile; gemeinsame Modellgrenzen gelten zusätzlich | `4096` / `256` |
+| `AGENDA_MODEL_ATTEMPTS` / `AGENDA_REPAIR_SPLIT_DEPTH` | Maximale Versuche je ungültiger Antwort / Reparaturteilungen; keine fachlichen Ersatzregeln | `2` / `3` |
+| `AGENDA_SOURCE_REQUEST_ROUNDS` | Zusätzliche Runden für vom Modell angeforderte Originalquellen | `2` |
+| `AGENDA_DETECTION_CHUNK_OVERLAP_LINES`, `AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE/AFTER`, `AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS`, `AGENDA_DETECTION_BOUNDARY_REVIEW_MAX_CALLS` | Veraltet; vollständige unabhängige Prüfung ersetzt Stichproben und heuristische Kontextfenster | – |
 | `PERSISTENCE_DB_PATH` | SQLite-Pfad im Backend-Container | `/app/data/sessions.sqlite3` |
 | `MAX_UPLOAD_BYTES` | maximale Uploadgröße | `524288000` |
 | `TRANSCRIPTION_CONCURRENCY` | Legacy-Einstellung; dauerhafte Jobs verwenden die gemeinsame serielle Warteschlange | `1` |
@@ -405,7 +405,7 @@ Natives Ollama benötigt ab diesem Vertrag Version 0.34.2; vorhandene Browser-/A
 mit `use_llm` bzw. `agenda_use_llm` den Serverstandard überschreiben;
 PDF-Extraktion und Zusammenfassungen sind davon unabhängig.
 Für CPU-Betrieb die Timeouts ausreichend hoch setzen: Sie gelten je Aufruf.
-Unsicherheiten und Fehler bleiben in der Prüfung sichtbar. Weitere Einstellungen
+Unsicherheiten und Fehler bleiben getrennt sichtbar. Bekannte und erkannte Agenden erhalten eine vollständige unabhängige Modellprüfung; technische Vollständigkeit und Modellübereinstimmung beweisen keine fachliche Richtigkeit. Gemeinsame Beratungen und TOP-Status werden quellengebunden in den Sitzungsvorschlägen gespeichert. Weitere Einstellungen
 stehen in der Konfigurationstabelle und in `.env.example`.
 
 ## GPU-Modus

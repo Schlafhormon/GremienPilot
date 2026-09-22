@@ -353,7 +353,13 @@ export interface AgendaDetectionRequest {
 }
 
 export interface AgendaLLMUsage {
-  provenance?: { model?: string; digest?: string; cache_namespace?: string; prompt_version?: string };
+  processing_complete?: boolean;
+  review_complete?: boolean;
+  review_required?: boolean;
+  line_results?: { line_id: string; index: number; top_ids: string[]; status: 'assigned' | 'unassigned' | 'not_processed'; reason: string; review_status: string; evidence: { line_id: string; quote: string }[] }[];
+  agenda_states?: { top_id: string; status: 'treated' | 'deferred' | 'removed' | 'not_evidenced'; reason: string; review_status: string; evidence: { line_id: string; quote: string }[] }[];
+  reconstructions?: { narrative: string }[];
+  provenance?: { identities?: { top_id: string; top_index: number; title: string; top_uid?: string }[]; model?: string; digest?: string; cache_namespace?: string; prompt_version?: string };
   enabled: boolean;
   source: "server_default" | "request";
   timeout_seconds: number;

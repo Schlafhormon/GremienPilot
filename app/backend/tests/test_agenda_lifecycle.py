@@ -10,7 +10,8 @@ import main
 import persistence
 
 
-def test_proposals_survive_edits_old_clients_and_revision_conflicts(tmp_path, monkeypatch):
+def test_proposals_survive_edits_old_clients_and_revision_conflicts(tmp_path, monkeypatch, agenda_model):
+    agenda_model.labels = {0: ["agenda:0"], 1: ["agenda:1"]}
     monkeypatch.setenv('PERSISTENCE_DB_PATH', str(tmp_path / 'sessions.sqlite3'))
     persistence.init_db()
     with TestClient(main.app) as client:
@@ -24,7 +25,7 @@ def test_proposals_survive_edits_old_clients_and_revision_conflicts(tmp_path, mo
         }).json()
         detected = client.post('/api/agenda-detection', json={
             'tops': session['tops'], 'transcript': session['transcript'],
-            'preserve_transcript_structure': True, 'use_llm': False,
+            'preserve_transcript_structure': True, 'use_llm': True,
         })
         assert detected.status_code == 200
         result = detected.json()
@@ -145,3 +146,23 @@ def test_slow_detection_does_not_block_health_or_session_requests(tmp_path, monk
         finally:
             release.set()
         assert request.result(timeout=2).status_code == 200
+
+
+def test_joint_decisions_and_agenda_status_roundtrip_without_replacing_manual_assignments(agenda_model):
+    agenda_model.labels = {0: ['a', 'b']}
+    agenda_model.states = {'a': 'treated', 'b': 'deferred'}
+    agenda_model.review_states = dict(agenda_model.states)
+    transcript = [{'line_id': 'original', 'speaker': 'S', 'text': 'Gemeinsam beraten und vertagt.', 'start': 3.125, 'end': 6.75}]
+    with TestClient(main.app) as client:
+        result = client.post('/api/agenda-detection', json={'tops': ['A', 'B'], 'top_ids': ['a', 'b'],
+            'transcript': transcript, 'use_llm': True, 'preserve_transcript_structure': True}).json()
+        assert result['llm']['line_results'][0]['top_ids'] == ['a', 'b']
+        assert result['assignments'] == [None]
+        source = {'tops': ['A', 'B'], 'top_ids': ['a', 'b'], 'transcript': transcript}
+        session = client.post('/api/sessions', json={**source, 'assignments': [1],
+            'agenda_proposals': {'version': 1, 'source': source, 'result': result}}).json()
+        restored = client.get('/api/sessions/' + session['session_id']).json()
+        assert restored['assignments'] == [1]
+        assert restored['transcript'] == transcript
+        assert restored['agenda_proposals']['result']['llm'] == result['llm']
+        assert restored['agenda_proposals']['result']['llm']['agenda_states'][1]['status'] == 'deferred'

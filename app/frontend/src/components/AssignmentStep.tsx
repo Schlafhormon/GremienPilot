@@ -167,6 +167,12 @@ export default function AssignmentStep({
     setSelectedLineIndex(segment.start_index);
   };
 
+  const isReviewedSegment = (segment: AssignmentSuggestionSegment) => {
+    const decisions = agendaDetection?.llm?.line_results;
+    return !decisions?.length || decisions.filter(line => line.index >= segment.start_index && line.index <= segment.end_index)
+      .every(line => ['agreed', 'resolved'].includes(line.review_status));
+  };
+
   const applyAllSafeSuggestions = () => {
     if (!agendaDetection || agendaDetectionStale) {
       return;
@@ -174,7 +180,7 @@ export default function AssignmentStep({
 
     const newAssignments = [...assignments];
     agendaDetection.segments
-      .filter((segment) => !segment.uncertain && segment.confidence >= 0.7)
+      .filter((segment) => !segment.uncertain && segment.confidence >= 0.7 && isReviewedSegment(segment))
       .forEach((segment) => {
         for (let i = segment.start_index; i <= segment.end_index; i++) {
           if (i >= 0 && i < newAssignments.length) {
@@ -508,13 +514,17 @@ export default function AssignmentStep({
   const selectedSegmentBounds =
     selectedLineIndex !== null ? getCurrentSegmentBounds(selectedLineIndex) : null;
   const detectedUnassignedCount = agendaDetection
-    ? transcript.filter((_, index) => agendaDetection.assignments[index] == null).length
+    ? (agendaDetection.llm?.line_results?.length
+      ? agendaDetection.llm.line_results.filter(line => line.status !== 'assigned').length
+      : transcript.filter((_, index) => agendaDetection.assignments[index] == null).length)
     : 0;
   const undetectedTops = agendaDetection
-    ? tops.filter((_, index) => !agendaDetection.segments.some((segment) => segment.top_index === index))
+    ? tops.filter((_, index) => !agendaDetection.segments.some((segment) => segment.top_index === index) &&
+        !agendaDetection.llm?.line_results?.some(line => line.top_ids.some(id =>
+          agendaDetection.llm?.provenance?.identities?.some(top => top.top_id === id && top.top_index === index))))
     : [];
   const safeSuggestionCount =
-    agendaDetection?.segments.filter((segment) => !segment.uncertain && segment.confidence >= 0.7)
+    agendaDetection?.segments.filter((segment) => !segment.uncertain && segment.confidence >= 0.7 && isReviewedSegment(segment))
       .length ?? 0;
   const speakerIds = Array.from(new Set(transcript.map((line) => line.speaker).filter(Boolean)));
   const openSpeakerCount = speakerIds.filter((speakerId) => {
@@ -914,13 +924,13 @@ export default function AssignmentStep({
             {onDetectAgenda && <button
               type="button"
               onClick={() => onDetectAgenda()}
-              disabled={isDetectingAgenda || !hasTops || !transcript.length}
+              disabled={isDetectingAgenda || !transcript.length}
               className="px-4 py-2 border rounded-lg disabled:text-gray-400"
             >{isDetectingAgenda ? 'TOP-Erkennung läuft …' : 'TOP-Erkennung erneut berechnen'}</button>}
             {onDetectAgenda && <button
               type="button"
               onClick={() => onDetectAgenda(true)}
-              disabled={isDetectingAgenda || !hasTops || !transcript.length}
+              disabled={isDetectingAgenda || !transcript.length}
               className="px-4 py-2 border rounded-lg disabled:text-gray-400"
               title="Neue Modellantworten verwenden; vorhandene Ergebnisse bleiben im Cache erhalten"
             >Frische TOP-Berechnung</button>}
@@ -948,11 +958,46 @@ export default function AssignmentStep({
         ))}
         {agendaDetection?.llm?.chunks && (
           <p className="text-sm text-gray-600">
-            {agendaDetection.llm.status === 'success' ? 'Technisch vollständig verarbeitet' : 'Technische Verarbeitung prüfen'}
+            {(agendaDetection.llm.processing_complete ?? agendaDetection.llm.status === 'success') ? 'Technisch vollständig verarbeitet' : 'Technische Verarbeitung prüfen'}
             {' · '}{agendaDetection.llm.attempted_calls} neue Modellaufrufe
             {' · '}{agendaDetection.llm.chunks.filter((c) => c.status === 'cached').length} Cache-Treffer.
-            {' '}Die fachliche Zuordnung bleibt prüfpflichtig.
+            {' '}{agendaDetection.llm.review_complete ? 'Unabhängige Modellprüfung abgeschlossen; dies ist kein Nachweis fachlicher Richtigkeit.' : 'Unabhängige Modellprüfung offen. Die fachliche Zuordnung bleibt prüfpflichtig.'}
           </p>
+        )}
+        {!agendaDetectionStale && Boolean(agendaDetection?.llm?.reconstructions?.length) && (
+          <details className="mb-3 rounded border p-3 text-sm">
+            <summary>Rekonstruierter Sitzungsverlauf</summary>
+            {agendaDetection?.llm?.reconstructions?.map((pass, index) => (
+              <p key={index} className="mt-2 whitespace-pre-wrap"><strong>{index === 0 ? 'Erste Auswertung: ' : 'Unabhängige Prüfung: '}</strong>{pass.narrative}</p>
+            ))}
+          </details>
+        )}
+        {!agendaDetectionStale && Boolean(agendaDetection?.llm?.agenda_states?.length) && (
+          <details className="mb-3 rounded border p-3 text-sm">
+            <summary>Modellgestützter TOP-Status</summary>
+            <ul>{agendaDetection?.llm?.agenda_states?.map(state => (
+              <li key={state.top_id} className="mt-2">
+                <strong>{agendaDetection.llm?.provenance?.identities?.find(top => top.top_id === state.top_id)?.title ?? state.top_id}</strong>
+                {' – '}{({ treated: 'Behandelt', deferred: 'Vertagt', removed: 'Abgesetzt', not_evidenced: 'Nicht nachweisbar' })[state.status]}
+                {': '}{state.reason}
+                {!['agreed', 'resolved'].includes(state.review_status) && ' · Prüfung offen'}
+              </li>
+            ))}</ul>
+          </details>
+        )}
+        {!agendaDetectionStale && Boolean(agendaDetection?.llm?.line_results?.length) && (
+          <details className="mb-3 rounded border p-3 text-sm">
+            <summary>Zuordnungs- und Prüfstatus aller Transkriptzeilen</summary>
+            <ul>{agendaDetection?.llm?.line_results?.map(line => (
+              <li key={line.line_id} className="mt-2">
+                Zeile {line.index + 1}: {line.status === 'not_processed' ? 'Technisch nicht verarbeitet' : line.status === 'unassigned' ? 'Fachlich begründet unzugeordnet' : line.top_ids.length > 1 ? 'Gemeinsame Beratung' : 'Zugeordnet'}
+                {line.top_ids.length > 0 && ': ' + line.top_ids.map(id => agendaDetection.llm?.provenance?.identities?.find(top => top.top_id === id)?.title ?? id).join(' / ')}
+                {' – '}{line.reason}
+                {['agreed', 'resolved'].includes(line.review_status) ? ' · Modellgeprüft' : line.review_status === 'technical_pending' ? ' · Technische Prüflücke' : ' · Prüfung offen'}
+                {line.top_ids.length > 1 && <span> · Als gemeinsamer Vorschlag gespeichert; keine automatische Einzelzuordnung.</span>}
+              </li>
+            ))}</ul>
+          </details>
         )}
         {!agendaDetectionStale && Boolean(agendaDetection?.llm?.gaps?.length) && (
           <details className="mb-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
@@ -961,7 +1006,7 @@ export default function AssignmentStep({
               {agendaDetection?.llm?.gaps?.map((gap) => (
                 <li key={`${gap.start_index}-${gap.end_index}`}>
                   Zeilen {gap.start_index + 1}–{gap.end_index + 1}: {gap.kind === 'technical'
-                    ? 'Technisch nicht ausgewertet' : 'Inhaltlich unklar'} – {gap.reason}
+                    ? 'Technisch nicht ausgewertet' : 'Fachlich begründet unzugeordnet'} – {gap.reason}
                 </li>
               ))}
             </ul>
@@ -999,7 +1044,7 @@ export default function AssignmentStep({
                           </span>
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
-                          Zeilen {segment.start_index + 1}-{segment.end_index + 1} · Evidenz am Anfang{' '}
+                          Zeilen {segment.start_index + 1}-{segment.end_index + 1} · Modellbewertung{' '}
                           {Math.round(segment.confidence * 100)}/100
                         </div>
                         {segment.uncertain && (

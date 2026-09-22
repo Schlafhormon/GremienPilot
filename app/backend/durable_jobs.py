@@ -78,7 +78,8 @@ def version_snapshot():
     # Code hashes include prompts, validators and chunking policy. No credentials.
     from llm_config import get_llm_config
     files = ("summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_detection.py",
-             "extract_tops.py", "llm_transport.py", "main.py")
+             "extract_tops.py", "llm_transport.py", "main.py", "agenda_context.py",
+             "agenda_labels.py", "assignment_suggestions.py")
     policy_keys = (
         "PDF_RENDER_DPI", "PDF_MAX_PAGE_PIXELS", "PDF_MAX_PAGES", "PDF_OUTPUT_TOKENS",
         "PDF_MODEL_ATTEMPTS", "PDF_REVIEW_ROUNDS",
@@ -87,7 +88,8 @@ def version_snapshot():
         "LLM_SUMMARY_FACT_REVIEW_THINK", "LLM_SUMMARY_GROUNDING_MAX_CALLS", "LLM_SUMMARY_GROUNDING_THINK",
         "AGENDA_DETECTION_USE_LLM", "AGENDA_DETECTION_CHUNK_LINES", "AGENDA_DETECTION_CHUNK_OVERLAP_LINES",
         "AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE", "AGENDA_DETECTION_CONTEXT_WINDOW_AFTER",
-        "AGENDA_DETECTION_BOUNDARY_REVIEW_MAX_CALLS", "AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS",
+        "AGENDA_OUTPUT_TOKENS", "AGENDA_OUTPUT_TOKENS_PER_LINE", "AGENDA_REPAIR_SPLIT_DEPTH",
+        "AGENDA_MODEL_ATTEMPTS", "AGENDA_SOURCE_REQUEST_ROUNDS",
     )
     return {"model": get_llm_config().public_snapshot(), "policy": {
         key: os.environ.get(key) for key in policy_keys
@@ -174,6 +176,8 @@ def progress(value):
             if 'elapsed_seconds' in value:
                 row = db.execute('SELECT progress FROM durable_jobs WHERE job_id=?', (ctx.job_id,)).fetchone()
                 previous = json.loads(row[0]) if row and row[0] else {}
+                if previous.get('agenda_phase'):
+                    value = {**{k: previous[k] for k in ('agenda_phase', 'processed_lines', 'total_lines', 'model_calls') if k in previous}, **value}
                 phase = previous.get('pdf_phase', previous.get('phase', ''))
                 if phase.startswith('pdf_') and phase != 'pdf_verified':
                     value = {**{k: previous[k] for k in ('page', 'total_pages', 'round') if k in previous},

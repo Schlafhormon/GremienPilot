@@ -1401,7 +1401,7 @@ export default function App() {
       const result = await detectAgenda({
         tops, transcript, model: llmSettings.model,
         fresh, topIds, signal: controller.signal,
-        onStatus: job => setAgendaJobPhase(job.state === 'queued' ? 'Wartet auf Verarbeitung' : job.state === 'retry_wait' ? 'Vorübergehend gestört; erneuter Versuch folgt' : job.progress?.phase === 'loading' ? 'Modell lädt / wartet auf erste Ausgabe' : 'TOP-Erkennung läuft …'),
+        onStatus: job => setAgendaJobPhase(job.state === 'queued' ? 'Wartet auf Verarbeitung' : job.state === 'retry_wait' ? 'Vorübergehend gestört; erneuter Versuch folgt' : (job.progress?.agenda_phase ?? job.progress?.phase)?.startsWith('independent') ? 'Unabhängige Quellenprüfung läuft …' : (job.progress?.agenda_phase ?? job.progress?.phase)?.startsWith('resolve') ? 'Abweichungen werden geklärt …' : job.progress?.phase === 'loading' ? 'Modell lädt / wartet auf erste Ausgabe' : 'Sitzungsverlauf und Zuordnungen werden ermittelt …'),
         preserveTranscriptStructure: true,
       });
       if (requestId !== agendaRequestRef.current) return;
@@ -1409,11 +1409,26 @@ export default function App() {
         setAgendaDetectionError("TOPs oder Transkript wurden während der Erkennung geändert. Bitte erneut berechnen");
         return;
       }
-      const proposals: AgendaProposals = { version: 1, source: { ...source, pdf_extraction: agendaProposals?.source?.pdf_extraction ?? pdfExtraction }, result };
-      if (!proposalsAreValid(proposals, tops, topIds, transcript)) {
+      // Models may append independently reviewed additions, preserving every
+      // existing title, identity and manual line assignment.
+      if (result.tops.length < tops.length || tops.some((title, index) => result.tops[index] !== title)) {
+        throw new Error("Das Ergebnis verändert vorhandene Tagesordnungspunkte");
+      }
+      const nextTopIds = [...topIds, ...result.tops.slice(tops.length).map((_, offset) => {
+        const item = result.llm?.provenance?.identities?.find(top => top.top_index === tops.length + offset);
+        return item?.top_uid ?? item?.top_id ?? crypto.randomUUID();
+      })];
+      const proposals: AgendaProposals = { version: 1, source: { ...source,
+        tops: result.tops, top_ids: nextTopIds,
+        pdf_extraction: agendaProposals?.source?.pdf_extraction ?? pdfExtraction }, result };
+      if (!proposalsAreValid(proposals, result.tops, nextTopIds, transcript)) {
         throw new Error("Das Ergebnis passt nicht zum aktuellen Transkript oder zur Tagesordnung");
       }
-      // Detection only offers evidence. Even edits made while awaiting it remain untouched.
+      if (result.tops.length > tops.length) {
+        setTops(result.tops);
+        setTopIds(nextTopIds);
+      }
+      // Even manual assignments made while awaiting detection remain untouched.
       setAgendaProposals(proposals);
     } catch (error) {
       if (requestId === agendaRequestRef.current) {

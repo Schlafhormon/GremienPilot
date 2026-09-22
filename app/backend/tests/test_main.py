@@ -49,8 +49,7 @@ def configure_test_app(tmp_path, monkeypatch, *, concurrency=1):
 ])
 def test_pipeline_routes_prompts_to_actual_model_messages(
     tmp_path, monkeypatch, fake_openai_module, frontend_summary_prompt,
-    agenda_source, prompt_mode,
-):
+    agenda_source, prompt_mode, agenda_model):
     configure_test_app(tmp_path, monkeypatch)
     monkeypatch.setattr(main, "transcribe_audio", lambda *args, **kwargs: FakeTranscriptionResult(
         transcript=[{"speaker": "MOD", "text": "TOP 1 Haushalt.", "start": 0.0, "end": 2.0}],
@@ -84,15 +83,8 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         data["auto_detect_tops_from_pdf"] = "true"
         files["pdf"] = ("agenda.pdf", pdf_bytes(), "application/pdf")
         fake_openai_module.responses.extend(json.dumps(v) for v in [agenda(), agenda(), audit()])
-    fake_openai_module.responses.extend([
-        json.dumps({"tops": [{
-            **({"top_id": "unspecified:unnumbered"} if agenda_source != "transcript" else {}),
-            "top_title": "Haushalt", "start_index": 0, "end_index": 0,
-            "confidence": 0.9, "evidence_index": 0, "evidence_text": "TOP 1 Haushalt.", "reason": "Aufruf Haushalt",
-        }]}),
-        json.dumps({"discussion": ["Der Haushalt wurde beraten."], "decisions": [], "votes": [],
-                    "action_items": [], "open_points": [], "uncertainties": []}),
-    ])
+    fake_openai_module.responses.append(json.dumps({"discussion": ["Der Haushalt wurde beraten."],
+        "decisions": [], "votes": [], "action_items": [], "open_points": [], "uncertainties": []}))
     with TestClient(main.app) as client:
         response = client.post("/api/pipeline/start", data=data, files=files)
         assert response.status_code == 200
@@ -101,26 +93,21 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
     calls = [call for instance in fake_openai_module.instances for call in instance.calls]
-    assert len(calls) == (5 if agenda_source == "pdf" else 2)
-    from agenda_llm import PROMPT
-    contracts = [agenda_detection.DEFAULT_AGENDA_DETECTION_PROMPT if agenda_source == "transcript" else PROMPT, summarize.DEFAULT_SYSTEM_PROMPT]
-    prompt_keys = ["agenda_system_prompt", "summary_system_prompt"]
-    if agenda_source == "pdf":
-        contracts[:0] = [extract_tops.DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT] * 2 + [extract_tops.AUDIT_PROMPT]
-        prompt_keys[:0] = ["pdf_system_prompt"] * 2 + ["audit"]
-    for call, contract, key in zip(calls, contracts, prompt_keys):
-        assert call["model"] == "test-model"
-        assert [message["role"] for message in call["messages"]] == ["system", "user"]
-        prompt = call["messages"][0]["content"]
-        assert contract in prompt
-        assert "OVERRIDDEN_OPTION" not in prompt
-        assert (frontend_summary_prompt in prompt) == (key == "summary_system_prompt" and prompt_mode.startswith("legacy"))
+    assert len(calls) == (4 if agenda_source == "pdf" else 1)
+    assert len(agenda_model.calls) == 6
+    routed = [(call, 'agenda_system_prompt') for _, call in agenda_model.calls]
+    routed += [(call, 'pdf_system_prompt' if i < 2 else 'audit') for i, call in enumerate(calls[:-1])]
+    routed += [(calls[-1], 'summary_system_prompt')]
+    for call, key in routed:
+        assert call['model'] == 'test-model'
+        prompt = call['messages'][0]['content']
+        assert 'OVERRIDDEN_OPTION' not in prompt
+        assert (frontend_summary_prompt in prompt) == (key == 'summary_system_prompt' and prompt_mode.startswith('legacy'))
         for scoped_key, custom_prompt in scoped.items():
-            assert (custom_prompt in prompt) == (prompt_mode.startswith("scoped_") and key == scoped_key)
-    assert ("0: MOD" if agenda_source == "transcript" else '"index": 0') in calls[-2]["messages"][1]["content"]
-    expected_top = "TOP 1 Haushalt" if agenda_source == "transcript" else "Haushalt"
-    assert f"TOP: {expected_top}" in calls[-1]["messages"][1]["content"]
-    assert result["session"]["tops"] == [expected_top]
+            assert (custom_prompt in prompt) == (prompt_mode.startswith('scoped_') and key == scoped_key)
+    expected_top = 'Haushalt'
+    assert f'TOP: {expected_top}' in calls[-1]['messages'][1]['content']
+    assert result['session']['tops'] == [expected_top]
     assert result["session"]["assignments"] == [0]
     proposals = result["session"]["agenda_proposals"]
     assert {key: proposals["source"][key] for key in ("tops", "top_ids", "transcript")} == {
@@ -129,9 +116,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
     assert proposals["result"]["assignments"] == [0]
     persisted = persistence.load_session(result["session"]["session_id"])
     assert persisted["agenda_proposals"] == proposals
-    assert result["agenda_detection"]["strategy"] == (
-        "heuristic_transcript_llm" if agenda_source == "transcript" else "known_agenda_llm_complete"
-    )
+    assert result["agenda_detection"]["strategy"] == "model_agenda_v1"
     assert result["session"]["summary_reviews"]["0"]["fallback_used"] is False
 
 
@@ -569,7 +554,8 @@ def test_extract_tops_endpoint_returns_metadata(tmp_path, monkeypatch):
     assert body["metadata"]["date"] == "2026-06-30"
 
 
-def test_assignment_suggestions_endpoint_returns_reviewable_segments():
+def test_assignment_suggestions_endpoint_returns_reviewable_segments(agenda_model):
+    agenda_model.labels = {0: [], 1: ["agenda:1"]}
     with TestClient(main.app) as client:
         response = client.post(
             "/api/assignment-suggestions",
@@ -599,7 +585,13 @@ def test_assignment_suggestions_endpoint_returns_reviewable_segments():
     assert data["segments"][0]["reason"]
 
 
-def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
+def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list(agenda_model):
+    agenda_model.labels = {0: ['detected:0'], 1: ['detected:0'], 2: ['detected:1']}
+    def inventory(body):
+        rows = body['context']['original_transcript']
+        return {'items': [{'title': title, 'number': number, 'section': None,
+            'evidence': agenda_model.evidence(rows[index])} for title, number, index in [('Haushalt', '1', 0), ('Schulbau', '2', 2)]], 'reason': 'Belegte Agenda'}
+    agenda_model.overrides.update({'primary:discover': inventory, 'independent:discover': inventory})
     with TestClient(main.app) as client:
         response = client.post(
             "/api/agenda-detection",
@@ -629,10 +621,10 @@ def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
+    assert data["tops"] == ["1. Haushalt", "2. Schulbau"]
     assert data["assignments"] == [0, 0, 1]
     assert data["segments"][0]["evidence_text"] == "Kommen wir zu TOP 1 Haushalt."
-    assert data["strategy"] == "heuristic_transcript_fallback"
+    assert data["strategy"] == "model_agenda_v1"
 
 
 @pytest.mark.parametrize("tops", [[], ["Haushalt", "Schulbau"]])
@@ -664,7 +656,8 @@ def test_agenda_detection_endpoint_retains_short_tail_on_repeated_requests(tops)
         assert repeated.json()["transcript"] == lines
         assert repeated.json()["assignments"] == data["assignments"]
 
-def test_agenda_detection_endpoint_splits_mid_utterance_top_transition():
+def test_agenda_detection_endpoint_splits_mid_utterance_top_transition(agenda_model):
+    agenda_model.labels = {i: ["agenda:0" if i < 3 else "agenda:2"] for i in range(5)}
     with TestClient(main.app) as client:
         response = client.post(
             "/api/agenda-detection",
@@ -720,8 +713,8 @@ def test_llm_diagnostics_endpoint_reports_configured_model(fake_openai_module):
 
 
 def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clear(
-    tmp_path, monkeypatch
-):
+    tmp_path, monkeypatch, agenda_model):
+    agenda_model.labels = {0: ['agenda:0'], 1: ['agenda:0'], 2: ['agenda:1']}
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
 
     def fake_transcribe(file_path, models, progress_callback=None):
@@ -1112,7 +1105,8 @@ def test_shared_session_history_and_conflict_response(tmp_path, monkeypatch):
         assert conflict_response.json()["detail"]["actual_revision"] > saved["revision"]
 
 
-def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypatch):
+def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypatch, agenda_model):
+    agenda_model.labels = {0: ['agenda:0'], 1: ['agenda:1']}
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
     extracted_calls = []
 
@@ -1277,7 +1271,7 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
     assert result["agenda_detection"]["tops"] == known_tops
 
 
-def test_pipeline_falls_back_to_full_conversation_when_agenda_detection_fails(
+def test_pipeline_failure_keeps_technical_gap_without_invented_agenda(
     tmp_path, monkeypatch
 ):
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
@@ -1326,13 +1320,13 @@ def test_pipeline_falls_back_to_full_conversation_when_agenda_detection_fails(
         )
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
-    assert result["session"]["tops"] == ["Gesamtes Gespräch"]
-    assert result["session"]["assignments"] == [0]
+    assert result["session"]["tops"] == []
+    assert result["session"]["assignments"] == [None]
     assert result["warnings"]
-    assert result["agenda_detection"]["tops"] == ["Gesamtes Gespräch"]
-    assert result["agenda_detection"]["assignments"] == [0]
-    assert result["agenda_detection"]["uncertain_count"] == 1
-    assert result["agenda_detection"]["strategy"] == "pipeline_fallback_full_conversation"
+    assert result["agenda_detection"]["tops"] == []
+    assert result["agenda_detection"]["assignments"] == [None]
+    assert result["agenda_detection"]["uncertain_count"] == 0
+    assert result["agenda_detection"]["strategy"] == "known_agenda_failed"
 
 
 def test_pipeline_without_tops_stays_on_review_step_for_speaker_assignment(
@@ -1477,8 +1471,8 @@ def test_pipeline_result_exposes_agenda_segments_and_uncertainty(
 
 
 def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
-    tmp_path, monkeypatch
-):
+    tmp_path, monkeypatch, agenda_model):
+    agenda_model.labels = {0: ['agenda:0'], 1: ['agenda:1']}
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
 
     monkeypatch.setattr(
@@ -1537,7 +1531,7 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
 
 
 @pytest.mark.parametrize('grounding_incomplete', [False, True])
-def test_pipeline_persists_incomplete_source_check_without_losing_draft(tmp_path, monkeypatch, grounding_incomplete):
+def test_pipeline_persists_incomplete_source_check_without_losing_draft(tmp_path, monkeypatch, grounding_incomplete, agenda_model):
     configure_test_app(tmp_path, monkeypatch)
     monkeypatch.setattr(main, 'transcribe_audio', lambda *args, **kwargs: FakeTranscriptionResult(
         transcript=[{'speaker': 'MOD', 'text': 'Kommen wir zu TOP 1 Haushalt.', 'start': 0, 'end': 2}],
@@ -1547,7 +1541,7 @@ def test_pipeline_persists_incomplete_source_check_without_losing_draft(tmp_path
         llm_usage={'grounding_incomplete': grounding_incomplete}))
     with TestClient(main.app) as client:
         started = client.post('/api/pipeline/start', data={
-            'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'false',
+            'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'true',
         }, files={'audio': ('meeting.mp3', b'audio', 'audio/mpeg')})
         pipeline_id = started.json()['pipeline_id']
         assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == ('failed' if grounding_incomplete else 'completed'))
@@ -1733,8 +1727,8 @@ def test_agenda_api_explicit_llm_policy(monkeypatch, fake_openai_module, known_t
         assert response.status_code == 200
         data = response.json()
         assert data["llm"]["enabled"] is enabled
-        assert data["llm"]["status"] == (("failed" if known_tops else "fallback") if enabled else "disabled")
-        assert bool(data["warnings"]) is enabled
+        assert data["llm"]["status"] == ("failed" if enabled else "disabled")
+        assert data["warnings"]
         assert "SECRET" not in response.text
 
 @pytest.mark.parametrize("decision", ["false", "true", 1, 0, [], {}])
@@ -1776,16 +1770,17 @@ def test_pipeline_llm_policy_and_persisted_fallback(
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
     usage = result["agenda_detection"]["llm"]
     assert usage["enabled"] is enabled
-    assert usage["status"] == ("fallback" if enabled else "disabled")
+    assert usage["status"] == ("failed" if enabled else "disabled")
     assert usage["source"] == ("server_default" if option_value is None and form_value is None else "request")
     assert len(fake_openai_module.instances) == int(enabled)
     if enabled:
         assert result["agenda_detection"]["warnings"]
-        assert any("timeout" in warning for warning in result["warnings"])
+        assert result["warnings"]
     assert "SECRET" not in str(result)
 
 
-def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path, monkeypatch, fake_openai_module):
+def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path, monkeypatch, fake_openai_module, agenda_model):
+    agenda_model.labels = {i: [f"agenda:{i//2}"] for i in range(8)}
     from io import BytesIO
     from reportlab.pdfgen.canvas import Canvas
 
@@ -1807,7 +1802,7 @@ def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path,
         tops = response.json()['tops']
         assert tops == ['[Öffentlich] 2 Haushalt', '[Öffentlich] 2.1 Schulbau', '[Öffentlich] 7 Anfragen', '[Nichtöffentlich] 2 Vergabe']
         response = client.post('/api/agenda-detection', json={
-            'tops': tops, 'use_llm': False,
+            'tops': tops, 'use_llm': True,
             'transcript': [{'speaker': 'MOD', 'text': text, 'start': i, 'end': i+1} for i, text in enumerate([
                 'TOP 2 öffentlich Haushalt', 'Beratung', 'TOP 2.1 Schulbau', 'Beratung',
                 'TOP sieben Anfragen', 'Beratung', 'TOP 2 Vergabe', 'Beratung',
@@ -1818,8 +1813,8 @@ def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path,
         assert result['tops'] == tops
         assert not result['segments'][1]['uncertain']
         assert not result['segments'][2]['uncertain']
-        assert result['assignments'][6:] == [None, None]
-        assert len(result['segments']) == 3
+        assert result['assignments'][6:] == [3, 3]
+        assert len(result['segments']) == 4
 
 def test_pipeline_known_fallback_keeps_absence_of_evidence_visible(monkeypatch):
     transcript = [{'speaker': 'A', 'text': 'Allgemeine Diskussion.'}]
