@@ -111,7 +111,7 @@ def test_llm_invalid_boundaries_are_repaired(fake_openai_module):
     assert not request["messages"][0]["content"].startswith("/no_think")
 
 
-def test_llm_reasoning_field_is_used_when_content_is_empty(fake_openai_module):
+def test_llm_reasoning_field_is_never_used_as_final_content(fake_openai_module):
     fake_openai_module.content = ""
     fake_openai_module.reasoning = """
     {"tops": [
@@ -132,7 +132,8 @@ def test_llm_reasoning_field_is_used_when_content_is_empty(fake_openai_module):
 
     result = detect_agenda_from_transcript(transcript, model="test-model", use_llm=True)
 
-    assert result.strategy == "heuristic_transcript_llm"
+    assert result.strategy == "heuristic_transcript_llm_fallback"
+    assert result.llm.failed_calls == 1
     assert result.tops == ["TOP 1 Haushalt"]
     assert result.assignments == [0, 0]
 
@@ -251,7 +252,7 @@ def test_actual_client_timeout_and_retry_policy(monkeypatch, fake_openai_module)
     monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_TIMEOUT_SECONDS", 1.25)
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "999")
     detect_agenda_from_transcript([TranscriptUtterance("MOD", "TOP 1 Haushalt.")], use_llm=True)
-    assert fake_openai_module.instances[0].kwargs["timeout"] == 1.25
+    assert fake_openai_module.instances[0].kwargs["timeout"].read == 999
     assert fake_openai_module.instances[0].kwargs["max_retries"] == 0
 
 

@@ -45,7 +45,7 @@ if ($PROTOKOLL_IMAGE_TAG) {
 
 $OLLAMA_IMAGE_TAG = if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE_TAG } else { "latest" }
 $OLLAMA_IMAGE = if ($env:OLLAMA_IMAGE) { $env:OLLAMA_IMAGE } else { "ollama/ollama:${OLLAMA_IMAGE_TAG}" }
-$OLLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "qwen3:8b" }
+$OLLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "gemma4:31b-it-q4_K_M" }
 
 $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
 $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE

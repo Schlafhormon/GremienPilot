@@ -65,8 +65,8 @@ def test_extract_tops_from_text_uses_openai_client_and_parses_response(fake_open
 
 def test_build_extraction_system_prompt_does_not_duplicate_no_think():
     prompt = build_extraction_system_prompt("/no_think\nNur TOPs")
-    assert prompt.startswith("/no_think\n")
-    assert prompt.count("/no_think") == 1
+    assert "/no_think" not in prompt
+    assert prompt.count("/no_think") == 0
     assert DEFAULT_EXTRACTION_PROMPT in prompt
     assert "Nur TOPs" in prompt
 
@@ -77,7 +77,7 @@ def test_build_extraction_system_prompt_does_not_duplicate_no_think():
 ])
 @pytest.mark.parametrize("custom_prompt", [None, "", "   ", "/no_think"])
 def test_extraction_defaults_preserve_contract(builder, default, custom_prompt):
-    assert builder(custom_prompt) == f"/no_think\n{default}"
+    assert builder(custom_prompt) == default
 
 
 @pytest.mark.parametrize("extract, default, response", [

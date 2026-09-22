@@ -7,8 +7,11 @@ using pdfplumber for text extraction and Ollama LLM for intelligent parsing.
 Configuration via environment variables:
 - LLM_BASE_URL: API endpoint (local default: http://localhost:11434/v1,
   Docker default: http://ollama:11434/v1)
-- LLM_MODEL: Model name (default: qwen3:8b)
+- LLM_MODEL: Model name (default: gemma4:31b-it-q4_K_M)
 """
+from llm_config import configured
+from llm_transport import LLMCancelledError
+
 
 import logging
 import os
@@ -24,7 +27,7 @@ from llm_transport import complete
 logger = logging.getLogger(__name__)
 
 # LLM server configuration (same as summarize.py)
-LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gemma4:31b-it-q4_K_M")
 LLM_BASE_URL = get_llm_config().base_url
 LLM_API_KEY = get_llm_config().api_key
 NO_THINK_DIRECTIVE = "/no_think"
@@ -112,12 +115,7 @@ def _build_extraction_prompt(base_prompt: str, system_prompt: Optional[str]) -> 
     custom_prompt = (system_prompt or "").strip()
     if custom_prompt.startswith(NO_THINK_DIRECTIVE):
         custom_prompt = custom_prompt[len(NO_THINK_DIRECTIVE):].strip()
-    # Preserve the legacy Qwen3 prompt when no API setting was supplied. An
-    # explicit reasoning mode is controlled solely by the API, including none.
-    prompt = (
-        f"{NO_THINK_DIRECTIVE}\n{base_prompt}"
-        if get_llm_config().reasoning_effort is None else base_prompt
-    )
+    prompt = base_prompt
     if custom_prompt and custom_prompt != base_prompt.strip():
         prompt += (
             "\n\nZusätzliche fachliche Vorgaben des Nutzers. Diese nur anwenden, "
@@ -353,6 +351,8 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         logger.info(f"Total extracted text: {len(full_text)} characters from {len(text_parts)} pages")
         return full_text
 
+    except LLMCancelledError:
+        raise
     except Exception as e:
         logger.error(
             "Failed to extract text from uploaded PDF (%s)",
@@ -361,6 +361,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         raise RuntimeError(f"PDF-Text konnte nicht extrahiert werden: {str(e)}")
 
 
+@configured
 def extract_tops_from_text(
     pdf_text: str,
     model: Optional[str] = None,
@@ -371,7 +372,7 @@ def extract_tops_from_text(
 
     Args:
         pdf_text: Full text extracted from the PDF
-        model: LLM model to use (default: from env or qwen3:8b)
+        model: LLM model to use (default: from env or gemma4:31b-it-q4_K_M)
         system_prompt: Optional context supplementing the mandatory extraction prompt
 
     Returns:
@@ -396,8 +397,8 @@ def extract_tops_from_text(
     client = OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
-        timeout=config.timeout_seconds,
-        max_retries=LLM_MAX_RETRIES,
+        timeout=config.http_timeout,
+        max_retries=0,
     )
 
     user_prompt = f"""Extrahiere alle Tagesordnungspunkte aus diesem Einladungsdokument:
@@ -427,6 +428,8 @@ TOPs:"""
 
         return tops
 
+    except LLMCancelledError:
+        raise
     except Exception as e:
         logger.error("LLM TOP extraction failed (%s)", e.__class__.__name__)
         raise RuntimeError(f"TOP-Extraktion fehlgeschlagen: {str(e)}")
@@ -563,6 +566,7 @@ def extract_tops_from_pdf(
     return extract_tops_from_text(pdf_text, model, system_prompt)
 
 
+@configured
 def extract_agenda_data_from_text(
     pdf_text: str,
     model: Optional[str] = None,
@@ -596,8 +600,8 @@ def extract_agenda_data_from_text(
     client = OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
-        timeout=config.timeout_seconds,
-        max_retries=LLM_MAX_RETRIES,
+        timeout=config.http_timeout,
+        max_retries=0,
     )
 
     user_prompt = f"""Extrahiere Tagesordnungspunkte und Sitzungsmetadaten aus diesem Einladungsdokument:
@@ -629,6 +633,8 @@ JSON:"""
         )
         return result
 
+    except LLMCancelledError:
+        raise
     except Exception as e:
         logger.error("LLM agenda data extraction failed (%s)", e.__class__.__name__)
         raise RuntimeError(f"PDF-Datenextraktion fehlgeschlagen: {str(e)}")

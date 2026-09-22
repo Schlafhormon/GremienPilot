@@ -57,9 +57,9 @@ def gpu_slot(check_cancel=None):
 
 
 @contextmanager
-def llm_gpu_slot(config):
-    if switching_enabled() and config.uses_ollama:
-        with gpu_slot():
+def llm_gpu_slot(config, check_cancel=None):
+    if switching_enabled() and (config.uses_local_ollama or config.uses_internal_ollama):
+        with gpu_slot(check_cancel):
             yield
     else:
         yield
@@ -71,7 +71,7 @@ def unload_local_ollama(config, check_cancel=None):
 Call only while holding gpu_slot. Refuse to load Whisper if Ollama cannot
 confirm the handover, including after a timed-out inference request.
 """
-    if not config.uses_ollama:
+    if not (config.uses_local_ollama or config.uses_internal_ollama):
         return
     import httpx
 

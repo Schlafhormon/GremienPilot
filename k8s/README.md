@@ -60,6 +60,7 @@ k8s/
 | `WHISPER_LANGUAGE` | `de` | Audio language |
 | `LLM_BASE_URL` | `https://api.aisc.hpi.de` | AISC LLM API endpoint |
 | `LLM_MODEL` | `llama-3-3-70b` | Model name for summarization |
+| `LLM_PROVIDER` | `openai-compatible` | Provider contract; model IDs must exist on that server |
 | `LLM_TIMEOUT_SECONDS` | `120` | Summary/diagnostics request timeout (not transcript agenda detection) |
 | `LLM_MAX_RETRIES` | `2` | Retries for transient LLM errors |
 | `LLM_RETRY_BACKOFF_SECONDS` | `0.5` | Backoff between retries |
@@ -198,3 +199,5 @@ Agenda detection uses the `AGENDA_DETECTION_*` values in
 retries). Explicit API `use_llm` / pipeline `agenda_use_llm` overrides the server
 default; model/prompt alone does not enable it. See the [configuration contract](../README.md#llm-nutzung-für-automatische-top-zuordnung).
 Restart backend pods after ConfigMap changes to load the new values.
+
+Model/stream settings are shared with Compose: [configuration](../docs/llm-configuration.md). For native Ollama, configure server load/KV-cache settings on the separate model deployment and mount optional local tokenizer assets into the backend.

@@ -8,13 +8,16 @@ the backend internally works with structured minutes fields.
 Configuration via environment variables:
 - LLM_BASE_URL: API endpoint (local default: http://localhost:11434/v1,
   Docker default: http://ollama:11434/v1)
-- LLM_MODEL: Model name (default: qwen3:8b)
+- LLM_MODEL: Model name (default: gemma4:31b-it-q4_K_M)
 - LLM_REASONING_EFFORT: empty for server default, none to disable, or low/medium/high/max
 - LLM_TIMEOUT_SECONDS: request timeout per LLM call (default: 120)
 - LLM_MAX_RETRIES: retry count for transient LLM errors (default: 2)
 - LLM_CHUNK_CHARS: target chunk size for long TOP transcripts (default: 12000)
 - LLM_STRUCTURED_FALLBACK: free-text fallback on structured failure (default: true)
 """
+from llm_config import configured
+from llm_transport import LLMCancelledError
+
 
 import json
 import os
@@ -25,111 +28,21 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 from llm_transport import complete, fits, structured_output_budget, ContextBudgetError, cache_key, cache_read, cache_write
 
-# LLM server configuration (Ollama)
-LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
-DOCKER_OLLAMA_BASE_URL = "http://ollama:11434/v1"
-LOCAL_LLM_HOSTS = {"localhost", "127.0.0.1", "::1"}
-INTERNAL_LLM_HOSTS = {"ollama"}
-
-LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
+# Compatibility exports for integrations importing configuration from summarize.
+from llm_config import (LLMConfig, get_llm_config as _get_llm_config,
+                        resolve_llm_base_url, is_docker_runtime)
+LLM_MODEL = os.environ.get("LLM_MODEL", "gemma4:31b-it-q4_K_M")
+LLM_BASE_URL, LLM_BASE_URL_SOURCE = resolve_llm_base_url()
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
-LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "120"))
+LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS") or "120")
 LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "2"))
 LLM_RETRY_BACKOFF_SECONDS = float(os.environ.get("LLM_RETRY_BACKOFF_SECONDS", "0.5"))
 LLM_CHUNK_CHARS = int(os.environ.get("LLM_CHUNK_CHARS", "12000"))
-LLM_STRUCTURED_FALLBACK = (
-    os.environ.get("LLM_STRUCTURED_FALLBACK", "true").lower() != "false"
-)
+LLM_STRUCTURED_FALLBACK = os.environ.get("LLM_STRUCTURED_FALLBACK", "true").lower() != "false"
 
 
-def _is_truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def is_docker_runtime() -> bool:
-    """Return whether the backend is running inside the Compose/container setup."""
-
-    app_runtime = (os.environ.get("APP_RUNTIME") or "").strip().lower()
-    return (
-        app_runtime == "docker"
-        or _is_truthy(os.environ.get("RUNNING_IN_DOCKER"))
-        or os.path.exists("/.dockerenv")
-    )
-
-
-def _base_url_host(base_url: str) -> str:
-    parsed = urlparse(base_url)
-    return (parsed.hostname or "").lower()
-
-
-def _normalize_base_url(base_url: str) -> str:
-    return base_url.rstrip("/")
-
-
-def resolve_llm_base_url(raw_base_url: str | None = None) -> tuple[str, str]:
-    """
-    Resolve the effective LLM endpoint and describe where it came from.
-
-    A copied root .env used to contain LLM_BASE_URL=http://localhost:11434/v1,
-    which is correct for local backend development but wrong inside Docker.
-    In Docker, localhost points at the backend container, so local Ollama values
-    are treated as the internal Compose default unless a non-local URL is set.
-    """
-
-    if raw_base_url is None:
-        raw_base_url = os.environ.get("LLM_BASE_URL")
-
-    configured = (raw_base_url or "").strip()
-    docker_runtime = is_docker_runtime()
-
-    if not configured:
-        if docker_runtime:
-            return DOCKER_OLLAMA_BASE_URL, "internal_docker_default"
-        return LOCAL_OLLAMA_BASE_URL, "local_development_default"
-
-    normalized = _normalize_base_url(configured)
-    host = _base_url_host(normalized)
-    if docker_runtime and host in LOCAL_LLM_HOSTS:
-        return DOCKER_OLLAMA_BASE_URL, "internal_docker_default_from_local_value"
-    if host in INTERNAL_LLM_HOSTS:
-        return normalized, "internal_configured"
-    if host in LOCAL_LLM_HOSTS:
-        return normalized, "local_development_configured"
-    return normalized, "external_configured"
-
-
-LLM_BASE_URL, LLM_BASE_URL_SOURCE = resolve_llm_base_url()
-
-
-@dataclass(frozen=True)
-class LLMConfig:
-    """Effective LLM configuration for one request."""
-
-    base_url: str
-    model: str
-    api_key: str
-    timeout_seconds: float
-    base_url_source: str
-    reasoning_effort: str | None = None
-
-    @property
-    def reasoning_options(self) -> dict[str, str]:
-        """Omit the API field entirely for servers without reasoning support."""
-        if self.reasoning_effort is None:
-            return {}
-        return {"reasoning_effort": self.reasoning_effort}
-
-    @property
-    def uses_internal_ollama(self) -> bool:
-        return _base_url_host(self.base_url) in INTERNAL_LLM_HOSTS
-
-    @property
-    def uses_local_ollama(self) -> bool:
-        return _base_url_host(self.base_url) in LOCAL_LLM_HOSTS
-
-    @property
-    def uses_ollama(self) -> bool:
-        return self.uses_internal_ollama or self.uses_local_ollama
+def get_llm_config(model=None):
+    return _get_llm_config(model)
 
 
 @dataclass
@@ -145,25 +58,10 @@ class LLMAvailability:
     available_models: list[str] = field(default_factory=list)
     message: str = ""
 
+    configuration: dict = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def get_llm_config(model: str | None = None) -> LLMConfig:
-    base_url, source = resolve_llm_base_url()
-    reasoning_effort = os.environ.get("LLM_REASONING_EFFORT", "").strip().lower()
-    if reasoning_effort not in {"", "none", "low", "medium", "high", "max"}:
-        raise ValueError(
-            "LLM_REASONING_EFFORT must be empty, none, low, medium, high or max"
-        )
-    return LLMConfig(
-        base_url=base_url,
-        model=model or os.environ.get("LLM_MODEL", LLM_MODEL),
-        api_key=os.environ.get("LLM_API_KEY", LLM_API_KEY),
-        timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", str(LLM_TIMEOUT_SECONDS))),
-        base_url_source=source,
-        reasoning_effort=reasoning_effort or None,
-    )
 
 
 @dataclass
@@ -440,8 +338,8 @@ def _load_openai_client(config: LLMConfig | None = None) -> Any:
     return OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
-        timeout=config.timeout_seconds,
-        # The summary retry loop owns retries; do not multiply them in the SDK.
+        timeout=config.http_timeout,
+        # The shared transport owns retries; diagnostics have no SDK retries.
         max_retries=0,
     )
 
@@ -449,6 +347,12 @@ def _load_openai_client(config: LLMConfig | None = None) -> Any:
 def classify_llm_error(error: Exception) -> LLMErrorInfo:
     """Classify common OpenAI-compatible client errors."""
 
+    from llm_transport import retryable, LLMCancelledError, LLMTotalTimeout
+    from llm_config import ModelConfigurationError
+    if isinstance(error, (ModelConfigurationError, ContextBudgetError, LLMCancelledError, LLMTotalTimeout)):
+        return LLMErrorInfo("configuration" if isinstance(error, ModelConfigurationError) else "incomplete", False)
+    if any(term in str(error).lower() for term in ("out of memory", "requires more system memory", "insufficient memory", "failed to allocate")):
+        return LLMErrorInfo("memory", False)
     status_code = getattr(error, "status_code", None) or getattr(getattr(error, "response", None), "status_code", None)
     name = error.__class__.__name__.lower()
     message = str(error).lower()
@@ -527,6 +431,8 @@ def check_llm_availability(
 
     try:
         models_response = client.models.list()
+    except LLMCancelledError:
+        raise
     except Exception as error:
         info = classify_llm_error(error)
         message = (
@@ -566,6 +472,7 @@ def check_llm_availability(
         model_available=True,
         available_models=available_models,
         message="LLM-Dienst ist erreichbar und das Modell ist verfügbar.",
+        configuration=config.public_snapshot(),
     )
 
 
@@ -584,6 +491,7 @@ def llm_diagnostics(model: str | None = None) -> LLMAvailability:
             service_reachable=error.category == "model_missing",
             model_available=False,
             message=str(error),
+            configuration=config.public_snapshot(),
         )
 
 
@@ -607,44 +515,43 @@ def _chat_completion_content(
             'Kurzer Quellenbefund zu aktuellen Ergebnis-/Abstimmungssignalen und Abgrenzung zu Rückblicken.'},
             'votes': properties['votes'], 'decisions': properties['decisions'], **properties}
 
-    for attempt in range(LLM_MAX_RETRIES + 1):
-        if usage is not None:
-            usage["attempted_calls"] = usage.get("attempted_calls", 0) + 1
-        try:
-            response = complete(client, get_llm_config(model),
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                timeout=LLM_TIMEOUT_SECONDS,
-                **({'ollama_think': native_think} if native_think is not None else {}),
-                **({'response_format': {'type': 'json_schema', 'json_schema': {
-                    'name': 'minutes', 'strict': True, 'schema': {
-                        'type': 'object', 'properties': properties,
-                        'required': list(properties), 'additionalProperties': False}}}}
-                   if 'strukturierte Protokollnotizen' in messages[-1]['content'] else {}),
-                **reasoning_options,
+    if usage is not None:
+        usage["attempted_calls"] = usage.get("attempted_calls", 0) + 1
+    try:
+        response = complete(client, get_llm_config(model),
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            **({'ollama_think': native_think} if native_think is not None else {}),
+            **({'response_format': {'type': 'json_schema', 'json_schema': {
+                'name': 'minutes', 'strict': True, 'schema': {
+                    'type': 'object', 'properties': properties,
+                    'required': list(properties), 'additionalProperties': False}}}}
+               if 'strukturierte Protokollnotizen' in messages[-1]['content'] else {}),
+            **reasoning_options,
+        )
+        if usage is not None and hasattr(response, "llm_provenance"):
+            usage.setdefault("requests", []).append(response.llm_provenance)
+        content = response.choices[0].message.content or ""
+        if not content.strip():
+            raise LLMCallError(
+                "Leere Antwort des LLM",
+                category="empty_response",
+                transient=False,
             )
-            content = response.choices[0].message.content or ""
-            if not content.strip():
-                raise LLMCallError(
-                    "Leere Antwort des LLM",
-                    category="empty_response",
-                    transient=False,
-                )
-            return content.strip()
-        except LLMCallError:
-            if usage is not None:
-                usage["failed_calls"] = usage.get("failed_calls", 0) + 1
-            raise
-        except Exception as error:
-            if usage is not None:
-                usage["failed_calls"] = usage.get("failed_calls", 0) + 1
-            last_error = error
-            last_info = classify_llm_error(error)
-            if not last_info.transient or attempt >= LLM_MAX_RETRIES:
-                break
-            time.sleep(LLM_RETRY_BACKOFF_SECONDS * (2**attempt))
+        return content.strip()
+    except (LLMCallError, ContextBudgetError):
+        if usage is not None:
+            usage["failed_calls"] = usage.get("failed_calls", 0) + 1
+        raise
+    except LLMCancelledError:
+        raise
+    except Exception as error:
+        if usage is not None:
+            usage["failed_calls"] = usage.get("failed_calls", 0) + 1
+        last_error = error
+        last_info = classify_llm_error(error)
 
     hint = ""
     if last_info.category == "network":
@@ -1203,7 +1110,7 @@ def _summarize_structured(
                                             'die begrenzte automatische Faktennachprüfung ist ausgeschöpft.')
                 usage['fact_review_limit_reached'] = True
                 return parsed
-            if not fits(request, fact_reserve):
+            if not fits(request, fact_reserve, config):
                 raise ContextBudgetError('Summary fact review exceeds context budget')
             usage['fact_review_calls'] = usage.get('fact_review_calls', 0) + 1
             content = _chat_completion_content(client, model=model, messages=request,
@@ -1232,7 +1139,7 @@ def _summarize_structured(
     def process(text, depth=0, start=None):
         request = messages(text, start)
         # Budget subdivision is not an inference retry; no text is discarded.
-        if not fits(request, primary_reserve):
+        if not fits(request, primary_reserve, config):
             if len(text) < 2:
                 raise ContextBudgetError("Summary instructions exceed context")
             offset = start
@@ -1256,6 +1163,8 @@ def _summarize_structured(
                                  'structured': parsed.to_dict()})
             usage.setdefault('source_parts', []).append({'start_char': start, 'end_char': None if start is None else start+len(text)})
         except (StructuredOutputError, LLMCallError, ContextBudgetError) as exc:
+            if isinstance(exc, LLMCallError) and exc.category in {"configuration", "memory", "client", "model_missing"}:
+                raise
             usage["invalid_or_failed_parts"] = usage.get("invalid_or_failed_parts", 0) + 1
             budget_split = isinstance(exc, ContextBudgetError)
             if (not budget_split and depth >= max_depth) or len(text) < 100:
@@ -1404,6 +1313,7 @@ def meeting_context_from_transcript(transcript) -> str:
     return '\n'.join(str(_line_value(line, 'text', '')) for line in transcript[:5])[:800]
 
 
+@configured
 def summarize_segment(
     top_title: str,
     transcript_text: str,
@@ -1427,7 +1337,8 @@ def summarize_segment(
     actual_system_prompt = build_structured_system_prompt(system_prompt)
 
     from llm_transport import context_tokens
-    usage = {"context_tokens": context_tokens(), "max_output_tokens": 1400}
+    usage = {"context_tokens": config.context_tokens, "max_output_tokens": config.output_budget(1400),
+             "configuration": config.public_snapshot()}
     start_time = time.time()
     completed_key = cache_key(config, [
         {'role': 'system', 'content': actual_system_prompt},
@@ -1440,7 +1351,7 @@ def summarize_segment(
         'chunk_chars': LLM_CHUNK_CHARS,
     }, sort_keys=True))
     previous_completed_key = completed_key
-    if int(os.environ.get('LLM_SUMMARY_GROUNDING_MAX_CALLS', '32')) > 0:
+    if completed_key is not None and int(os.environ.get('LLM_SUMMARY_GROUNDING_MAX_CALLS', '32')) > 0:
         completed_key += ':grounding-v14:' + json.dumps([
             meeting_context, os.environ.get('LLM_SUMMARY_GROUNDING_MAX_CALLS', '32'),
             os.environ.get('LLM_SUMMARY_GROUNDING_THINK', 'false')], ensure_ascii=False)

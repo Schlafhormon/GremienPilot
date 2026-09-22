@@ -213,3 +213,20 @@ def test_poll_reads_text_and_review_from_one_revision(session, monkeypatch):
     assert read["summaries"][3] == "Alt D"
     assert read["summary_reviews"][3]["duration_seconds"] == 42
     assert persistence.load_session("meeting")["summaries"][3] == "Neues Ergebnis"
+
+
+def test_cancellation_reaches_waiting_llm_and_preserves_manual_content(session, monkeypatch):
+    from llm_transport import _CONTROL
+    job_id = start(session, ['a', 'b'])
+    def generate(*args, **kwargs):
+        check_cancel, progress = _CONTROL.get()
+        assert check_cancel is not None and progress is not None
+        progress({'phase': 'waiting', 'model': 'test', 'config_id': 'id'})
+        assert persistence.load_summary_job(job_id)['refs']['llm_progress']['phase'] == 'waiting'
+        main.update_summary_job(job_id, status='cancelling', refs={'cancel_requested': True})
+        check_cancel()
+        pytest.fail('Cancellation did not interrupt generation')
+    monkeypatch.setattr(main, 'summarize_segment', generate)
+    main.run_summary_job(job_id)
+    assert persistence.load_summary_job(job_id)['status'] == 'cancelled'
+    assert persistence.load_session('meeting')['summaries'] == session['summaries']

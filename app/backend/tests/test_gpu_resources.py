@@ -339,3 +339,10 @@ def test_health_and_speaker_backfill_accept_unloaded_on_demand_models(monkeypatc
     assert diagnostics["loaded"] is False and diagnostics["on_demand"] is True
     # An empty backfill should succeed without loading a model or network calls.
     assert main.backfill_speaker_profile_embeddings().processed_job_count == 0
+
+
+def test_remote_native_ollama_is_not_unloaded_for_local_transcription(monkeypatch):
+    monkeypatch.setenv('LLM_PROVIDER', 'ollama')
+    monkeypatch.setenv('LLM_BASE_URL', 'https://remote-model.example/v1')
+    monkeypatch.setattr(httpx, 'get', lambda *a, **kw: pytest.fail('Contacted remote Ollama to unload'))
+    gpu.unload_local_ollama(get_llm_config())

@@ -19,8 +19,8 @@ def run(monkeypatch, parts, answer, limit=3, year_conflict=False):
         calls.append(kwargs)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(answer)))])
     monkeypatch.setattr(grounding, 'complete', complete)
-    config = SimpleNamespace(uses_ollama=False, reasoning_effort='none', reasoning_options={},
-                             base_url='https://example.invalid', model='test', timeout_seconds=10)
+    from llm_config import get_llm_config
+    config = get_llm_config('test')
     usage = {}
     result = grounding.check_parts(parts, client=None, config=config,
                                    meeting_context='Heutiger Ausschuss.', usage=usage, year_conflict=year_conflict)
@@ -80,8 +80,8 @@ def test_conflicting_temporal_checks_cannot_certify_current_action(monkeypatch, 
     monkeypatch.setenv('LLM_SUMMARY_GROUNDING_MAX_CALLS', '3')
     monkeypatch.setattr(grounding, 'complete', lambda *args, **kwargs: SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(next(answers))))]))
-    config = SimpleNamespace(uses_ollama=False, reasoning_effort='none', reasoning_options={},
-                             base_url='https://example.invalid', model='test', timeout_seconds=10)
+    from llm_config import get_llm_config
+    config = get_llm_config('test')
     usage = {}
     result = grounding.check_parts([source], client=None, config=config,
                                   meeting_context='', usage=usage, year_conflict=False)
@@ -184,7 +184,8 @@ def test_incidental_protocol_mention_does_not_expand_information_top_checks(monk
     source['text'] = 'Eine Notiz für das Protokoll. Eine technische Angabe war falsch.'
     source['context'] = ''
     usage = {}
-    config = SimpleNamespace(uses_ollama=False, reasoning_effort='none')
+    from llm_config import get_llm_config
+    config = get_llm_config('test')
     result = grounding.check_parts([source], client=None, config=config,
         meeting_context='', usage=usage, year_conflict=False, top_title='Anfragen und Informationen')
     assert result[0]['structured']['discussion'] == ['Ein Sachverhalt wurde erläutert.']

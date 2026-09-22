@@ -1,4 +1,6 @@
 """Complete known-agenda classification with global indices and disjoint ownership."""
+from llm_transport import LLMCancelledError, permanent_failure
+
 import json
 import math
 import os
@@ -95,7 +97,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
     from openai import OpenAI
     config = get_llm_config(model)
     client = OpenAI(base_url=config.base_url, api_key=config.api_key,
-                    timeout=usage.timeout_seconds, max_retries=0)
+                    timeout=config.http_timeout, max_retries=0)
     segments = []
     previous = None
     overlap = max(0, int(os.environ.get('AGENDA_DETECTION_CHUNK_OVERLAP_LINES', '12')) // 2)
@@ -106,16 +108,20 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
     evidence_context = EvidenceContext(transcript, tops, agenda)
     limit = max(1, int(os.environ.get('AGENDA_DETECTION_CHUNK_LINES', '160')))
     char_limit = max(256, int(os.environ.get('LLM_CHUNK_CHARS', '7000')))
-    output = 2048
+    output = config.output_budget(2048)
     output_reserve = structured_output_budget(config, output)
     try:
         fingerprint = model_fingerprint(config)
+    except LLMCancelledError:
+        raise
     except Exception as exc:
+        if permanent_failure(exc):
+            raise
         fingerprint = {'model': config.model, 'digest': None, 'error': type(exc).__name__}
     provenance = {**fingerprint, 'prompt_version': 'known-agenda-evidence-v5', 'schema_version': 5,
                   'temperature': 0.1, 'max_tokens': output, 'reasoning_effort': config.reasoning_effort,
                   'seed': None, 'truncate': False, 'shift': False,
-                  'num_thread': int(os.environ.get('LLM_CPU_THREADS', '16')),
+                  'num_thread': config.cpu_threads, 'configuration': config.public_snapshot(),
                   'cache_namespace': cache_namespace, 'context_before': before, 'context_after': after}
     if not fingerprint.get('digest') and fingerprint.get('provider') != 'openai-compatible':
         provenance['unresolved_model_run'] = str(uuid.uuid4())
@@ -212,7 +218,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         # room for a same-window repair. Remove only optional neighbor context.
         user['context_budget'] = {'before_requested': before, 'after_requested': after,
                                   'omitted_indices': [], 'repair_reserve': 768}
-        while not fits(encode(), output_reserve + 768):
+        while not fits(encode(), output_reserve + 768, config):
             if user['context_after']:
                 removed = user['context_after'].pop()
             elif user['context_before']:
@@ -324,7 +330,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
 
     def obtain(request, start, end, detail, purpose):
         key = cache_key(config, request, purpose, provenance)
-        detail.update(cache_key=hashlib.sha256(key.encode()).hexdigest(),
+        detail.update(cache_key=hashlib.sha256(key.encode()).hexdigest() if key else None,
                       evidence_context=json.loads(request[1]['content'])['evidence_context'],
                       context_budget=json.loads(request[1]['content'])['context_budget'])
         cached = cache_read(key)
@@ -339,8 +345,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                 if data is None:
                     usage.attempted_calls += 1
                     response = complete(client, config, model=config.model, messages=request,
-                                        temperature=0.1, max_tokens=output, timeout=usage.timeout_seconds,
+                                        temperature=0.1, max_tokens=output,
                                         response_format=window_schema(start, end), **config.reasoning_options)
+                    detail["transport"] = getattr(response, "llm_provenance", {})
                     data = parse_response(response.choices[0].message.content)
                 rows = validate(decode(data, start, end), start, end)
                 detail['repair_history'] = history
@@ -367,7 +374,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                         'Keine assignments neu erzeugen. Alle null-Zeilen sind erforderlich.')
                 body['repair'] = repair
                 repaired_request = [request[0], {'role': 'user', 'content': json.dumps(body, ensure_ascii=False)}]
-                if not fits(repaired_request, output_reserve):
+                if not fits(repaired_request, output_reserve, config):
                     raise
                 usage.attempted_calls += 1
                 schema = window_schema(start, end)
@@ -379,7 +386,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                             'required': gap_ids, 'additionalProperties': False}},
                         'required': ['gap_reasons'], 'additionalProperties': False}
                 response = complete(client, config, model=config.model, messages=repaired_request,
-                                    temperature=0.1, max_tokens=output, timeout=usage.timeout_seconds,
+                                    temperature=0.1, max_tokens=output,
                                     response_format=schema, **config.reasoning_options)
                 data = parse_response(response.choices[0].message.content)
                 if repair.get('fixed_assignments'):
@@ -397,7 +404,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         began = time.monotonic()
         detail = {'start_index': start, 'end_index': end, 'depth': depth,
                   'parent_cache_key': parent,
-                  'input_token_bound': input_bound(request), 'max_output_tokens': output,
+                  'input_token_bound': input_bound(request, config), 'max_output_tokens': output,
                   'reserved_output_tokens': output_reserve}
         rows = None
         try:
@@ -419,7 +426,11 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                     end_index=row['end_index'], confidence=max(0.0, min(1.0, float(row.get('confidence', 0.5)))),
                     uncertain=bool(row.get('uncertain', True)), transition_type='llm', reason=row['reason'],
                     evidence_index=row['evidence_index'], evidence_text=row['evidence_text']))
+        except LLMCancelledError:
+            raise
         except Exception as exc:
+            if permanent_failure(exc):
+                raise
             rows = None
             usage.failed_calls += 1
             reason = exc.code if isinstance(exc, AgendaValidationError) else type(exc).__name__
@@ -549,7 +560,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
             if end < original_end:
                 runs.insert(0, [end+1, original_end])
             detail = {'start_index': start, 'end_index': end, 'phase': phase,
-                      'input_token_bound': input_bound(request), 'max_output_tokens': output,
+                      'input_token_bound': input_bound(request, config), 'max_output_tokens': output,
                       'reserved_output_tokens': output_reserve}
             began = time.monotonic()
             try:
@@ -595,7 +606,11 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                     updated = assignments_from_segments(len(transcript), segments)
                     detail['changes'] = [{'line_index': i, 'before': current[i], 'after': updated[i]}
                                          for i in range(start, end+1) if current[i] != updated[i]]
+            except LLMCancelledError:
+                raise
             except Exception as exc:
+                if permanent_failure(exc):
+                    raise
                 # Failure of a second opinion must not relabel an already evaluated
                 # semantic gap as technically unseen, or overwrite successful assignments.
                 usage.failed_calls += 1

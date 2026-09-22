@@ -5,7 +5,7 @@
 set -e
 
 # Default model to pull (can be overridden via environment variable)
-MODEL="${OLLAMA_MODEL:-qwen3:8b}"
+MODEL="${OLLAMA_MODEL:-gemma4:31b-it-q4_K_M}"
 
 echo "Starting Ollama server..."
 # Start Ollama in the background

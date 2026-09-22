@@ -7,6 +7,8 @@ is available, or for refined boundaries when an agenda is already known.
 """
 
 from __future__ import annotations
+from llm_config import configured
+from llm_transport import LLMCancelledError, permanent_failure
 
 import json
 import logging
@@ -32,7 +34,7 @@ from summarize import get_llm_config
 
 logger = logging.getLogger(__name__)
 
-LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gemma4:31b-it-q4_K_M")
 LLM_BASE_URL = get_llm_config().base_url
 LLM_API_KEY = get_llm_config().api_key
 _agenda_llm_default = os.environ.get("AGENDA_DETECTION_USE_LLM", "false").strip().lower()
@@ -158,8 +160,9 @@ def _llm_usage(use_llm: bool | None) -> AgendaLLMUsage:
     return AgendaLLMUsage(
         enabled=enabled,
         source="server_default" if use_llm is None else "request",
-        timeout_seconds=AGENDA_DETECTION_TIMEOUT_SECONDS,
+        timeout_seconds=get_llm_config().timeout_seconds,
         status="skipped" if enabled else "disabled",
+        provenance={"configuration": get_llm_config().public_snapshot()} if enabled else {},
     )
 
 
@@ -197,6 +200,7 @@ class _RawSegment:
     evidence_index_provided: bool = False
 
 
+@configured
 def detect_agenda_from_transcript(
     transcript: list[TranscriptUtterance],
     model: str | None = None,
@@ -240,6 +244,7 @@ def detect_agenda_from_transcript(
     return _result_from_segments(len(transcript), segments, strategy, tops=detected_tops, usage=usage)
 
 
+@configured
 def segment_known_agenda(
     transcript: list[TranscriptUtterance],
     tops: list[str],
@@ -328,7 +333,11 @@ def _attempt_llm_detection(*, usage: AgendaLLMUsage, **kwargs: Any) -> list[_Raw
         if not segments:
             raise _EmptyLLMResponse()
         return segments
+    except LLMCancelledError:
+        raise
     except Exception as exc:
+        if permanent_failure(exc):
+            raise
         # Fixed reason codes only: exception messages may contain transcript,
         # provider response bodies, URLs or credentials.
         names = {cls.__name__ for cls in type(exc).__mro__}
@@ -505,7 +514,7 @@ def _detect_with_llm(
     client = OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
-        timeout=AGENDA_DETECTION_TIMEOUT_SECONDS,
+        timeout=config.http_timeout,
         max_retries=0,
     )
 
@@ -526,7 +535,11 @@ def _detect_with_llm(
         # Unknown agendas still require a title; ID-only entries are meaningful
         # solely against the supplied known agenda.
         return segments if tops is not None else [segment for segment in segments if segment.top_title]
+    except LLMCancelledError:
+        raise
     except Exception as exc:
+        if permanent_failure(exc):
+            raise
         raise _InvalidLLMResponse() from exc
 
 
@@ -534,10 +547,6 @@ def _llm_message_text(message: Any) -> str:
     content = str(getattr(message, "content", "") or "").strip()
     if content:
         return content
-    for attribute in ("reasoning", "reasoning_content"):
-        value = str(getattr(message, attribute, "") or "").strip()
-        if value:
-            return value
     return ""
 
 

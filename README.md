@@ -109,8 +109,8 @@ einen Gesamt-TOP zusammenfassen.
 | --- | --- | --- |
 | Betriebssystem | Windows 10/11, macOS 11+, Linux | Windows/Linux für GPU |
 | Docker | Docker Desktop oder Docker Engine mit Compose | aktuelle Docker-Version |
-| RAM | 8 GB | 16 GB oder mehr |
-| Speicherplatz | 25 GB | 40 GB oder mehr |
+| RAM | modell- und kontextabhängig | lokale 31B-Modelle: Gewichte, KV-Cache und Laufzeitreserve gemeinsam planen |
+| Speicherplatz | Images, Modellgewichte und Audiodaten | Reserve für weitere Modelle und Sitzungen |
 | Internet | für Installation, Images und Modell-Downloads | stabile Verbindung |
 | GPU | optional | NVIDIA-GPU mit Container Toolkit |
 
@@ -307,14 +307,24 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `GPU_MODEL_SWITCHING` | Whisper und lokales Ollama abwechselnd auf einer GPU laden; erfordert einen Backend-Prozess | `false` |
 | `GPU_MODEL_UNLOAD_TIMEOUT_SECONDS` | Positives, endliches Zeitlimit für die bestätigte Ollama-Speicherfreigabe vor der Transkription | `120` |
 | `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://ollama:11434/v1`, lokale Backend-Entwicklung: `http://localhost:11434/v1` |
-| `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3:8b` |
+| `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `gemma4:31b-it-q4_K_M` |
+| `LLM_PROVIDER` | `ollama` oder `openai-compatible`; leer erhält bisherige Erkennung | leer |
+| `LLM_THINKING` / `LLM_THINKING_TOKENS` | Nativer Denk-Schalter / zusätzliche Tokenreserve, kein separates hartes Denklimit | leer / `0` |
+| `LLM_OUTPUT_TOKENS` / `LLM_OUTPUT_PARAMETER` | Ausgabe überschreiben / externe API: `max_tokens` oder `max_completion_tokens` | leer / `max_tokens` |
+| `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K`, `LLM_SEED` | Sampling; `top_k` nur natives Ollama | leer |
+| `LLM_CONNECT_TIMEOUT_SECONDS`, `LLM_READ_TIMEOUT_SECONDS`, `LLM_TOTAL_TIMEOUT_SECONDS` | Verbindung / Inaktivität / Gesamtlimit; Gesamtwert `0` erlaubt lange Streams | `10` / Legacy-Alias / `0` |
+| `LLM_GPU_LAYERS` / `LLM_KEEP_ALIVE` | Native GPU-Layer (`0`: CPU) / Modellhaltezeit | Providerwahl / Ollama-Wert |
+| `LLM_IMAGE_TOKENS` | Konservative Reserve je Bild; `0` verweigert Bilder | `0` |
+| `LLM_TOKENIZER_PATH` / `LLM_TOKENIZER_MODEL` | Optionaler lokaler Tokenizer mit exakt passendem Modellnamen | leer |
+| `LLM_MODEL_REVISION` | Unveränderliche externe Modellrevision für Cache; Ollama nutzt Digest | leer |
+| `OLLAMA_LOAD_TIMEOUT` | Serverseitiger Watchdog für das Modellladen | `5m` |
 | `LLM_REASONING_EFFORT` | Reasoning für alle LLM-Aufgaben: leer = bisheriges Verhalten, `none` = aus, `low`/`medium`/`high`/`max` = an (modell-/serverabhängig) | leer |
-| `LLM_TIMEOUT_SECONDS` | Timeout für Zusammenfassungen, PDF-Extraktion und LLM-Diagnose (nicht TOP-Erkennung im Transkript) | `120` |
+| `LLM_TIMEOUT_SECONDS` | Veralteter Alias für das gemeinsame Lese-/Inaktivitätslimit | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
-| `LLM_OLLAMA_NATIVE` | Native Ollama-API; für externe OpenAI-kompatible Anbieter `false` setzen | Compose: `true` |
+| `LLM_OLLAMA_NATIVE` | Veraltete Providerwahl; `LLM_PROVIDER` hat Vorrang | leer |
 | `LLM_CONTEXT_TOKENS` | Gemeinsames Eingabe-/Ausgabebudget; wird an Ollama übermittelt | `16384` |
-| `LLM_CPU_THREADS` | Ollama-Inferenzthreads, unabhängig von Whisper | `16` |
-| `LLM_MAX_RETRIES` | Transportwiederholungen bei vorübergehenden Zusammenfassungsfehlern; auch SDK-Grenze der OpenAI-PDF-Extraktion | `2` |
+| `LLM_CPU_THREADS` | Ollama-Inferenzthreads, unabhängig von Whisper; leer: Providerwahl | leer |
+| `LLM_MAX_RETRIES` | Gemeinsame Wiederholungen vorübergehender Transportfehler | `2` |
 | `LLM_REPAIR_SPLIT_DEPTH` | Fehlerhafte Zuordnungs-/Zusammenfassungsteile durch Halbierung reparieren; `0` deaktiviert | `1` |
 | `LLM_SUMMARY_FACT_REVIEW_MAX_CALLS` | Zusätzliche Faktenprüfungen je TOP; `0` deaktiviert | `3` |
 | `LLM_SUMMARY_FACT_REVIEW_THINK` | Separater Ollama-Denkmodus für Faktenprüfungen; leer erbt die globale Einstellung | Compose: `true` |
@@ -322,7 +332,7 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `LLM_SUMMARY_GROUNDING_MAX_CALLS` | Kurze Belegprüfungen je TOP; `0` deaktiviert | `32` |
 | `LLM_SUMMARY_GROUNDING_THINK` | Separater Ollama-Denkmodus für kurze Belegprüfungen | `false` |
 | `LLM_CACHE_DIR` | Cache validierter Antworten; enthält vertrauliche Sitzungsdaten, leer deaktiviert | Compose: `/app/data/llm-cache` |
-| `LLM_AUDIT_DIR` | Optionaler privater Diagnoseordner für vollständige Anfragen und Antworten | leer |
+| `LLM_AUDIT_DIR` | Optionaler privater Diagnoseordner für Anfrage, Endergebnis und Konfigurationsstand | leer |
 | `OLLAMA_NUM_PARALLEL` | Gleichzeitige Anfragen je Ollama-Modell | Compose: `1` |
 | `OLLAMA_MAX_LOADED_MODELS` | Maximal gleichzeitig geladene Ollama-Modelle | Compose: `1` |
 | `OLLAMA_FLASH_ATTENTION` | Flash Attention für geringeren Kontext-Speicherbedarf aktivieren | Compose: `1` |
@@ -340,7 +350,7 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `SPEAKER_EMBEDDING_MAX_SEGMENTS` | maximale lokale Segmente pro Sprecher für die Extraktion | `8` |
 | `SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL` | maximale globale Referenz-Embeddings je Profil und Modell | `16` |
 | `AGENDA_DETECTION_USE_LLM` | Serverstandard für LLM-TOP-Erkennung; explizite API-Entscheidung hat Vorrang | `false` |
-| `AGENDA_DETECTION_TIMEOUT_SECONDS` | Positiver, endlicher Timeout in Sekunden pro Agenda-Anfrage/Chunk; keine SDK-Retries | `8` |
+| `AGENDA_DETECTION_TIMEOUT_SECONDS` | Veraltet; Netzwerk nutzt das gemeinsame Lese-/Inaktivitätslimit | `8` |
 | `AGENDA_DETECTION_CHUNK_LINES` | Maximale Zielzeilen pro Chunk (zusätzlich begrenzt durch das Kontextbudget bei bekannter Agenda) | `160` |
 | `AGENDA_DETECTION_CHUNK_OVERLAP_LINES` | Überlappende Zeilen zwischen Chunks | `12` |
 | `AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS` | Zusätzliche Prüfungen fachlicher Zuordnungslücken; `0` deaktiviert | `3` |
@@ -364,6 +374,9 @@ Abschnitte werden geteilt, Kürzungen und unvollständige Antworten als Fehler
 behandelt. Reparaturen und Quellenprüfungen haben eigene, begrenzte Aufrufbudgets.
 Der Cache wird nicht automatisch geleert; nach einem Modellwechsel unter gleichem
 Modellnamen sollte er außerhalb laufender Jobs gelöscht werden.
+
+Details zu Providerverträgen, Tokenzählung und Migration: [Modellkonfiguration](docs/llm-configuration.md).
+Natives Ollama benötigt ab diesem Vertrag Version 0.34.2; vorhandene Browser-/API-Modellüberschreibungen bleiben wirksam.
 
 ### LLM-Nutzung für automatische TOP-Zuordnung
 
@@ -444,7 +457,7 @@ HF_TOKEN=hf_...
 ### Zusammenfassung meldet LLM-/Ollama-Fehler
 
 Docker Compose startet einen internen Ollama-Dienst und lädt standardmäßig
-`LLM_MODEL=qwen3:8b`. Prüfen Sie die LLM-Diagnose mit:
+`LLM_MODEL=gemma4:31b-it-q4_K_M`. Prüfen Sie die LLM-Diagnose mit:
 
 ```bash
 curl http://localhost:8010/api/llm/diagnostics
@@ -453,7 +466,7 @@ curl http://localhost:8010/api/llm/diagnostics
 Wenn das Modell fehlt, laden Sie es nach:
 
 ```bash
-docker compose exec ollama ollama pull qwen3:8b
+docker compose exec ollama ollama pull gemma4:31b-it-q4_K_M
 ```
 
 Für lokale Backend-Entwicklung ohne Docker muss Ollama lokal laufen und

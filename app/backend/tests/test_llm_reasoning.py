@@ -53,7 +53,7 @@ def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, ef
         assert "reasoning_effort" not in request
     if task.startswith("pdf"):
         prompt = request["messages"][0]["content"]
-        assert ("/no_think" in prompt) == (not normalized)
+        assert "/no_think" not in prompt
         assert "ohne Denken" not in prompt
         assert "Fachlicher Kontext" in prompt
 
@@ -90,7 +90,7 @@ def test_pdf_calls_honor_timeout_and_retry_configuration(monkeypatch, fake_opena
     fake_openai_module.content = '{"tops": ["1. Haushalt"], "metadata": {}}'
     extract("1. Haushalt")
     client_options = fake_openai_module.instances[0].kwargs
-    assert client_options["timeout"] == 1800
+    assert client_options["timeout"].read == 1800
     assert client_options["max_retries"] == 0
 
 
@@ -122,19 +122,17 @@ def test_real_sdk_serializes_reasoning_without_network(monkeypatch, effort):
         assert request.method == "POST"
         assert request.url.path == "/v1/chat/completions"
         requests.append(json.loads(request.content))
-        return httpx.Response(200, json={
-            "id": "test", "object": "chat.completion", "created": 0,
-            "model": "qwen3.5:9b",
-            "choices": [{"index": 0, "finish_reason": "stop", "message": {
-                "role": "assistant", "content": SUMMARY,
-                "reasoning": "This is not the final answer.",
-            }}],
-        })
+        return httpx.Response(200, text='data: ' + json.dumps({
+            'model': 'qwen3.5:9b', 'choices': [{'index': 0, 'finish_reason': 'stop',
+                'delta': {'content': SUMMARY, 'reasoning': 'This is not the final answer.'}}]
+        }) + '\n\ndata: [DONE]\n\n')
 
     monkeypatch.setenv("LLM_REASONING_EFFORT", effort)
     monkeypatch.setenv("LLM_MODEL", "qwen3.5:9b")
     monkeypatch.setenv("LLM_API_KEY", "test-only")
     monkeypatch.setenv("LLM_BASE_URL", "http://llm.example.test/v1")
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: real_async_client(transport=httpx.MockTransport(respond), **kwargs))
     with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
         monkeypatch.setattr(openai, "OpenAI", lambda **kwargs: real_client(http_client=http_client, **kwargs))
         result = summarize.summarize_segment("Haushalt", "MOD: Der Haushalt wurde beraten.")

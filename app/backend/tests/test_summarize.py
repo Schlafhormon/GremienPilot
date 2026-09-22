@@ -64,7 +64,7 @@ def structured_response(**overrides):
 
 def test_resolve_llm_base_url_uses_local_default_outside_docker(monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
-    monkeypatch.setattr(summarize, "is_docker_runtime", lambda: False)
+    monkeypatch.setattr(__import__("llm_config"), "is_docker_runtime", lambda: False)
 
     base_url, source = summarize.resolve_llm_base_url()
 
@@ -74,7 +74,7 @@ def test_resolve_llm_base_url_uses_local_default_outside_docker(monkeypatch):
 
 def test_resolve_llm_base_url_uses_internal_default_in_docker(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434/v1")
-    monkeypatch.setattr(summarize, "is_docker_runtime", lambda: True)
+    monkeypatch.setattr(__import__("llm_config"), "is_docker_runtime", lambda: True)
 
     base_url, source = summarize.resolve_llm_base_url()
 
@@ -84,7 +84,7 @@ def test_resolve_llm_base_url_uses_internal_default_in_docker(monkeypatch):
 
 def test_resolve_llm_base_url_keeps_explicit_external_url(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "https://llm.example.test/v1")
-    monkeypatch.setattr(summarize, "is_docker_runtime", lambda: True)
+    monkeypatch.setattr(__import__("llm_config"), "is_docker_runtime", lambda: True)
 
     base_url, source = summarize.resolve_llm_base_url()
 
@@ -126,7 +126,7 @@ def test_summarize_segment_uses_structured_output_and_returns_duration(
 
     client = fake_openai_module.instances[0]
     assert client.kwargs["base_url"]
-    assert client.kwargs["timeout"] == summarize.LLM_TIMEOUT_SECONDS
+    assert client.kwargs["timeout"].read == summarize.LLM_TIMEOUT_SECONDS
     request = client.calls[0]
     assert request["model"] == "test-model"
     assert request["temperature"] == 0.2
@@ -204,6 +204,7 @@ def test_summarize_segment_retries_transient_llm_errors(
         status_code = 503
 
     monkeypatch.setattr(summarize, "LLM_RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
     fake_openai_module.responses = [
         ServerError("Service unavailable"),
         structured_response(discussion=["Die Beratung wurde fortgesetzt."]),
@@ -487,11 +488,11 @@ def test_fact_budget_subdivision_does_not_require_failure_retries(fake_openai_mo
     monkeypatch.setenv('LLM_SUMMARY_FACT_REVIEW_MAX_CALLS', '3')
     fake_openai_module.content = structured_response(discussion=['Beratung mit Abstimmung.'])
     real_fits = summarize.fits
-    def limited_fact_budget(messages, output):
+    def limited_fact_budget(messages, output, config=None):
         if messages[0]['content'].startswith('Lies die Quelle unabhängig'):
             target = messages[-1]['content'].split('Vollständiger Quellausschnitt:\n')[1].split('\nRandkontext')[0]
             return len(target) <= 500
-        return real_fits(messages, output)
+        return real_fits(messages, output, config)
     monkeypatch.setattr(summarize, 'fits', limited_fact_budget)
     text = '\n'.join('A: Einstimmig. ' + 'Beratung. ' * 20 for _ in range(4))
     result = summarize.summarize_segment('Anträge', text)

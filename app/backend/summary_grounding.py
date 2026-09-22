@@ -1,4 +1,6 @@
 """Bounded source checks for risky outcome claims and ambiguous historical dates."""
+from llm_transport import LLMCancelledError, permanent_failure
+
 import json
 import os
 import re
@@ -190,7 +192,7 @@ def check_parts(parts, *, client, config, meeting_context, usage, year_conflict,
             attempted = False
             try:
                 if answer is None:
-                    if usage.get('grounding_calls', 0) >= limit or not fits(messages, structured_output_budget(config, 512, think)):
+                    if usage.get('grounding_calls', 0) >= limit or not fits(messages, structured_output_budget(config, 512, think), config):
                         raise ValueError('Source-check budget exhausted')
                     item_schema = {'type': 'object', 'properties': {
                         'status': {'type': 'string', 'enum': ['supported', 'reported', 'unsupported', 'uncertain']},
@@ -203,10 +205,12 @@ def check_parts(parts, *, client, config, meeting_context, usage, year_conflict,
                     usage['attempted_calls'] = usage.get('attempted_calls', 0) + 1
                     attempted = True
                     response = complete(client, config, model=config.model, messages=messages,
-                        max_tokens=512, temperature=0.1, timeout=config.timeout_seconds,
+                        max_tokens=512, temperature=0.1,
                         ollama_think=think,
                         response_format={'type': 'json_schema', 'json_schema': {'name': 'claim_checks', 'schema': schema}},
                         **config.reasoning_options)
+                    if hasattr(response, "llm_provenance"):
+                        usage.setdefault("requests", []).append(response.llm_provenance)
                     answer = json.loads(response.choices[0].message.content, object_pairs_hook=_unique_object)
                 else:
                     usage['cached_grounding_calls'] = usage.get('cached_grounding_calls', 0) + 1
@@ -225,7 +229,11 @@ def check_parts(parts, *, client, config, meeting_context, usage, year_conflict,
                     verdict['scope_evidence'] = all_lines.get(scope_id, '')
                     verdict['source_window_ids'] = list(window)
                 cache_write(key, answer)
+            except LLMCancelledError:
+                raise
             except Exception as exc:
+                if permanent_failure(exc):
+                    raise
                 if attempted:
                     usage['failed_calls'] = usage.get('failed_calls', 0) + 1
                     usage['grounding_failed_calls'] = usage.get('grounding_failed_calls', 0) + 1

@@ -12,6 +12,10 @@ import pytest
 def isolated_llm_transport(monkeypatch):
     # Unit tests must never accidentally contact a local model or reuse private caches.
     monkeypatch.setenv("LLM_OLLAMA_NATIVE", "false")
+    monkeypatch.setenv("LLM_MODEL", "qwen3:8b")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    monkeypatch.setenv("LLM_MODEL_REVISION", "test-revision")
     monkeypatch.setenv("LLM_SUMMARY_FACT_REVIEW_MAX_CALLS", "0")
     monkeypatch.setenv("LLM_SUMMARY_GROUNDING_MAX_CALLS", "0")
     monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
@@ -124,4 +128,9 @@ def fake_openai_module(monkeypatch):
     module = types.ModuleType("openai")
     module.OpenAI = FakeOpenAI
     monkeypatch.setitem(sys.modules, "openai", module)
+    import llm_transport
+    async def stream(client, config, payload):
+        response = client.chat.completions.create(**payload)
+        yield {'choices': [{'delta': {'content': response.choices[0].message.content}, 'finish_reason': 'stop'}]}
+    monkeypatch.setattr(llm_transport, '_openai_stream', stream)
     return FakeOpenAI

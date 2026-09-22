@@ -122,7 +122,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class CancellationRequested(Exception):
+from llm_transport import request_control, work_slot, LLMCancelledError
+
+
+class CancellationRequested(LLMCancelledError):
     """Raised inside a transcription worker when a job has been cancelled."""
 
 
@@ -1226,6 +1229,7 @@ class SummarizeResponse(BaseModel):
     review_warnings: List[SummaryReviewWarningResponse] = Field(default_factory=list)
     fallback_used: bool = False
     chunks_processed: int = 1
+    llm_usage: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SummaryJobCreateRequest(BaseModel):
@@ -1247,6 +1251,7 @@ class LLMDiagnosticsResponse(BaseModel):
     service_reachable: bool
     model_available: bool
     available_models: List[str] = Field(default_factory=list)
+    configuration: Dict[str, Any] = Field(default_factory=dict)
     message: str
 
 
@@ -2658,6 +2663,15 @@ def finalize_summary_job_cancellation(summary_job_id: str, job: dict[str, Any]) 
 
 
 def run_summary_job(summary_job_id: str) -> None:
+    def check_cancel():
+        if summary_job_cancelled(summary_job_id):
+            raise CancellationRequested()
+    with request_control(check_cancel, lambda state: update_summary_job(
+            summary_job_id, refs={"llm_progress": state})):
+        return _run_summary_job(summary_job_id)
+
+
+def _run_summary_job(summary_job_id: str) -> None:
     job = load_summary_job(summary_job_id)
     if job is None:
         return
@@ -2706,7 +2720,7 @@ def run_summary_job(summary_job_id: str) -> None:
             title = "Gesamtes Gespräch" if no_top_mode else session["tops"][index]
             names = session.get("speaker_names") or {}
             text = "\n".join(format_line_for_summary(line, names) for line in lines)
-            with LLM_WORK_LOCK:
+            with work_slot(LLM_WORK_LOCK):
                 result = summarize_segment(title, text, model=refs.get("model"),
                     system_prompt=refs.get("system_prompt"),
                     meeting_context=meeting_context_from_transcript(transcript))
@@ -2738,6 +2752,9 @@ def run_summary_job(summary_job_id: str) -> None:
                     generated_at=time.time(), updated_at=time.time())
             mutate_summary_session(job["session_id"], publish)
             outcomes[top_id] = {"status": "completed"}
+        except LLMCancelledError:
+            finalize_summary_job_cancellation(summary_job_id, job)
+            return
         except Exception as exc:
             # Retain successful TOPs and continue the same serial job after a failure.
             message = str(exc) if isinstance(exc, SummaryJobInputChanged) else safe_exception_label(exc)
@@ -2898,6 +2915,8 @@ def detect_pipeline_agenda(
             pdf_metadata = extracted.metadata.to_dict()
             if extracted_tops:
                 agenda_tops = [top.strip() for top in extracted_tops if top.strip()]
+        except LLMCancelledError:
+            raise
         except Exception as exc:
             append_pipeline_warning(
                 pipeline_id,
@@ -2942,6 +2961,8 @@ def detect_pipeline_agenda(
             pipeline_id,
             "Agenda Detection ergab keine belastbaren TOPs, nutze Fallback.",
         )
+    except LLMCancelledError:
+        raise
     except Exception as exc:
         message = f"TOP-Erkennung technisch fehlgeschlagen ({safe_exception_label(exc)}); Zuordnung prüfen."
         append_pipeline_warning(pipeline_id, message)
@@ -2991,7 +3012,7 @@ def summarize_pipeline_segments(
             transcript_text = "\n".join(
                 format_line_for_summary(line, speaker_names) for line in transcript
             )
-            with LLM_WORK_LOCK:
+            with work_slot(LLM_WORK_LOCK):
                 result = summarize_segment(
                     "Gesamtes Gespräch",
                     transcript_text,
@@ -3018,6 +3039,8 @@ def summarize_pipeline_segments(
                     "duration_seconds": result.duration_seconds,
                 }
             }
+        except LLMCancelledError:
+            raise
         except Exception as exc:
             if isinstance(exc, LLMCallError):
                 message = str(exc)
@@ -3071,7 +3094,7 @@ def summarize_pipeline_segments(
             format_line_for_summary(line, speaker_names) for line in lines
         )
         try:
-            with LLM_WORK_LOCK:
+            with work_slot(LLM_WORK_LOCK):
                 result = summarize_segment(
                     top_title,
                     transcript_text,
@@ -3096,6 +3119,8 @@ def summarize_pipeline_segments(
                 "llm_usage": getattr(result, "llm_usage", {}),
                 "duration_seconds": result.duration_seconds,
             }
+        except LLMCancelledError:
+            raise
         except Exception as exc:
             if isinstance(exc, LLMCallError):
                 message = str(exc)
@@ -3128,7 +3153,13 @@ def summarize_pipeline_segments(
     return summaries, summary_reviews
 
 
-def run_pipeline_job(
+def run_pipeline_job(pipeline_id: str, models: TranscriptionModels) -> None:
+    with request_control(lambda: ensure_pipeline_not_cancelled(pipeline_id),
+                         lambda state: save_pipeline_state(pipeline_id, result_refs={"llm_progress": state})):
+        return _run_pipeline_job(pipeline_id, models)
+
+
+def _run_pipeline_job(
     pipeline_id: str,
     models: TranscriptionModels,
 ) -> None:
@@ -4506,7 +4537,7 @@ async def generate_summary(request: SummarizeRequest):
         loop = asyncio.get_running_loop()
 
         def run_guarded_summary():
-            with LLM_WORK_LOCK:
+            with work_slot(LLM_WORK_LOCK):
                 return summarize_segment(
                     request.top_title,
                     text,
@@ -4538,6 +4569,7 @@ async def generate_summary(request: SummarizeRequest):
             ],
             fallback_used=result.fallback_used,
             chunks_processed=result.chunks_processed,
+            llm_usage=getattr(result, "llm_usage", {}),
         )
     except LLMCallError as e:
         status_code = 504 if e.category == "timeout" else 503 if e.transient else 500
