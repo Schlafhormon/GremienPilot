@@ -97,7 +97,9 @@ def test_failed_chunk_is_split_once_successful_chunks_are_cached(monkeypatch, fa
     assert result.llm.attempted_calls == 3
     assert result.llm.failed_calls == 1
     assert 'SECRET' not in str(result.llm)
-    assert len(list(tmp_path.iterdir())) == 3
+    cached = [json.loads(path.read_text()) for path in tmp_path.iterdir()]
+    assert sum('data' in entry for entry in cached) == 3
+    assert [entry for entry in cached if 'middle' in entry] == [{'middle': 0}]
     fake_openai_module.responses = []
     resumed = classify(fake_openai_module, [], ['Beratung.'] * 2)
     assert resumed.assignments == [0, 0]

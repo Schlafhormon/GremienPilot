@@ -11,6 +11,7 @@ from dataclasses import replace
 from assignment_suggestions import AssignmentSegment, transition_kind, assignments_from_segments
 from agenda_labels import reference_targets, parse_agenda_label
 from agenda_context import model_agenda, EvidenceContext, closing_act
+from agenda_runtime import OperationCancelled
 from llm_transport import complete, fits, input_bound, structured_output_budget, cache_key, cache_read, cache_write, model_fingerprint, context_tokens, token_count_method
 from summarize import get_llm_config
 
@@ -30,6 +31,8 @@ auch wenn Titel und Beratung erst in der nächsten Zeile folgen. Auch die folgen
 Aufruf und Titel können auf zwei Zeilen stehen. Zugehörige Diskussionen gehören ebenfalls zum aktuellen TOP.
 Achtung: top_id ist eine technische Identität, KEINE TOP-Nummer. Die Originalnummer steht in number.
 Vergleiche bei einem Aufruf seine Originalnummer mit number UND den aktuellen öffentlichen/nichtöffentlichen Abschnitt.
+Bei belegten Tagesordnungsänderungen können gesprochene Nummern abweichen: Originalinhalt und Änderung prüfen,
+keinen pauschalen Nummernversatz annehmen. Neue Punkte ohne passende Agendaidentität bleiben begründet null.
 Öffentlich und nichtöffentlich sind verschiedene Abschnitte, auch bei gleichen TOP-Nummern und Titeln.
 Anfangs normalerweise öffentlich; ein expliziter Abschnittswechsel ist entscheidend.
 Vorschauen, Rückblicke, Zitate, Negationen und Erwähnungen sind KEIN Wechsel zum genannten TOP.
@@ -45,8 +48,9 @@ gehören zu ihrem jeweiligen TOP, auch ohne neue TOP-Nummer. Insbesondere ist ei
 Schließung zuzuordnender Inhalt des Schließungs-TOPs. Ein Tagesordnungsaufruf gehört selbst dazu.
 null ist nur für eine echte Technikpause, isolierten Dank ohne erkennbaren Bezug oder fachlich
 nicht bestimmbaren Inhalt zulässig. 'Kein neuer TOP-Aufruf' ist allein KEIN Grund für null.
-Nutze Originalnummer UND Sitzungsteil; technische IDs sind keine TOP-Nummern. Öffentliche und
-nichtöffentliche gleichnamige Punkte sind verschieden. Rückblicke, Vorschauen, Zitate und Negationen
+Nutze Originalnummer UND Sitzungsteil; technische IDs sind keine TOP-Nummern.
+Bei Tagesordnungsänderungen können Nummern abweichen; Originalinhalt und Änderungsbelege haben Vorrang.
+Öffentliche und nichtöffentliche gleichnamige Punkte sind verschieden. Rückblicke, Vorschauen, Zitate und Negationen
 wechseln nicht den Sitzungsteil oder TOP. Echte Wiederaufnahmen bleiben möglich.
 Lies alle target_lines sowie die getrennten Kontextzeilen. Gib ausschließlich die Zielindizes aus,
 vollständig und unverändert. Das JSON enthält classification_note (kurze fachliche Begründung),
@@ -103,9 +107,18 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         config = resolve_config(model, settings)
         usage.timeout_seconds = config.timeout_seconds
         fingerprint = require_model(config)
-        with model_session(config, usage):
+        from agenda_runtime import observe
+        last_progress = [0.0]
+        def stream_progress(state):
+            usage.active_call = state
+            if progress_callback and time.monotonic() - last_progress[0] >= 5:
+                last_progress[0] = time.monotonic()
+                progress_callback(usage)
+        with model_session(config, usage), observe(stream_progress):
             return _classify(transcript, tops, usage, config, system_prompt, progress_callback,
                              cache_namespace=cache_namespace, fingerprint=fingerprint)
+    except OperationCancelled:
+        raise
     except Exception as exc:
         usage.status = 'failed'
         usage.failure_reasons.append(report_error(config, exc))
@@ -114,6 +127,8 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         usage.processed_lines = []
         usage.chunks.append({'phase': 'agenda_model', 'status': 'failed', 'reason': usage.failure_reasons[-1]})
         return []
+    finally:
+        usage.active_call = {}
 
 
 def _classify(transcript, tops, usage, config, system_prompt=None, progress_callback=None, *, cache_namespace='', fingerprint=None):
@@ -136,7 +151,7 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
         fingerprint = fingerprint or model_fingerprint(config)
     except Exception as exc:
         fingerprint = {'model': config.model, 'digest': None, 'error': type(exc).__name__}
-    provenance = {**fingerprint, 'prompt_version': 'known-agenda-evidence-v5', 'schema_version': 5,
+    provenance = {**fingerprint, 'prompt_version': 'known-agenda-evidence-v8', 'schema_version': 5,
                   'temperature': config.temperature, 'max_tokens': output, 'reasoning_effort': config.reasoning_effort,
                   'seed': config.seed, 'truncate': False, 'shift': False,
                   'num_thread': config.cpu_threads or int(os.environ.get('LLM_CPU_THREADS', '16')),
@@ -149,7 +164,9 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
         from agenda_timeline import analyze
         provenance.update(task='agenda', context_tokens=context_tokens(config),
                           token_count_method=token_count_method(config), tokenizer_sha256=config.tokenizer_sha256,
-                          timeout_seconds=config.timeout_seconds)
+                          timeout_seconds=config.timeout_seconds,
+                          runtime_version=1, idle_timeout_seconds=config.idle_timeout_seconds,
+                          total_timeout_seconds=config.total_timeout_seconds)
         usage.provenance.update(provenance)
         timeline = analyze(client, config, transcript, agenda, usage, provenance, progress_callback)
         provenance['timeline_identity'] = timeline['identity']
@@ -199,6 +216,11 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
             'früheren Niederschrift bleiben beim heutigen Niederschrifts-TOP. Ein nachfolgender '
             'eigenständiger Informationspunkt kann auch indirekt beginnen. Schließung nur bei Vollzug '
             'oder unmittelbar zugehöriger Verabschiedung. Bedingte Nachfragen können aktuelle Fortsetzungen sein.')
+        if any(evidence_context.at(i).get('numbering_changes') for i in range(start-1, end+1)):
+            user['scope_rules'] += (' Es gibt Originalhinweise auf eine Tagesordnungsänderung. '
+                'Gesprochene Nummern sind dann kein verbindlicher Schlüssel zur PDF-Liste. '
+                'Prüfe Titel/Inhalt und ursprüngliche Änderung samt möglichen Gegenbelegen. '
+                'Erfinde keine TOPs und keinen pauschalen Nummernversatz; neue, nicht enthaltene TOPs bleiben null mit konkretem Grund.')
         if any(re.search(r"\b(?:schließe|beende)\b.{0,80}\bSitzung\b|"
                          r"\bSitzung\b.{0,60}\b(?:geschlossen|beendet)\b",
                          transcript[i].text, re.I) for i in range(start, end+1)):
@@ -334,7 +356,9 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
                             tops[identities[original_topic['top_id']]], re.I)):
                     raise AgendaValidationError('protocol_reference_cannot_change_topic')
                 if (active_identity and identity != active_identity and kind == 'mention'
-                        and chosen in mentioned_targets):
+                        and chosen in mentioned_targets
+                        and not (original_topic and original_topic['kind'] == 'closing'
+                                 and original_topic['top_id'] == identity)):
                     raise AgendaValidationError('noncurrent_reference_cannot_change_topic')
                 # A literal quote cannot conceal the non-current speech act around it.
                 if kind in {'mention', 'mixed', 'stop'}:
@@ -351,7 +375,8 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
                     _, targets = reference_targets(transcript[i].text, tops)
                     if state['section']:
                         targets = {t for t in targets if agenda[t]['section'] in {None, state['section']['section']}}
-                    if transition_kind(transcript[i].text) in {'call', 'heading'} and targets and chosen not in targets:
+                    if (not state.get('numbering_changes') and transition_kind(transcript[i].text) in {'call', 'heading'}
+                            and targets and chosen not in targets):
                         raise AgendaValidationError('contradictory_current_call')
                 active_identity = identity
             checked.append(row)
@@ -441,9 +466,31 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
         began = time.monotonic()
         detail = {'start_index': start, 'end_index': end, 'depth': depth,
                   'parent_cache_key': parent,
+                  'cache_key': hashlib.sha256(key.encode()).hexdigest(),
                   'input_token_bound': input_bound(request, window_schema(start, end) if config.task == 'agenda' else None, config), 'max_output_tokens': output,
                   'reserved_output_tokens': output_reserve}
         rows = None
+        def split_children():
+            middle = (start + end) // 2
+            cache_write(key + ':split-plan-v1', {'middle': middle})
+            left = run(start, middle, depth+1, detail['cache_key'])
+            right = run(middle+1, end, depth+1, detail['cache_key'])
+            if left is not None and right is not None:
+                repaired = left + right
+                cache_write(key, {'data': {'tops': repaired}, 'provenance': provenance,
+                    'history': [detail, {'repair': 'split', 'children': [
+                        c for c in usage.chunks if c.get('parent_cache_key') == detail['cache_key']]}]})
+                return repaired
+            return None
+        if depth < repairs and start < end and cache_read(key + ':split-plan-v1') and cache_read(key) is None:
+            try:
+                detail.update(status='resumed_split', phase='line_assignment')
+                return split_children()
+            finally:
+                detail['duration_seconds'] = round(time.monotonic()-began, 2)
+                usage.chunks.append(detail)
+                if progress_callback:
+                    progress_callback(usage)
         try:
             rows = obtain(request, start, end, detail, 'known-agenda-v5')
             usage.processed_lines.extend(range(start, end+1))
@@ -463,6 +510,8 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
                     end_index=row['end_index'], confidence=max(0.0, min(1.0, float(row.get('confidence', 0.5)))),
                     uncertain=bool(row.get('uncertain', True)), transition_type='llm', reason=row['reason'],
                     evidence_index=row['evidence_index'], evidence_text=row['evidence_text']))
+        except OperationCancelled:
+            raise
         except Exception as exc:
             rows = None
             usage.failed_calls += 1
@@ -478,16 +527,7 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
                 if detail['message'] not in usage.failure_reasons:
                     usage.failure_reasons.append(detail['message'])
             if depth < repairs and start < end:
-                middle = (start + end) // 2
-                left = run(start, middle, depth+1, detail['cache_key'])
-                right = run(middle+1, end, depth+1, detail['cache_key'])
-                if left is not None and right is not None:
-                    # Retain the validated repair as a whole. A resumed run must
-                    # not repeat the known failed parent request before its cache hits.
-                    rows = left + right
-                    cache_write(key, {'data': {'tops': rows}, 'provenance': provenance,
-                                      'history': [detail, {'repair': 'split', 'children': [
-                                          c for c in usage.chunks if c.get('parent_cache_key') == detail['cache_key']]}]})
+                rows = split_children()
             else:
                 usage.gaps.append({'start_index': start, 'end_index': end, 'kind': 'technical',
                                    'reason': reason})
@@ -534,6 +574,28 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
                                min(len(transcript)-1, segment.end_index+1)])
         if section:
             prior_section = section
+    if config.task == 'agenda':
+        # One finite review pass for uncertainty and contradictory hypotheses.
+        # Predictions trigger inspection, never restrict the permitted labels.
+        review_triggers = []
+        for segment in segments:
+            if segment.uncertain:
+                for index in {segment.start_index, segment.end_index}:
+                    boundaries.append([max(0, index-2), min(len(transcript)-1, index+2)])
+                    review_triggers.append({'kind': 'uncertain_assignment_boundary', 'index': index})
+        current = assignments_from_segments(len(transcript), segments)
+        for event in (timeline or {}).get('events', []):
+            index = event['index']
+            proposed = identities.get(event.get('top_id'))
+            disagreement = event.get('top_id') is not None and current[index] != proposed
+            if event.get('uncertain') or event.get('contradictions') or disagreement:
+                indices = {index, *(c['index'] for c in event.get('contradictions', []))}
+                for i in indices:
+                    boundaries.append([max(0, i-2), min(len(transcript)-1, i+2)])
+                review_triggers.append({'kind': 'timeline_uncertainty_or_disagreement',
+                    'index': index, 'timeline_top_id': event.get('top_id'), 'assigned_top_index': current[index],
+                    'evidence_indices': sorted(indices)})
+        usage.provenance['review_triggers'] = review_triggers
     merged_boundaries = []
     for a, b in sorted(boundaries):
         if merged_boundaries and a <= merged_boundaries[-1][1]+1:
@@ -545,6 +607,10 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
     boundaries = [window for window in boundaries
                   if all(i in processed for i in range(window[0], window[1]+1))]
     max_reviews = max(0, min(10, int(os.environ.get('AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS', '3'))))
+    if config.task == 'agenda':
+        # At most one visit per target line/range; all requested checks finish
+        # in a finite pass rather than silently stopping after three reviews.
+        boundary_limit = max_reviews = len(transcript)
     review_note = (
         "\nUnabhängige zweite fachliche Prüfung der Zielzeilen. Der bisher vorgeschlagene Sitzungskontext "
         "ist keine Evidenz. Nutze evidence_context und Originalzeilen. Ein TOP 'Anfragen', 'Informationen' oder 'Verschiedenes' "
@@ -646,6 +712,8 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
                     updated = assignments_from_segments(len(transcript), segments)
                     detail['changes'] = [{'line_index': i, 'before': current[i], 'after': updated[i]}
                                          for i in range(start, end+1) if current[i] != updated[i]]
+            except OperationCancelled:
+                raise
             except Exception as exc:
                 # Failure of a second opinion must not relabel an already evaluated
                 # semantic gap as technically unseen, or overwrite successful assignments.
@@ -679,4 +747,13 @@ def _classify(transcript, tops, usage, config, system_prompt=None, progress_call
     segments.sort(key=lambda segment: segment.start_index)
     usage.status = ('success' if len(usage.processed_lines) == len(transcript)
                     else 'partial_failure' if usage.processed_lines else 'failed')
+    unresolved = [c for c in usage.chunks if c.get('phase') in {'boundary_review', 'gap_review'}
+                  and c.get('status') == 'failed']
+    usage.provenance['completion'] = {
+        'technical_coverage_complete': set(usage.processed_lines) == set(range(len(transcript))),
+        'unresolved_reviews': [{'phase': c['phase'], 'start_index': c['start_index'],
+                                'end_index': c['end_index']} for c in unresolved],
+        'semantic_gap_lines': sum(g['end_index']-g['start_index']+1 for g in usage.gaps if g['kind'] == 'semantic'),
+        'model_failures': usage.failed_calls,
+    }
     return segments

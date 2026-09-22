@@ -106,6 +106,10 @@ export type PipelineStage =
   | string;
 
 export interface PipelineJob {
+  agenda_progress?: { attempted_calls?: number; processed_lines?: number[]; active_call?: {
+    phase: string; model: string; elapsed_seconds: number; response_chunks: number; output_characters: number;
+    step?: string; target_start?: number; target_end?: number;
+  } };
   pipeline_id: string;
   session_id?: string | null;
   transcription_job_id?: string | null;
@@ -404,6 +408,11 @@ export interface PdfAgendaMetadata {
 export interface PdfAgendaExtractionResult {
   tops: string[];
   metadata: PdfAgendaMetadata;
+  provenance?: {
+    requires_review?: boolean;
+    conflicts?: Array<{ kind: string; source?: string; title?: string }>;
+    [key: string]: unknown;
+  };
 }
 
 export type ExportFormat = 'txt' | 'docx' | 'pdf';
@@ -509,6 +518,9 @@ export interface TopColor {
   dot: string;
 }
 export interface AgendaModelSettings {
+  connect_timeout_seconds?: number;
+  idle_timeout_seconds?: number;
+  total_timeout_seconds?: number;
   enabled: boolean;
   model: string;
   context_tokens: number;

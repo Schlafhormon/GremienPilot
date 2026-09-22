@@ -78,7 +78,9 @@ def test_structured_pdf_and_plain_fallback_keep_sections_and_hierarchy():
 def test_pdf_title_recovery_never_uses_position_or_duplicate_title():
     pdf = 'Tagesordnung\n2 Haushalt\n7 Anfragen\n9 Anfragen'
     result = parse_agenda_data_response('{"tops":["Haushalt", "Anfragen", "Unbekannt"]}', pdf)
-    assert result.tops == ['2 Haushalt', 'Anfragen', 'Unbekannt']
+    assert result.tops == ['2 Haushalt', '7 Anfragen', '9 Anfragen']
+    assert [c['origin'] for c in result.provenance['candidates']] == ['source_and_model', 'numbered_source', 'numbered_source']
+    assert any(c.get('title') == 'Unbekannt' for c in result.provenance['conflicts'])
 
 
 def test_only_exact_known_numbers_are_certain_even_with_keyword_overlap():
@@ -129,7 +131,9 @@ def test_pdf_title_recovery_does_not_overwrite_explicit_number_or_section():
         {"number":"2","title":"Anfragen","section":"public"},
         {"number":"3","title":"Anfragen","section":"nonpublic"}
     ]}''', 'Tagesordnung\nÖffentlicher Teil\n2 Anfragen')
-    assert result.tops == ['[Öffentlich] 2 Anfragen', '[Nichtöffentlich] 3. Anfragen']
+    assert result.tops == ['[Öffentlich] 2 Anfragen']
+    assert result.provenance['conflicts'] == [{'kind': 'model_item_not_confirmed_by_source',
+        'model_index': 1, 'title': '[Nichtöffentlich] 3. Anfragen'}]
 
 
 @pytest.mark.parametrize('spelling', ['nichtöffentlich', 'nicht öffentlich', 'nicht-öffentlich', 'nicht oeffentlich'])

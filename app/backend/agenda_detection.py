@@ -125,6 +125,7 @@ class AgendaLLMUsage:
     gaps: list[dict] = field(default_factory=list)
     chunks: list[dict] = field(default_factory=list)
     provenance: dict = field(default_factory=dict)
+    active_call: dict = field(default_factory=dict)
 
     @property
     def warnings(self) -> list[str]:

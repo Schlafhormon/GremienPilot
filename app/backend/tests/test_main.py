@@ -543,6 +543,7 @@ def test_extract_tops_endpoint_returns_metadata(tmp_path, monkeypatch):
         "extract_agenda_data_from_pdf",
         lambda pdf_path, model=None, system_prompt=None: SimpleNamespace(
             tops=["Eröffnung", "Haushalt"],
+            provenance={},
             metadata=SimpleNamespace(
                 to_dict=lambda: {
                     "committee": "Hauptausschuss",
@@ -1777,7 +1778,8 @@ def test_pipeline_llm_policy_and_persisted_fallback(
         response = client.post("/api/pipeline/start", data=data, files={"audio": ("test.mp3", b"fake", "audio/mpeg")})
         assert response.status_code == 200
         pipeline_id = response.json()["pipeline_id"]
-        assert wait_until(lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"] == "completed")
+        expected = 'failed' if enabled else 'completed'
+        assert wait_until(lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"] == expected)
         main.jobs.clear()
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
     usage = result["agenda_detection"]["llm"]
@@ -1786,6 +1788,8 @@ def test_pipeline_llm_policy_and_persisted_fallback(
     assert usage["source"] == ("server_default" if option_value is None and form_value is None else "request")
     assert len(fake_openai_module.instances) == int(enabled)
     if enabled:
+        assert result['pipeline']['stage'] != 'ready_for_review'
+        assert result['session']['summaries'] == {}
         assert result["agenda_detection"]["warnings"]
         assert any("timeout" in warning for warning in result["warnings"])
     assert "SECRET" not in str(result)
@@ -1875,7 +1879,7 @@ def test_known_agenda_total_failure_is_persisted_as_incomplete(tmp_path, monkeyp
             'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'true', 'model': 'test-model',
         }, files={'audio': ('meeting.mp3', b'audio', 'audio/mpeg')})
         pipeline_id = started.json()['pipeline_id']
-        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'completed')
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'failed')
         result = client.get(f'/api/pipeline/{pipeline_id}/result').json()
         session = client.get('/api/sessions/' + result['session']['session_id']).json()
     assert result['agenda_detection']['llm']['status'] == 'failed'

@@ -182,9 +182,149 @@ Originalinhalt-Tokens (mit kleiner Toleranz für Template-Ränder) verarbeitet h
 eine auffällig niedrigere Zählung ist ein möglicher Trunkierungs-/Tokenizerfehler.
 256K-Praxisnutzung wird nicht behauptet.
 
+### Nachtläufe und Wiederaufnahme (Entwicklungsbranch)
+
+Der separate TOP-Dienst liest native Ollama-Streams. `timeout_seconds` begrenzt
+jetzt das Warten auf die **erste Ausgabe**, einschließlich Modellladen und
+Promptverarbeitung. Diese beiden Vorgänge lassen sich während des Wartens mit
+der Ollama-API nicht getrennt beobachten; nach Abschluss stehen getrennte
+Providerzeiten zur Verfügung. `connect_timeout_seconds` (15 s) begrenzt den
+Verbindungsaufbau, `idle_timeout_seconds` (300 s) ausbleibende Ausgabe nach dem
+ersten Inhalt, `total_timeout_seconds` (43200 s) den gesamten einzelnen Aufruf.
+Aktive Generierung kann somit länger als 1800 Sekunden laufen. Die Grenzen
+sind getrennt in den KI-Einstellungen editierbar. Qwens Transport und gemeinsame
+Umgebungsparameter werden dadurch nicht verändert.
+
+Nur ein abgeschlossenes `done=true` mit vollständiger, budgetgeprüfter und
+fachlich strukturell validierter Antwort wird übernommen. Teil-JSON gilt nie
+als Zuordnung. Abbruch schließt den HTTP-Stream; der bestehende Modell-Lebenszyklus
+prüft anschließend die Freigabe. Verbindungs-/Ladefehler werden nicht durch ein
+Ersatzmodell kaschiert. Zeit-/Ausgabe-/Validierungsfehler des Themenverlaufs
+erhalten höchstens drei Teilungsebenen mit Überlappung und Grenzprüfung.
+
+Validierte Fenster werden atomar mit `fsync` im vorhandenen persistenten Cache
+gesichert. Themenverlaufsteilungen erhalten vor dem ersten Kind einen eigenen
+gespeicherten Teilungsplan. Bei Wiederaufnahme werden erfolgreiche Kinder erneut
+validiert, ohne den bereits fehlgeschlagenen großen Elternaufruf zu wiederholen.
+Cacheidentität umfasst Eingabe, Modell/Digest, Parameter, Tokenizer, Promptversion,
+Schema und Namensraum. Es gibt keine Wiederverwendung bei abweichender Identität.
+Unvollständige Antworten werden nicht als erfolgreiche Cacheeinträge gespeichert.
+
+Im Sitzungsverlauf startet **TOPs und Zusammenfassungen in neuer Sitzung berechnen**
+einen dauerhaften Pipeline-Auftrag auf einer Kopie des bestehenden Transkripts.
+Die Ursprungssitzung bleibt unverändert; IDs, Zeitdaten und Audioverknüpfung bleiben
+erhalten. Der Auftrag läuft unabhängig vom geöffneten Browser weiter. Nach Fehler
+oder Backend-Neustart kann **TOP-Auftrag fortsetzen** denselben Cache-Namensraum
+verwenden. Änderungen an Transkript, Agenda oder TOP-Einstellungen erfordern einen
+neuen Auftrag. Aktuelle Pipeline-API:
+
+- `POST /api/sessions/{session_id}/agenda-jobs`, JSON `{}`; optional `tops` mit
+  einer neu aus dem Original-PDF extrahierten Agenda. Antwort enthält neue Sitzung
+  und Pipeline-ID. Kein erneuter Transkriptionsauftrag.
+- `POST /api/pipeline/{pipeline_id}/resume`: unterbrochenen Auftrag fortsetzen.
+- `GET /api/pipeline/{pipeline_id}`: Aktivität, Laufzeit, Ausgabezeichen,
+  technische Zeilenabdeckung und abgeschlossene Fenster in `agenda_progress`.
+- `GET /api/pipeline/{pipeline_id}/result`: auch gespeicherte Teilergebnisse
+  fehlgeschlagener/abgebrochener Aufträge. Der Status bleibt ausdrücklich fehlgeschlagen.
+
+Im separaten Modus werden sämtliche ermittelten Grenz-/Lückenprüfbereiche in einem
+endlichen Durchgang geprüft; das bisherige Limit von drei/vier Reviews bleibt im
+Ein-LLM-Modus erhalten. Fehlgeschlagene Reviews, technische Lücken und fachlich
+begründete Unklarheit werden getrennt dokumentiert. Technische Fehler sperren
+Zusammenfassungen und führen zu `failed`, nicht `completed/ready_for_review`.
+Begründete semantische Lücken dürfen bestehen bleiben und bleiben sichtbar.
+
+### PDF-Quellenabgleich
+
+Die strukturierte Qwen-Extraktion verlangt nun JSON auch im Providerformat.
+Die Antwort bleibt zusammen mit nummerierten Originalzeilen, verworfenen
+Dokumentartefakten und Konflikten in `provenance` erhalten; bei Pipeline-PDFs
+zusätzlich unter `result_refs.pdf_extraction`. Ungültiges JSON wird nicht als
+nummerierte Freitextliste interpretiert. Die alte Regel „längere Liste gewinnt“
+entfällt: Originalnummern, Abschnitte und einzelne Vorkommen werden abgeglichen.
+Unbelegte Modellzusätze werden als Konflikte gespeichert, nicht still ergänzt.
+Fehlende/mehrdeutige Modellbestätigung bleibt prüfpflichtig. Die heuristische
+Originaltextrekonstruktion ist kein unabhängiger fachlicher Goldstandard.
+
+Allgemeine Signatur-/Amtsbezeichnungs-, Trennlinien- und Seitenfußregeln ersetzen
+die früheren namensbezogenen Filter. Gedrehte Randstempel einer sonst überwiegend
+aufrechten PDF-Seite werden geometrisch ausgefiltert; vollständig gedrehte Seiten
+werden dadurch nicht geleert. Original-PDFs für eigene Diagnosezwecke aufbewahren.
+
+### Eindeutiger Ein-LLM- und Entwicklungsstart
+
+Ein Git-Wechsel verändert weder `.env`, gespeicherte Einstellungen, Datenbank noch
+Images. `main` wurde nicht zurückgesetzt und bleibt auf dem bisherigen Ein-LLM-
+Quellstand. Die Weiterentwicklung liegt auf `feature/dual-llm-agenda`; kein neuer
+Commit wurde für diese Arbeit angelegt. GPU-Compose liest `BACKEND_GPU_IMAGE`.
+
+Mit den neuen lokal gebauten Images und der vorhandenen `.env`:
+
+```powershell
+# Ein LLM, unabhängig von einer gespeicherten aktivierten Gemma-Option:
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.single-llm.yml up -d --pull never
+
+# Entwicklungsbetrieb, gespeicherte TOP-Option gilt wieder:
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --pull never
+```
+
+Der Ein-LLM-Override setzt `AGENDA_MODEL_FORCE_DISABLED=true` nur im Container.
+Er überschreibt die JSON-Einstellungen nicht und lehnt das Aktivieren der
+separaten Option in diesem Startmodus ab. Dies ist der Ein-LLM-Betrieb des neuen
+Codes; für exakt den historischen `main`-Build sind eigene, zu dessen Quellstand
+passende Image-Tags erforderlich. Niemals aus dem Branchnamen auf den laufenden
+Code schließen. Vor jedem Neustart aktive Pipeline-, Transkriptions- und
+Zusammenfassungsjobs prüfen. Die TLS-CA-Variablen und persistenten Torch-/HF-
+Volumes bleiben Bestandteil des regulären Compose-Starts.
+
+Öffentliche Transportreferenzen: [Ollama Chat](https://docs.ollama.com/api/chat),
+[HTTPX Streaming](https://www.python-httpx.org/async/),
+[HTTPX Timeoutarten](https://www.python-httpx.org/advanced/timeouts/).
+
 Die genaue Zuordnung behält ihre begrenzten Ausgabefenster: Ein großes
 Eingabefenster des Themenverlaufs ist kein Budget für hunderte JSON-Zeilenlabels.
 Cache-Schlüssel trennen Modell, Digest, Parameter, Kontext, Prompt-/Schemaversion,
 Verarbeitungsschritt, Eingabe und frischen Namensraum. Der Verlauf erhält eine
 eigene Identität; davon abhängige Zuordnungen verweisen auf diese Herkunft.
 `chunks` enthält Cache-/Providerstatus, Aufrufmetriken und Parent-/Reparaturhistorie.
+
+Originalhinweise auf eine nachträglich geänderte Tagesordnung werden auch in
+späten Zuordnungs- und Reparaturfenstern mitgegeben. In diesem Fall gilt eine
+gesprochene Nummer nicht als harter Schlüssel zur gedruckten PDF-Nummer. Es wird
+weder ein Nummernversatz berechnet noch die Annahme eines Änderungsantrags
+behauptet. Inhalt und Originalbelege einschließlich möglicher Ablehnung bleiben
+maßgeblich. Ein neu eingefügter Punkt ohne vorhandene Agendaidentität bleibt eine
+begründete fachliche Lücke. Nach einem belegten Wechsel des Sitzungsteils beginnt
+diese Prüfung für den neuen Abschnitt erneut.
+
+PDF-Daten werden mit einem eigenen strukturierten Ausgabeschema angefordert;
+Qwen-Zusammenfassungen verwenden weiterhin ihre bisherigen Parameter. Der
+manuelle PDF-Upload zeigt verbleibende Quellenkonflikte an und bietet den lokalen
+Download des vollständigen Quellenabgleichs einschließlich Originalantwort an.
+Der Pipeline-PDF-Pfad speichert diesen Abgleich dauerhaft beim Auftrag.
+Reine Typographie und eine nur im Originaltitel enthaltene Vorlagennummer gelten
+bei sonst identischem Titel als erklärbarer Abgleich. Widersprechende
+Vorlagennummern und fehlende Titelteile bleiben Konflikte. Originaltitel werden
+dabei nicht überschrieben. Nummerierte Unterpunkte bleiben separate Einträge;
+unnummerierte Aufzählungen bleiben als `subpoints` beim Quellenkandidaten erhalten.
+
+Die Schließungsprüfung trennt den tatsächlich geschlossenen Sitzungsteil von
+einer nachfolgenden Ankündigung des anderen Teils in derselben Zeile. Eine höflich
+formulierte gegenwärtige Schließung wird nur zusammen mit der unmittelbar
+folgenden Verabschiedung als Originalbeleg akzeptiert; Zukunft, Rückblick,
+Negation und bloße Ankündigung des Schließungs-TOPs reichen nicht aus.
+
+Im separaten Modellmodus löst auch eine unsichere Segmentgrenze oder ein
+Widerspruch zwischen Verlaufshypothese und lokaler Zuordnung eine gezielte
+unabhängige Nachprüfung aus. Überlappende Prüfbereiche werden vereinigt. Es gibt
+einen endlichen Nachprüfdurchgang; weiterhin fachlich unsichere Antworten bleiben
+sichtbar unsicher. Prüfgründe stehen in `provenance.review_triggers`. Eine globale
+Hypothese schränkt die zulässigen lokalen TOPs nicht ein.
+
+Fortschrittsspeicherung und Abbruch teilen eine Sperre für das Lesen,
+Zusammenführen und Speichern des Auftragszustands im Backendprozess. Ein
+Fortschrittsupdate kann so keinen Abbruchwunsch durch einen alten Stand ersetzen.
+Abbruch wird bis zum Pipeline-Worker weitergereicht und löst keine Modellreparatur
+aus. Beim Fortsetzen werden Warnungen des vorigen Versuchs in
+`result_refs.previous_attempts` aufbewahrt; sie erscheinen nicht als Fehler des
+neu laufenden Versuchs.

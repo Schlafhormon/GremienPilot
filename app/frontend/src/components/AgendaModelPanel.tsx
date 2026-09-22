@@ -57,11 +57,14 @@ export default function AgendaModelPanel() {
             ['context_tokens', 'Kontextbudget (Tokens)', 8192, 262144],
             ['output_tokens', 'Ausgabebudget Zuordnung', 1024, 16384],
             ['timeline_output_tokens', 'Ausgabebudget Themenverlauf', 1024, 16384],
-            ['timeout_seconds', 'Zeitlimit pro Aufruf (Sekunden)', 10, 7200],
+            ['timeout_seconds', 'Modellladen / erste Antwort (Sekunden)', 10, 7200],
+            ['connect_timeout_seconds', 'Verbindungsaufbau (Sekunden)', 1, 120],
+            ['idle_timeout_seconds', 'Inaktivität bei Ausgabe (Sekunden)', 10, 7200],
+            ['total_timeout_seconds', 'Gesamtlimit je TOP-Aufruf (Sekunden)', 60, 172800],
             ['cpu_threads', 'CPU-Threads', 1, 128],
           ] as const).map(([key, label, min, max]) => <label key={key} className="text-sm">{label}
             <input type="number" min={min} max={max} step={1} className="block w-full border rounded p-2"
-              value={draft[key]} onChange={event => update({ [key]: Number(event.target.value) })} />
+              value={draft[key] ?? ({ connect_timeout_seconds: 15, idle_timeout_seconds: 300, total_timeout_seconds: 43200 } as Record<string, number>)[key]} onChange={event => update({ [key]: Number(event.target.value) })} />
           </label>)}
         </div>
         <label className="flex gap-2 items-center text-sm">

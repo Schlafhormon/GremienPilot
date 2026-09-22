@@ -123,8 +123,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class CancellationRequested(Exception):
+from agenda_runtime import OperationCancelled
+
+
+class CancellationRequested(OperationCancelled):
     """Raised inside a transcription worker when a job has been cancelled."""
+
+
+PIPELINE_INSTANCE_ID = str(uuid.uuid4())
+PIPELINE_STATE_LOCK = threading.RLock()
 
 
 @asynccontextmanager
@@ -582,16 +589,19 @@ def _pipeline_refs(job: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def save_pipeline_state(pipeline_id: str, **changes: Any) -> dict[str, Any] | None:
-    job = load_pipeline_job(pipeline_id)
-    if job is None:
-        return None
-    result_refs = _pipeline_refs(job)
-    if "result_refs" in changes:
-        result_refs.update(changes.pop("result_refs") or {})
-    job.update(changes)
-    job["result_refs"] = result_refs
-    job["updated_at"] = time.time()
-    return save_pipeline_job(pipeline_id, job)
+    # Streaming progress and API cancellation run on different threads. Their
+    # read/merge/write operation must not restore stale cancel_requested=False.
+    with PIPELINE_STATE_LOCK:
+        job = load_pipeline_job(pipeline_id)
+        if job is None:
+            return None
+        result_refs = _pipeline_refs(job)
+        if "result_refs" in changes:
+            result_refs.update(changes.pop("result_refs") or {})
+        job.update(changes)
+        job["result_refs"] = result_refs
+        job["updated_at"] = time.time()
+        return save_pipeline_job(pipeline_id, job)
 
 
 def append_pipeline_warning(pipeline_id: str, message: str) -> None:
@@ -994,6 +1004,7 @@ class PipelineStatusResponse(BaseModel):
     error: Optional[str] = None
     created_at: Optional[float] = None
     updated_at: Optional[float] = None
+    agenda_progress: dict[str, Any] = Field(default_factory=dict)
 
 
 class SummaryJobResponse(BaseModel):
@@ -1268,6 +1279,7 @@ class LLMDiagnosticsResponse(BaseModel):
 class ExtractTOPsResponse(BaseModel):
     tops: List[str]
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AssignmentSuggestionsRequest(BaseModel):
@@ -2181,6 +2193,7 @@ def build_pipeline_status_response(job: dict[str, Any]) -> PipelineStatusRespons
         stage=job["stage"],
         progress=job["progress"],
         warnings=list(refs.get("warnings") or []),
+        agenda_progress=refs.get('agenda_progress') or {},
         error=job.get("error"),
         created_at=job.get("created_at"),
         updated_at=job.get("updated_at"),
@@ -2899,6 +2912,9 @@ def detect_pipeline_agenda(
     options: dict[str, Any],
 ) -> tuple[list[str], list[int | None], dict[str, Any], dict[str, Any]]:
     agenda_tops = [top.strip() for top in known_tops if top.strip()]
+    def progress(usage):
+        ensure_pipeline_not_cancelled(pipeline_id)
+        save_pipeline_state(pipeline_id, result_refs={"agenda_progress": asdict(usage)})
     pdf_metadata: dict[str, Any] = {}
     model = options.get("agenda_model") or options.get("model")
     # The legacy system_prompt belongs only to summarization.
@@ -2919,8 +2935,18 @@ def detect_pipeline_agenda(
             )
             extracted_tops = extracted.tops
             pdf_metadata = extracted.metadata.to_dict()
+            save_pipeline_state(pipeline_id, result_refs={'pdf_extraction': extracted.provenance})
+            if extracted.provenance.get('requires_review'):
+                append_pipeline_warning(pipeline_id, 'PDF-Extraktion: Abweichungen zwischen Originaltext und Modellantwort; Quellenabgleich gespeichert.')
             if extracted_tops:
                 agenda_tops = [top.strip() for top in extracted_tops if top.strip()]
+                # Persist the agenda input before starting hours of TOP work.
+                # A restart must not silently turn a PDF job into free discovery.
+                checkpoint = save_pipeline_state(pipeline_id, result_refs={
+                    'known_tops': agenda_tops, 'pdf_metadata': pdf_metadata})
+                if checkpoint and checkpoint.get('session_id'):
+                    save_pipeline_session(checkpoint['session_id'], tops=agenda_tops,
+                                          export_metadata=pdf_metadata)
         except Exception as exc:
             append_pipeline_warning(
                 pipeline_id,
@@ -2939,8 +2965,7 @@ def detect_pipeline_agenda(
                 system_prompt=system_prompt,
                 use_llm=options.get("agenda_use_llm"),
                 cache_namespace=options.get('agenda_cache_namespace', ''),
-                progress_callback=lambda usage: save_pipeline_state(
-                    pipeline_id, result_refs={"agenda_progress": asdict(usage)}),
+                progress_callback=progress,
             )
         else:
             result = detect_agenda_from_transcript(
@@ -2971,6 +2996,8 @@ def detect_pipeline_agenda(
             pipeline_id,
             "Agenda Detection ergab keine belastbaren TOPs, nutze Fallback.",
         )
+    except OperationCancelled:
+        raise
     except Exception as exc:
         message = f"TOP-Erkennung technisch fehlgeschlagen ({safe_exception_label(exc)}); Zuordnung prüfen."
         append_pipeline_warning(pipeline_id, message)
@@ -3157,6 +3184,23 @@ def summarize_pipeline_segments(
     return summaries, summary_reviews
 
 
+def agenda_technical_check(info, line_count):
+    usage = info.get('llm') or {}
+    completion = (usage.get('provenance') or {}).get('completion') or {}
+    problems = []
+    if usage.get('status') in {'failed', 'partial_failure', 'fallback', 'partial_fallback'}:
+        problems.append('Modellverarbeitung fehlgeschlagen oder unvollständig')
+    if any(g.get('kind') == 'technical' for g in usage.get('gaps', [])):
+        problems.append('Technische Zuordnungslücken')
+    if completion.get('technical_coverage_complete') is False:
+        problems.append('Nicht alle Originalzeilen verarbeitet')
+    if completion.get('unresolved_reviews'):
+        problems.append('Technisch fehlgeschlagene Grenz-/Lückenprüfungen')
+    return {'passed': not problems, 'problems': problems, 'line_count': line_count,
+            'semantic_uncertainty': info.get('uncertain_count', 0),
+            'semantic_gaps': [g for g in usage.get('gaps', []) if g.get('kind') == 'semantic']}
+
+
 def run_pipeline_job(
     pipeline_id: str,
     models: TranscriptionModels,
@@ -3183,14 +3227,22 @@ def run_pipeline_job(
 
     try:
         ensure_pipeline_not_cancelled(pipeline_id)
+        from agenda_model import load_settings
+        save_pipeline_state(pipeline_id, result_refs={
+            'worker_active': True, 'worker_instance_id': PIPELINE_INSTANCE_ID})
+        agenda_settings = load_settings().model_dump()
+        if refs.get('agenda_settings') and refs['agenda_settings'] != agenda_settings:
+            raise ValueError('TOP-Einstellungen seit Auftragsstart geändert; neue Berechnung erforderlich')
+        save_pipeline_state(pipeline_id, result_refs={'agenda_settings': agenda_settings})
         save_pipeline_state(
             pipeline_id,
             status=PIPELINE_STATUS_PROCESSING,
-            stage=PIPELINE_STAGE_TRANSCRIBE,
-            progress=15,
+            stage=PIPELINE_STAGE_AGENDA_DETECT if refs.get('transcript_snapshot') else PIPELINE_STAGE_TRANSCRIBE,
+            progress=70 if refs.get('transcript_snapshot') else 15,
             error=None,
         )
-        run_transcription(transcription_job_id, audio_path, models)
+        if not refs.get('transcript_snapshot'):
+            run_transcription(transcription_job_id, audio_path, models)
         ensure_pipeline_not_cancelled(pipeline_id)
 
         transcription_job = load_job(transcription_job_id)
@@ -3202,7 +3254,7 @@ def run_pipeline_job(
             )
             raise PipelineTranscriptionError(error)
 
-        transcript = [
+        transcript = refs.get('transcript_snapshot') or [
             line_to_dict(line) for line in (transcription_job.get("transcript") or [])
         ]
         save_pipeline_session(
@@ -3239,7 +3291,9 @@ def run_pipeline_job(
             stage=PIPELINE_STAGE_AGENDA_DETECT,
             progress=72,
         )
-        transcript = split_transcript_for_agenda_detection(transcript)
+        if not refs.get('transcript_snapshot'):
+            transcript = split_transcript_for_agenda_detection(transcript)
+        save_pipeline_state(pipeline_id, result_refs={'transcript_snapshot': transcript})
         tops, assignments, agenda_info, pdf_metadata = detect_pipeline_agenda(
             pipeline_id,
             transcript,
@@ -3247,7 +3301,8 @@ def run_pipeline_job(
             pdf_path=pdf_path,
             options=options,
         )
-        top_ids = [str(uuid.uuid4()) for _ in tops]
+        checkpoint = load_session(session_id) or {}
+        top_ids = (checkpoint.get('top_ids') if checkpoint.get('tops') == tops else None) or [str(uuid.uuid4()) for _ in tops]
         for identity in ((agenda_info.get('llm') or {}).get('provenance') or {}).get('identities', []):
             identity['top_uid'] = top_ids[identity['top_index']]
         # Freeze the exact detector input and result before manual editing begins.
@@ -3273,8 +3328,18 @@ def run_pipeline_job(
         )
         save_pipeline_state(
             pipeline_id,
-            result_refs={"agenda": agenda_info, "top_count": len(tops)},
+            result_refs={"agenda": agenda_info, "top_count": len(tops), 'known_tops': tops,
+                         'pdf_path': None, 'agenda_progress': agenda_info.get('llm') or {}},
         )
+
+        check = agenda_technical_check(agenda_info, len(transcript))
+        ensure_pipeline_not_cancelled(pipeline_id)
+        save_pipeline_state(pipeline_id, result_refs={'agenda_check': check})
+        if not check['passed']:
+            save_pipeline_state(pipeline_id, status=PIPELINE_STATUS_FAILED,
+                error='TOP-Zuordnung technisch unvollständig. Transkript und Teilergebnisse sind gespeichert; Auftrag kann fortgesetzt werden.',
+                result_refs={'processing_complete': False, 'ready_for_review': False})
+            return
 
         ensure_pipeline_not_cancelled(pipeline_id)
         save_pipeline_state(
@@ -3348,6 +3413,7 @@ def run_pipeline_job(
             error=str(exc) if isinstance(exc, PipelineTranscriptionError) else safe_exception_label(exc),
         )
     finally:
+        save_pipeline_state(pipeline_id, result_refs={'worker_active': False})
         if pdf_path:
             remove_upload_file(pdf_path)
 
@@ -3369,12 +3435,12 @@ def request_pipeline_cancellation(pipeline_id: str) -> dict[str, Any] | None:
     updated = save_pipeline_state(
         pipeline_id,
         status=PIPELINE_STATUS_CANCELLED,
-        result_refs=refs,
+        result_refs={'cancel_requested': True},
         error=None,
     )
 
     transcription_job_id = job.get("transcription_job_id")
-    if transcription_job_id:
+    if transcription_job_id and not refs.get('transcript_snapshot'):
         try:
             request_job_cancellation(transcription_job_id)
         except HTTPException as exc:
@@ -3434,7 +3500,11 @@ def get_agenda_model_settings():
 
 @app.put('/api/settings/agenda-model')
 def put_agenda_model_settings(settings: AgendaModelSettings):
-    save_agenda_model_settings(settings)
+    from agenda_model import AgendaModelError
+    try:
+        save_agenda_model_settings(settings)
+    except AgendaModelError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return agenda_model_diagnostics()
 
 
@@ -3602,6 +3672,67 @@ async def start_pipeline(
     )
 
 
+class AgendaRerunRequest(BaseModel):
+    tops: list[str] | None = None
+
+
+@app.post('/api/sessions/{session_id}/agenda-jobs', response_model=PipelineStatusResponse)
+async def start_agenda_job(session_id: str, request: AgendaRerunRequest):
+    """New comparison session, immutable transcript snapshot, no audio work."""
+    source = load_session(session_id)
+    if not source or not source.get('transcript'):
+        raise HTTPException(404, 'Sitzung mit Transkript nicht gefunden')
+    transcription = load_job(source.get('job_id')) if source.get('job_id') else None
+    if not transcription or transcription.get('status') != JOB_STATUS_COMPLETED:
+        raise HTTPException(409, 'Abgeschlossenes Ursprungstranskript erforderlich')
+    pipeline_id, target_id = str(uuid.uuid4()), str(uuid.uuid4())
+    tops = request.tops if request.tops is not None else source.get('tops', [])
+    clone = {**source, 'session_id': target_id, 'tops': tops,
+             'top_ids': source.get('top_ids') if tops == source.get('tops') else [str(uuid.uuid4()) for _ in tops],
+             'assignments': [None] * len(source['transcript']), 'summaries': {},
+             'summary_reviews': {}, 'summary_states': {}, 'agenda_proposals': None,
+             'current_step': 1, 'title': (source.get('title') or 'Sitzung') + ' – TOP-Neuberechnung'}
+    save_session(target_id, clone)
+    from agenda_model import load_settings
+    job = save_pipeline_job(pipeline_id, {
+        'session_id': target_id, 'transcription_job_id': source['job_id'],
+        'status': PIPELINE_STATUS_PENDING, 'stage': PIPELINE_STAGE_AGENDA_DETECT, 'progress': 70,
+        'result_refs': {'source_session_id': session_id, 'transcript_snapshot': source['transcript'],
+                        'known_tops': tops, 'agenda_settings': load_settings().model_dump(),
+                        'options': {'agenda_use_llm': True, 'agenda_cache_namespace': pipeline_id}, 'warnings': []}})
+    manager = await get_or_create_pipeline_manager()
+    await manager.enqueue(pipeline_id)
+    return build_pipeline_status_response(job)
+
+
+@app.post('/api/pipeline/{pipeline_id}/resume', response_model=PipelineStatusResponse)
+async def resume_agenda_job(pipeline_id: str):
+    job = load_pipeline_job(pipeline_id)
+    if not job:
+        raise HTTPException(404, 'Auftrag nicht gefunden')
+    refs = _pipeline_refs(job)
+    if job['status'] not in {PIPELINE_STATUS_FAILED, PIPELINE_STATUS_CANCELLED} or not refs.get('transcript_snapshot'):
+        raise HTTPException(409, 'Nur unterbrochene Aufträge mit gespeichertem Transkript können fortgesetzt werden')
+    if refs.get('worker_active') and refs.get('worker_instance_id') == PIPELINE_INSTANCE_ID:
+        raise HTTPException(409, 'Abbruch und Modellfreigabe laufen noch. Danach erneut fortsetzen.')
+    from agenda_model import load_settings
+    if refs.get('agenda_settings') and refs['agenda_settings'] != load_settings().model_dump():
+        raise HTTPException(409, 'TOP-Einstellungen geändert; bitte neue TOP-Neuberechnung starten')
+    session = load_session(job['session_id']) or {}
+    if session.get('transcript') != refs['transcript_snapshot'] or session.get('tops') != refs.get('known_tops'):
+        raise HTTPException(409, 'Sitzungseingaben wurden bearbeitet; bitte neue TOP-Neuberechnung starten')
+    job = save_pipeline_state(pipeline_id, status=PIPELINE_STATUS_PENDING, error=None,
+        stage=PIPELINE_STAGE_AGENDA_DETECT, progress=70,
+        result_refs={'cancel_requested': False, 'processing_complete': False, 'ready_for_review': False,
+                     'warnings': [], 'agenda_progress': {},
+                     'previous_attempts': [*refs.get('previous_attempts', []), {
+                         'status': job['status'], 'error': job.get('error'),
+                         'warnings': refs.get('warnings', []), 'updated_at': job.get('updated_at')}]})
+    manager = await get_or_create_pipeline_manager()
+    await manager.enqueue(pipeline_id)
+    return build_pipeline_status_response(job)
+
+
 @app.get("/api/pipeline/{pipeline_id}", response_model=PipelineStatusResponse)
 async def get_pipeline_status(pipeline_id: str):
     job = load_pipeline_job(pipeline_id)
@@ -3623,11 +3754,8 @@ async def get_pipeline_result(pipeline_id: str):
     pipeline_job = load_pipeline_job(pipeline_id)
     if pipeline_job is None:
         raise HTTPException(status_code=404, detail="Pipeline nicht gefunden")
-    if (
-        pipeline_job.get("status") != PIPELINE_STATUS_COMPLETED
-        or pipeline_job.get("stage") != PIPELINE_STAGE_READY_FOR_REVIEW
-    ):
-        raise HTTPException(status_code=409, detail="Pipeline ist noch nicht reviewbar")
+    if pipeline_job.get('status') not in TERMINAL_PIPELINE_STATUSES:
+        raise HTTPException(status_code=409, detail="Pipeline läuft noch")
 
     session_id = pipeline_job.get("session_id")
     if not session_id:
@@ -4637,7 +4765,7 @@ async def extract_tops_endpoint(
         tops = extraction.tops
 
         logger.info("Successfully extracted %s TOPs from uploaded PDF", len(tops))
-        return ExtractTOPsResponse(tops=tops, metadata=extraction.metadata.to_dict())
+        return ExtractTOPsResponse(tops=tops, metadata=extraction.metadata.to_dict(), provenance=extraction.provenance)
 
     except HTTPException:
         raise

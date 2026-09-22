@@ -19,9 +19,9 @@ from agenda_labels import agenda_references, parse_agenda_label, reference_targe
 # Speech acts, not occurrences of "TOP", determine transitions. These patterns
 # express present performatives; tense/modality/polarity are checked separately.
 CALL = re.compile(
-    r"^(?:(?:so|gut|also|dann|nun|jetzt|abschliessend|als n(?:a|ae)chstes)[,:]?\s+)*"
-    r"(?:komme(?:n)?\s+(?:wir|ich)\s+(?:(?:jetzt|nun|wieder|zuruck)\s+)*(?:zu|zum|zur)\b"
-    r"|(?:wir\s+kommen|ich\s+komme)\s+(?:(?:jetzt|nun|wieder|zuruck)\s+)*(?:zu|zum|zur)\b"
+    r"^(?:(?:so|gut|also|und|damit|somit|dann|nun|jetzt|abschliessend|als n(?:a|ae)chstes)[,:]?\s+)*"
+    r"(?:komme(?:n)?\s+(?:(?:wir|ich)\s+)?(?:(?:jetzt|nun|auch|hier|schon|wieder|zuruck)\s+)*(?:zu|zum|zur)\b"
+    r"|(?:wir\s+kommen|ich\s+komme)\s+(?:(?:jetzt|nun|auch|hier|schon|wieder|zuruck)\s+)*(?:zu|zum|zur)\b"
     r"|(?:ich\s+rufe|rufe\s+ich|wir\s+rufen|rufen\s+wir)\b.+\bauf\b"
     r"|(?:ich\s+eroffne|wir\s+eroffnen)\b"
     r"|weiter\s+geht\s+es\s+(?:mit|um)\b"
@@ -59,6 +59,15 @@ def transition_kind(text: str) -> str:
     normalized = normalize_text(text)
     # Hedges before a present performative do not turn it into reported speech.
     normalized = re.sub(r'^ich (?:denke|glaube|meine),?\s*(?:dass\s+)?', '', normalized)
+    # An explicitly resolved invitation for further remarks, followed by a
+    # polite current call, is not a merely hypothetical future agenda change.
+    resolved = re.match(r'^(?:das\s+)?ist\s+(?:jetzt\s+)?nicht\s+der\s+fall[,.:]?\s+', normalized)
+    if resolved:
+        remainder = normalized[resolved.end():]
+        polite = re.match(r'^(?:dann\s+)?wurde\s+ich\s+((?:(?:jetzt|nun|auch|hier|schon)\s+)*'
+                          r'(?:zu|zum|zur)\b.+?)\s+kommen\b', remainder)
+        if polite:
+            normalized = 'ich komme ' + polite[1] + remainder[polite.end():]
     if (agenda_references(text)
             and re.search(r'\b(?:weitere|weiteren|noch)\s+(?:anfragen|fragen|informationen|wortmeldungen)\b', normalized)
             and not NON_CURRENT.search(normalized) and not re.search(r'[„“"«»]', text)):
