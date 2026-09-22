@@ -90,12 +90,28 @@ class PdfSessionMetadata:
 class PdfAgendaExtractionResult:
     tops: list[str] = field(default_factory=list)
     metadata: PdfSessionMetadata = field(default_factory=PdfSessionMetadata)
+    provenance: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "tops": self.tops,
             "metadata": self.metadata.to_dict(),
+            "provenance": self.provenance,
         }
+
+
+def agenda_data_response_format():
+    """Constrain the extraction shape, without changing summary generation."""
+    metadata_keys = ['committee', 'date', 'location', 'title']
+    schema = {'type': 'object', 'properties': {
+        'tops': {'type': 'array', 'items': {'type': 'object', 'properties': {
+            'number': {'type': ['string', 'null']}, 'title': {'type': 'string'},
+            'section': {'enum': ['public', 'nonpublic', None]}},
+            'required': ['number', 'title', 'section'], 'additionalProperties': False}},
+        'metadata': {'type': 'object', 'properties': {k: {'type': 'string'} for k in metadata_keys},
+            'required': metadata_keys, 'additionalProperties': False}},
+        'required': ['tops', 'metadata'], 'additionalProperties': False}
+    return {'type': 'json_schema', 'json_schema': {'name': 'pdf_agenda', 'strict': True, 'schema': schema}}
 
 
 def build_extraction_system_prompt(system_prompt: Optional[str] = None) -> str:
@@ -260,7 +276,7 @@ def extract_session_metadata_from_text(pdf_text: str) -> PdfSessionMetadata:
     )
 
 
-def extract_tops_heuristically_from_text(pdf_text: str) -> list[str]:
+def extract_tops_heuristically_from_text(pdf_text: str, *, audit: dict | None = None) -> list[str]:
     """Extract numbered agenda items directly from invitation text."""
     repaired_text = repair_common_pdf_text(pdf_text)
     lines = [line.strip() for line in repaired_text.splitlines() if line.strip()]
@@ -273,49 +289,78 @@ def extract_tops_heuristically_from_text(pdf_text: str) -> list[str]:
     except StopIteration:
         start_index = 0
 
-    stop_pattern = re.compile(
-        r"^(?:Seite\s+\d+\s+von\s+\d+|Uwe\s+Roland|Ausschussvorsitzender|"
-        r"Beleg:|ressawbA|dnu|-knirT|rüf|sessuhcssuA|sed|gnuztiS|"
-        r"\.\d+|nov|\d+)$",
-        flags=re.IGNORECASE,
-    )
+    audit = audit if audit is not None else {}
+    audit.update(candidates=[], ignored=[])
     section: str | None = None
     current: list[str] | None = None
     items: list[str] = []
+    source_lines: list[dict] = []
+    subpoints: list[dict] = []
+    signed = False
 
     def flush_current() -> None:
-        nonlocal current
+        nonlocal current, source_lines, subpoints
         if not current:
             return
         title = re.sub(r"\s+", " ", " ".join(current)).strip()
         if title and not is_agenda_section_heading(title):
             items.append(with_section(title, section))
+            audit['candidates'].append({'title': items[-1], 'source_lines': source_lines, 'subpoints': subpoints})
         current = None
+        source_lines = []
+        subpoints = []
 
-    for line in lines[start_index:]:
+    for line_index, original in enumerate(lines[start_index:], start_index):
+        line = re.sub(r'[_=]{3,}|[-–—]{5,}', '', original).strip()
         if is_agenda_section_heading(line):
             flush_current()
             section = section_heading(line)
+            signed = False
+            continue
+        artifact = pdf_artifact_kind(line)
+        if not line or artifact or signed:
+            audit['ignored'].append({'line_index': line_index, 'text': original,
+                                     'reason': artifact or ('signature_block' if signed else 'separator')})
+            if artifact in {'signature', 'office'}:
+                if artifact == 'office' and current and len(current) > 1 and re.fullmatch(
+                        r'(?:Dr\.\s+)?[A-ZÄÖÜ][a-zäöüß]+(?:[-\s][A-ZÄÖÜ][a-zäöüß]+){1,3}', current[-1]):
+                    audit['ignored'].append({**source_lines.pop(), 'reason': 'name_before_office'})
+                    current.pop()
+                flush_current()
+                signed = True
             continue
         if line.startswith(("-", "–", "•", "*")):
+            if current:
+                subpoints.append({'line_index': line_index, 'text': original})
             continue
         if line.startswith(("BE:", "Beschlussvorlage:", "Antrag:", "Drucksache:")):
             continue
-        if stop_pattern.match(line):
-            flush_current()
-            continue
-
         item = parse_agenda_label(line)
         if item.original_number is not None:
             flush_current()
             current = [line]
+            source_lines = [{'line_index': line_index, 'text': original}]
             continue
 
         if current is not None:
             current.append(line)
+            source_lines.append({'line_index': line_index, 'text': original})
 
     flush_current()
     return items
+
+
+def pdf_artifact_kind(line: str) -> str | None:
+    if re.match(r'^(?:gez\s*\.|gezeichnet\b|Unterschrift\b|Mit freundlichen Grüßen\b)', line, re.I):
+        return 'signature'
+    if re.fullmatch(r'(?:Seite\s+)?\d+\s*(?:(?:von|/)\s*\d+)?', line, re.I):
+        return 'page_footer'
+    if re.match(r'^(?:\d+\.\s*)?(?:(?:der|die)\s+)?(?:(?:stellv\.|stellvertretende[rns]?)\s+)?'
+                r'(?:[A-Za-zÄÖÜäöüß]*vorsitzende[rns]?|Bürgermeister(?:in)?|Schriftführer(?:in)?)\b', line, re.I):
+        return 'office'
+    if re.match(r'^(?:Beleg:|Dokumentnummer:|www\.|https?://)', line, re.I):
+        return 'page_footer'
+    return None
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -344,7 +389,12 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         text_parts = []
         with pdfplumber.open(pdf_path) as pdf:
             for i, page in enumerate(pdf.pages):
-                page_text = page.extract_text()
+                # Marginal rotated stamps are not body text. Preserve a fully
+                # rotated document; filter only a small minority orientation.
+                upright = sum(bool(c.get('upright', True)) for c in page.chars)
+                body = page.filter(lambda obj: obj.get('object_type') != 'char' or obj.get('upright', True)
+                                   or (obj.get('x0', 0) > 40 and obj.get('x1', page.width) < page.width - 40)) if upright > len(page.chars) * .8 else page
+                page_text = body.extract_text()
                 if page_text:
                     text_parts.append(page_text)
                     logger.debug(f"Page {i + 1}: extracted {len(page_text)} characters")
@@ -477,14 +527,30 @@ def _extract_json_object(response_text: str) -> dict[str, object] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def title_comparison_key(title):
+    # A leading council-paper identifier and typographic quotation marks are
+    # formatting differences, not missing title content. Retain originals.
+    title = re.sub(r'^\d{1,6}/\d{2,4}\s+', '', title)
+    title = title.translate(str.maketrans({'„': '"', '“': '"', '”': '"', '«': '"', '»': '"'}))
+    return re.sub(r'\s+', ' ', re.sub(r'\s*-\s*', '-', title)).casefold().strip()
+
+
+def compatible_titles(source, model):
+    refs = [re.match(r'^(\d{1,6}/\d{2,4})\s+', t) for t in (source, model)]
+    if all(refs) and refs[0][1] != refs[1][1]:
+        return False
+    return title_comparison_key(source) == title_comparison_key(model)
+
+
 def parse_agenda_data_response(
     response_text: str,
     fallback_text: str = "",
 ) -> PdfAgendaExtractionResult:
     """Parse structured LLM output, falling back to legacy TOP parsing."""
     payload = _extract_json_object(response_text)
+    audit = {'version': 'pdf-reconciliation-v1', 'raw_model_response': response_text, 'conflicts': []}
     fallback_tops = (
-        extract_tops_heuristically_from_text(fallback_text)
+        extract_tops_heuristically_from_text(fallback_text, audit=audit)
         if fallback_text
         else []
     )
@@ -493,7 +559,10 @@ def parse_agenda_data_response(
         if fallback_text
         else PdfSessionMetadata()
     )
-    raw_tops = (payload.get("tops") or payload.get("agenda") or []) if payload else response_text
+    malformed_json = payload is None and response_text.lstrip().startswith(('{', '```json'))
+    if malformed_json:
+        audit['conflicts'].append({'kind': 'invalid_model_json', 'resolution': 'numbered_source_only'})
+    raw_tops = (payload.get("tops") or payload.get("agenda") or []) if payload else ([] if malformed_json else response_text)
     if isinstance(raw_tops, list):
         # Structured arrays are already item boundaries; never enumerate them
         # into invented agenda numbers or discard short unnumbered titles.
@@ -511,29 +580,45 @@ def parse_agenda_data_response(
     else:
         tops = parse_tops_response(str(raw_tops))
 
-    by_title: dict[str, list[str]] = {}
-    for fallback in fallback_tops:
-        by_title.setdefault(parse_agenda_label(fallback).title.casefold(), []).append(fallback)
-    recovered_tops = []
-    for top in tops:
-        label = parse_agenda_label(top)
-        matches = [
-            candidate for candidate in by_title.get(label.title.casefold(), [])
-            if (label.number_key is None or parse_agenda_label(candidate).number_key == label.number_key)
-            and (label.section is None or parse_agenda_label(candidate).section == label.section)
-        ]
-        # A unique title can supply missing metadata, never overwrite an
-        # explicitly different number or public/nonpublic section.
-        recovered_tops.append(matches[0] if len(matches) == 1 else top)
-    tops = recovered_tops
+    audit['model_tops'] = tops[:]
+    if fallback_tops:
+        # Match occurrences, not list length. Original numbered boundaries and
+        # their actual text win; model-only items remain explicit conflicts.
+        unmatched = list(enumerate(tops))
+        for candidate in audit['candidates']:
+            source = parse_agenda_label(candidate['title'])
+            matches = [(i, top) for i, top in unmatched
+                       if (parse_agenda_label(top).number_key in {None, source.number_key})
+                       and (parse_agenda_label(top).section in {None, source.section})
+                       and compatible_titles(source.title, parse_agenda_label(top).title)]
+            matches = [(i, top) for i, top in matches if sum(
+                compatible_titles(parse_agenda_label(other).title, parse_agenda_label(top).title)
+                and parse_agenda_label(top).number_key in {None, parse_agenda_label(other).number_key}
+                and parse_agenda_label(top).section in {None, parse_agenda_label(other).section}
+                for other in fallback_tops) == 1]
+            if matches:
+                i, top = matches[0]
+                unmatched.remove((i, top))
+                candidate.update(origin='source_and_model', model_index=i)
+                candidate['match_basis'] = ('exact_title' if source.title == parse_agenda_label(top).title
+                                            else 'format_normalized_title_original_preserved')
+            else:
+                candidate['origin'] = 'numbered_source'
+                audit['conflicts'].append({'kind': 'source_not_confirmed_by_model', 'source': candidate['title']})
+        for i, top in unmatched:
+            audit['conflicts'].append({'kind': 'model_item_not_confirmed_by_source', 'model_index': i, 'title': top})
+        tops = fallback_tops
+    else:
+        tops = [top for top in tops if not pdf_artifact_kind(parse_agenda_label(top).title)]
+        if fallback_text and tops:
+            audit['conflicts'].append({'kind': 'no_numbered_source_boundaries', 'titles': tops[:]})
+    audit['requires_review'] = bool(audit['conflicts'])
 
     metadata = merge_metadata(
         normalize_metadata((payload.get("metadata") or payload) if payload else None),
         fallback_metadata,
     )
-    if len(fallback_tops) > len(tops):
-        tops = fallback_tops
-    return PdfAgendaExtractionResult(tops=tops, metadata=metadata)
+    return PdfAgendaExtractionResult(tops=tops, metadata=metadata, provenance=audit)
 
 
 def is_agenda_section_heading(value: str) -> bool:
@@ -615,6 +700,7 @@ JSON:"""
             ],
             max_tokens=3072,
             temperature=0.1,
+            response_format=agenda_data_response_format(),
             **config.reasoning_options,
         )
 

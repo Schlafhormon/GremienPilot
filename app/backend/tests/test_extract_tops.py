@@ -187,6 +187,10 @@ def test_extract_agenda_data_from_text_uses_structured_prompt(fake_openai_module
     assert request["temperature"] == 0.1
     assert "validem JSON" in request["messages"][0]["content"]
     assert "Zusatzhinweis" in request["messages"][0]["content"]
+    assert request['response_format']['type'] == 'json_schema'
+    schema = request['response_format']['json_schema']['schema']
+    assert schema['properties']['tops']['items']['properties']['number']['type'] == ['string', 'null']
+    assert schema['required'] == ['tops', 'metadata']
 
 
 def test_extract_session_metadata_from_test_pdf():

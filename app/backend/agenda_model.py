@@ -20,6 +20,9 @@ class AgendaModelSettings(BaseModel):
     output_tokens: int = Field(default=4096, ge=1024, le=16384, strict=True)
     timeline_output_tokens: int = Field(default=4096, ge=1024, le=16384, strict=True)
     timeout_seconds: float = Field(default=1800, ge=10, le=7200, allow_inf_nan=False)
+    connect_timeout_seconds: float = Field(default=15, ge=1, le=120, allow_inf_nan=False)
+    idle_timeout_seconds: float = Field(default=300, ge=10, le=7200, allow_inf_nan=False)
+    total_timeout_seconds: float = Field(default=43200, ge=60, le=172800, allow_inf_nan=False)
     cpu_threads: int = Field(default=8, ge=1, le=128, strict=True)
     temperature: float = Field(default=0.1, ge=0, le=2, allow_inf_nan=False)
     seed: int | None = Field(default=42, ge=0, le=2147483647, strict=True)
@@ -51,13 +54,18 @@ def settings_path():
 def load_settings():
     with _SETTINGS_LOCK:
         try:
-            return AgendaModelSettings.model_validate_json(settings_path().read_text(encoding='utf-8'))
+            settings = AgendaModelSettings.model_validate_json(settings_path().read_text(encoding='utf-8'))
         except FileNotFoundError:
-            return AgendaModelSettings()
+            settings = AgendaModelSettings()
+        if os.environ.get('AGENDA_MODEL_FORCE_DISABLED', '').lower() == 'true':
+            settings = settings.model_copy(update={'enabled': False})
+        return settings
 
 
 def save_settings(settings):
     global _last_error
+    if settings.enabled and os.environ.get('AGENDA_MODEL_FORCE_DISABLED', '').lower() == 'true':
+        raise AgendaModelError('Dieser Startmodus ist auf ein LLM festgelegt. Entwicklungsmodus zum Aktivieren verwenden.')
     path = settings_path()
     with _SETTINGS_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +111,9 @@ def resolve_config(model=None, settings=None):
     return replace(config, model=settings.model, context_budget=settings.context_tokens,
                    output_budget=settings.output_tokens, timeline_output_budget=settings.timeline_output_tokens,
                    timeout_seconds=settings.timeout_seconds, cpu_threads=settings.cpu_threads,
+                   connect_timeout_seconds=settings.connect_timeout_seconds,
+                   idle_timeout_seconds=settings.idle_timeout_seconds,
+                   total_timeout_seconds=settings.total_timeout_seconds,
                    temperature=settings.temperature, seed=settings.seed,
                    reasoning_effort='low' if settings.thinking else 'none', task='agenda', **tokenizer)
 
@@ -125,6 +136,20 @@ def report_error(config, exc):
     message = str(exc) if isinstance(exc, AgendaModelError) else (
         f'TOP-Modell {config.model}: {type(exc).__name__}. Modellladung, RAM/VRAM und Zeitlimit prüfen; kein Ersatzmodell verwendet.')
     import httpx
+    from agenda_runtime import (AgendaFirstResponseTimeout, AgendaInactivityTimeout,
+                                AgendaTotalTimeout, AgendaStreamIncomplete)
+    reasons = {
+        AgendaFirstResponseTimeout: 'Modellladen oder Promptverarbeitung lieferte innerhalb des Erstantwortlimits keine Ausgabe.',
+        AgendaInactivityTimeout: 'Die begonnene Generierung lieferte innerhalb des Inaktivitätslimits keine weiteren Tokens.',
+        AgendaTotalTimeout: 'Das Gesamtzeitlimit dieses einzelnen Aufrufs wurde erreicht.',
+        AgendaStreamIncomplete: 'Der Antwortstream endete unvollständig; Teil-JSON wurde nicht als Ergebnis übernommen.',
+    }
+    if type(exc) in reasons:
+        message = f'TOP-Modell {config.model}: {reasons[type(exc)]} Kein Ersatzmodell verwendet.'
+    elif isinstance(exc, httpx.ConnectTimeout):
+        message = f'TOP-Modell {config.model}: Zeitlimit beim Verbindungsaufbau zum lokalen Ollama-Dienst. Kein Ersatzmodell verwendet.'
+    elif isinstance(exc, httpx.ConnectError):
+        message = f'TOP-Modell {config.model}: Verbindung zum lokalen Ollama-Dienst fehlgeschlagen. Kein Ersatzmodell verwendet.'
     if isinstance(exc, httpx.HTTPStatusError):
         try:
             provider_error = str(exc.response.json().get('error', '')).lower()

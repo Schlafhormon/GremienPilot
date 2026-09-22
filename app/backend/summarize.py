@@ -119,6 +119,9 @@ class LLMConfig:
     temperature: float = 0.1
     seed: int | None = None
     task: str | None = None
+    connect_timeout_seconds: float = 15
+    idle_timeout_seconds: float = 300
+    total_timeout_seconds: float = 43200
     tokenizer_json: str | None = None
     tokenizer_sha256: str | None = None
     tokenizer_model_digest: str | None = None

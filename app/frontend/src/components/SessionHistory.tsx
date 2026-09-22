@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { listSessions } from '../api';
+import { listSessions, startAgendaJob, resumeAgendaJob } from '../api';
 import type { SessionHistoryItem, SessionHistoryStatus } from '../types';
 
 interface SessionHistoryProps {
@@ -60,6 +60,17 @@ export default function SessionHistory({ onOpen, onNewSession }: SessionHistoryP
   const [status, setStatus] = useState<'' | SessionHistoryStatus>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const runAgenda = async (session: SessionHistoryItem, resume: boolean) => {
+    setStarting(true); setError(null);
+    try {
+      const job = resume && session.pipeline_job_id
+        ? await resumeAgendaJob(session.pipeline_job_id) : await startAgendaJob(session.session_id);
+      if (job.session_id) onOpen(job.session_id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'TOP-Auftrag fehlgeschlagen');
+    } finally { setStarting(false); }
+  };
 
   const loadHistory = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
@@ -210,6 +221,16 @@ export default function SessionHistory({ onOpen, onNewSession }: SessionHistoryP
                     </div>
                   )}
                 </div>
+                {session.transcript_line_count > 0 && session.status !== 'processing' && <div className="flex flex-col gap-2">
+                  <button type="button" disabled={starting} onClick={() => void runAgenda(session, false)}
+                    className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50">
+                    TOPs und Zusammenfassungen in neuer Sitzung berechnen
+                  </button>
+                  {(session.pipeline_status === 'failed' || session.pipeline_status === 'cancelled') && (
+                    <button type="button" disabled={starting} onClick={() => void runAgenda(session, true)}
+                      className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50">TOP-Auftrag fortsetzen</button>
+                  )}
+                </div>}
                 <button
                   type="button"
                   onClick={() => onOpen(session.session_id)}

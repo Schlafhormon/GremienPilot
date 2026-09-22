@@ -1,0 +1,5 @@
+# Append AFTER docker-compose.gpu.yml. Does not rewrite the dual-LLM settings.
+services:
+  backend:
+    environment:
+      AGENDA_MODEL_FORCE_DISABLED: "true"

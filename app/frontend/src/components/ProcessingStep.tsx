@@ -34,7 +34,8 @@ export default function ProcessingStep({
       ? 'Verarbeitung wartet...'
       : pipeline?.status === 'completed'
         ? 'Verarbeitung abgeschlossen'
-        : 'Verarbeitung läuft...';
+        : pipeline?.status === 'failed' ? 'Verarbeitung fehlgeschlagen'
+          : pipeline?.status === 'cancelled' ? 'Verarbeitung abgebrochen' : 'Verarbeitung läuft...';
 
   const stageStatus =
     status ||
@@ -87,6 +88,18 @@ export default function ProcessingStep({
         </div>
 
         {/* Steps */}
+        {pipeline?.agenda_progress?.active_call?.model && pipeline.status === 'processing' && activeStage === 'agenda_detect' && (
+          <p role="status" className="mb-4 text-sm text-gray-700">
+            {pipeline.agenda_progress.active_call.model}: {pipeline.agenda_progress.active_call.phase === 'loading_or_prompt'
+              ? 'Modell wird geladen oder Originaltext verarbeitet' : 'Antwort wird erzeugt und anschließend geprüft'}
+            {' · '}{pipeline.agenda_progress.active_call.step?.startsWith('timeline') ? 'Themenverlauf' : 'TOP-Verarbeitung'}
+            {pipeline.agenda_progress.active_call.target_start !== undefined && pipeline.agenda_progress.active_call.target_end !== undefined
+              && <> · Zeilen {pipeline.agenda_progress.active_call.target_start + 1}–{pipeline.agenda_progress.active_call.target_end + 1}</>}
+            {' · '}{Math.floor(pipeline.agenda_progress.active_call.elapsed_seconds / 60)} Minuten
+            {' · '}{pipeline.agenda_progress.active_call.output_characters} Ausgabezeichen
+            {' · '}{pipeline.agenda_progress.processed_lines?.length ?? 0} Zeilen technisch verarbeitet
+          </p>
+        )}
         <div className="space-y-3">
           {steps.map((step, index) => (
             <div key={step.id} className="flex items-center gap-3">

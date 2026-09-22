@@ -132,11 +132,16 @@ def _complete(client, config, **kwargs):
     reserved_output = maximum * passes
     if not fits(messages, reserved_output, config, schema_budget):
         raise ContextBudgetError('Input plus all provider generation phases exceeds context budget')
-    response = httpx.post(config.base_url.removesuffix('/v1') + '/api/chat',
-                          json=payload, timeout=kwargs.get('timeout', config.timeout_seconds),
-                          headers={'Authorization': 'Bearer ' + config.api_key})
-    response.raise_for_status()
-    data = response.json()
+    if getattr(config, 'task', None) == 'agenda':
+        from agenda_runtime import complete_stream
+        payload['stream'] = True
+        data = complete_stream(config, payload)
+    else:
+        response = httpx.post(config.base_url.removesuffix('/v1') + '/api/chat',
+                              json=payload, timeout=kwargs.get('timeout', config.timeout_seconds),
+                              headers={'Authorization': 'Bearer ' + config.api_key})
+        response.raise_for_status()
+        data = response.json()
     actual_context = _verify_native_context(config, data.get('model') or kwargs['model'])
     # Optional private diagnostic artifacts, never application logs.
     audit_dir = os.environ.get('LLM_AUDIT_DIR')
@@ -173,7 +178,7 @@ def cache_read(key):
         return None
     path = Path(directory) / (hashlib.sha256(key.encode()).hexdigest() + '.json')
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding='utf-8'))
     except (FileNotFoundError, ValueError):
         return None
 
@@ -186,8 +191,10 @@ def cache_write(key, value):
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = path / (hashlib.sha256(key.encode()).hexdigest() + '.json')
     import tempfile
-    with tempfile.NamedTemporaryFile(mode='w', dir=path, delete=False) as handle:
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path, delete=False) as handle:
         json.dump(value, handle, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
         temporary = handle.name
     os.replace(temporary, target)
 

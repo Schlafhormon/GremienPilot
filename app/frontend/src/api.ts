@@ -216,6 +216,20 @@ export async function getPipelineStatus(pipelineId: string): Promise<PipelineJob
   return normalizePipelineJob(await response.json());
 }
 
+export async function startAgendaJob(sessionId: string): Promise<PipelineJob> {
+  const response = await fetch(`${API_BASE}/api/sessions/${sessionId}/agenda-jobs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  if (!response.ok) throw await readApiError(response, 'TOP-Neuberechnung konnte nicht gestartet werden');
+  return normalizePipelineJob(await response.json());
+}
+
+export async function resumeAgendaJob(pipelineId: string): Promise<PipelineJob> {
+  const response = await fetch(`${API_BASE}/api/pipeline/${pipelineId}/resume`, { method: 'POST' });
+  if (!response.ok) throw await readApiError(response, 'Auftrag konnte nicht fortgesetzt werden');
+  return normalizePipelineJob(await response.json());
+}
+
 /**
  * Cancel a pending or running pipeline job.
  */
@@ -955,6 +969,7 @@ export async function extractAgendaDataFromPDF(
   return {
     tops: data.tops ?? [],
     metadata: data.metadata ?? {},
+    provenance: data.provenance,
   };
 }
 

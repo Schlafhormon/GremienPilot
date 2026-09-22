@@ -1,5 +1,5 @@
 import { useState, useRef, type DragEvent, type ChangeEvent } from 'react';
-import type { UploadStepProps } from '../types';
+import type { UploadStepProps, PdfAgendaExtractionResult } from '../types';
 import { extractAgendaDataFromPDF } from '../api';
 
 export default function UploadStep({
@@ -31,6 +31,7 @@ export default function UploadStep({
   const [isExtractingTops, setIsExtractingTops] = useState(false);
   const [extractionError, setExtractionError] = useState<string | null>(null);
   const [extractedCount, setExtractedCount] = useState<number | null>(null);
+  const [extractionProvenance, setExtractionProvenance] = useState<PdfAgendaExtractionResult['provenance']>();
 
   // Audio drag handlers
   const handleDrag = (e: DragEvent<HTMLDivElement>) => {
@@ -111,12 +112,14 @@ export default function UploadStep({
     setIsExtractingTops(true);
     setExtractionError(null);
     setExtractedCount(null);
+    setExtractionProvenance(undefined);
 
     try {
       const extracted = await extractAgendaDataFromPDF(file, {
         model: llmSettings?.model,
       });
       const extractedTops = extracted.tops.map((top) => top.trim()).filter(Boolean);
+      setExtractionProvenance(extracted.provenance);
       applyDetectedMetadata(extracted.metadata ?? {});
 
       if (extractedTops.length > 0) {
@@ -434,6 +437,29 @@ export default function UploadStep({
                 Sie können die Liste unten bearbeiten.
               </p>
             </div>
+          )}
+          {extractionProvenance?.requires_review && (
+            <details className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm">
+              <summary>PDF-Abgleich: Abweichungen zwischen Originaltext und Modellantwort prüfen</summary>
+              <p className="mt-2">Die Liste folgt den nummerierten Originalstellen. Unbestätigte Modellzusätze wurden nicht übernommen.</p>
+              <ul className="list-disc pl-5 mt-2">
+                {extractionProvenance.conflicts?.map((conflict, index) => (
+                  <li key={index}>
+                    {conflict.kind === 'source_not_confirmed_by_model' ? 'Originalstelle ohne eindeutige Modellbestätigung' :
+                      conflict.kind === 'model_item_not_confirmed_by_source' ? 'Modellvorschlag ohne eindeutige Originalstelle' :
+                      conflict.kind === 'invalid_model_json' ? 'Modellantwort enthält kein gültiges JSON' :
+                      'Keine eindeutigen nummerierten Originalstellen gefunden'}
+                    {(conflict.source || conflict.title) && `: ${conflict.source || conflict.title}`}
+                  </li>
+                ))}
+              </ul>
+              <button type="button" className="mt-2 underline" onClick={() => {
+                const url = URL.createObjectURL(new Blob([JSON.stringify(extractionProvenance, null, 2)], { type: 'application/json' }));
+                const link = document.createElement('a');
+                link.href = url; link.download = 'pdf-quellenabgleich.json'; link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+              }}>Quellenabgleich lokal speichern</button>
+            </details>
           )}
         </div>
       </div>

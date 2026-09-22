@@ -119,13 +119,14 @@ def test_timeline_wrong_hypothesis_cannot_veto_original_call_and_cache_is_separa
     transcript = [TranscriptUtterance('M', text)]
     one = segment_known_agenda(transcript, ['1 Haushalt', '2 Schule'], use_llm=True)
     assert one.assignments == [1]
-    assert len(calls) == 2 and all(c.model.startswith('gemma4:') for c, _ in calls)
+    assert len(calls) == 3 and all(c.model.startswith('gemma4:') for c, _ in calls)
+    assert one.llm.chunks[-1]['phase'] == 'boundary_review'
     two = segment_known_agenda(transcript, ['1 Haushalt', '2 Schule'], use_llm=True)
     assert two.assignments == one.assignments and two.llm.attempted_calls == 0
     assert two.llm.provenance['timeline']['identity'] == one.llm.provenance['timeline']['identity']
     assert all(c['status'] == 'cached' for c in two.llm.chunks)
     segment_known_agenda(transcript, ['1 Haushalt', '2 Schule'], use_llm=True, cache_namespace='fresh')
-    assert len(calls) == 4
+    assert len(calls) == 6
 
 
 def test_long_timeline_covers_original_text_and_reviews_every_seam(isolated_settings, monkeypatch, fake_openai_module):
@@ -168,6 +169,8 @@ def test_native_parameters_and_summary_are_isolated(isolated_settings, monkeypat
             'model': kw['json']['model'], 'done': True, 'done_reason': 'stop', 'prompt_eval_count': 20,
             'eval_count': 10, 'message': {'content': '{}'}})
     monkeypatch.setattr(httpx, 'post', post)
+    import agenda_runtime
+    monkeypatch.setattr(agenda_runtime, 'complete_stream', lambda c, p: post(c.base_url, json=p).json())
     for current in [config, get_llm_config(), get_llm_config()]:
         llm_transport.complete(None, current, model=current.model, messages=[{'role': 'user', 'content': 'Test'}],
                                max_tokens=current.output_budget, **current.reasoning_options)
@@ -252,6 +255,8 @@ def test_regular_pdf_pipeline_keeps_pdf_qwen_and_routes_top_calls_to_gemma(isola
     monkeypatch.setattr(agenda_timeline, 'complete', agenda)
     monkeypatch.setattr(agenda_llm, 'complete', agenda)
     monkeypatch.setattr(main, 'save_pipeline_state', lambda *a, **kw: None)
+    monkeypatch.setattr(main, 'ensure_pipeline_not_cancelled', lambda *a: None)
+    monkeypatch.setattr(main, 'append_pipeline_warning', lambda *a: None)
     tops, assignments, info, _ = main.detect_pipeline_agenda('test',
         [{'line_id': 'stable-line', 'speaker': 'M', 'text': 'Kommen wir zu TOP 1.', 'start': 1, 'end': 3}],
         known_tops=[], pdf_path='test.pdf', options={'auto_detect_tops_from_pdf': True, 'agenda_use_llm': True})
@@ -279,6 +284,8 @@ def test_local_tokenizer_budget_and_provider_truncation_guard(isolated_settings,
     monkeypatch.setattr(httpx, 'post', lambda url, **kw: httpx.Response(200,
         request=httpx.Request('POST', url), json={'done': True, 'done_reason': 'stop',
             'prompt_eval_count': 20, 'eval_count': 1, 'message': {'content': '{}'}}))
+    import agenda_runtime
+    monkeypatch.setattr(agenda_runtime, 'complete_stream', lambda c, p: httpx.post(c.base_url, json=p).json())
     with pytest.raises(llm_transport.ContextBudgetError, match='below original input'):
         llm_transport.complete(None, config, model=config.model, messages=messages, max_tokens=100)
 

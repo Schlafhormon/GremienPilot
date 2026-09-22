@@ -121,6 +121,20 @@ describe('UploadStep', () => {
     expect(await screen.findByText(/2 TOPs erfolgreich extrahiert/i)).toBeInTheDocument();
   });
 
+  it('makes source-model conflicts visible beside the extracted list', async () => {
+    vi.mocked(extractAgendaDataFromPDF).mockResolvedValue({
+      tops: ['1 Haushalt'], metadata: {}, provenance: { requires_review: true,
+        conflicts: [{ kind: 'model_item_not_confirmed_by_source', title: '2 Vorsitzende' }] },
+    });
+    const { container } = renderUploadStep();
+    fireEvent.change(container.querySelector('input[accept=".pdf,application/pdf"]')!, {
+      target: { files: [new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' })] },
+    });
+    expect(await screen.findByText(/PDF-Abgleich: Abweichungen/)).toBeInTheDocument();
+    expect(screen.getByText(/Modellvorschlag ohne eindeutige Originalstelle: 2 Vorsitzende/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Quellenabgleich lokal speichern', hidden: true })).toBeInTheDocument();
+  });
+
   it('keeps a PDF for pipeline extraction without extracting TOPs immediately in auto-PDF mode', async () => {
     const setPdfFile = vi.fn();
     const { container } = renderUploadStep({

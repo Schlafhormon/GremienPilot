@@ -1,11 +1,13 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { listSessions } from '../api';
+import { listSessions, startAgendaJob } from '../api';
 import SessionHistory from './SessionHistory';
 
 vi.mock('../api', () => ({
   listSessions: vi.fn(),
+  startAgendaJob: vi.fn(),
+  resumeAgendaJob: vi.fn(),
 }));
 
 describe('SessionHistory', () => {
@@ -62,5 +64,15 @@ describe('SessionHistory', () => {
     expect(listSessions).toHaveBeenLastCalledWith(
       expect.objectContaining({ query: 'Finanzen' })
     );
+  });
+
+  it('starts a durable agenda job in a new session', async () => {
+    const onOpen = vi.fn();
+    vi.mocked(startAgendaJob).mockResolvedValue({ pipeline_id: 'new-job', session_id: 'new-session',
+      status: 'pending', stage: 'agenda_detect', progress: 70, warnings: [] });
+    render(<SessionHistory onOpen={onOpen} onNewSession={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'TOPs und Zusammenfassungen in neuer Sitzung berechnen' }));
+    expect(startAgendaJob).toHaveBeenCalledWith('session-1');
+    expect(onOpen).toHaveBeenCalledWith('new-session');
   });
 });
