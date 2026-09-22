@@ -239,14 +239,14 @@ def test_api_fresh_namespace_uid_mapping_and_exact_cache_replay(fake_openai_modu
     fake_openai_module.content = fake_reply({'0': 'public:07'})
     payload = {'tops':['[Öffentlich] 07 Informationen'], 'top_ids':['stable-uid'], 'use_llm':True,
                'transcript':[{'line_id':'line-a','speaker':'S','text':'Beratung.','start':0,'end':1}]}
-    client=TestClient(main.app)
-    fresh=client.post('/api/agenda-detection',json={**payload,'fresh':True}).json()
-    namespace=fresh['llm']['provenance']['cache_namespace']
-    assert namespace and fresh['llm']['attempted_calls']==1
-    assert fresh['llm']['provenance']['identities'][0]['top_uid']=='stable-uid'
-    replay=client.post('/api/agenda-detection',json={**payload,'cache_namespace':namespace}).json()
-    assert replay['llm']['attempted_calls']==0
-    assert replay['assignments']==fresh['assignments']
-    another=client.post('/api/agenda-detection',json={**payload,'fresh':True}).json()
-    assert another['llm']['attempted_calls']==1
-    assert another['llm']['provenance']['cache_namespace']!=namespace
+    with TestClient(main.app) as client:
+        fresh=client.post('/api/agenda-detection',json={**payload,'fresh':True}).json()
+        namespace=fresh['llm']['provenance']['cache_namespace']
+        assert namespace and fresh['llm']['attempted_calls']==1
+        assert fresh['llm']['provenance']['identities'][0]['top_uid']=='stable-uid'
+        replay=client.post('/api/agenda-detection',json={**payload,'cache_namespace':namespace}).json()
+        assert replay['llm']['attempted_calls']==0
+        assert replay['assignments']==fresh['assignments']
+        another=client.post('/api/agenda-detection',json={**payload,'fresh':True}).json()
+        assert another['llm']['attempted_calls']==1
+        assert another['llm']['provenance']['cache_namespace']!=namespace

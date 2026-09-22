@@ -54,7 +54,18 @@ _EXPECTED_DIGEST = ContextVar('llm_expected_digest', default=None)
 
 @contextmanager
 def request_control(check_cancel=None, progress=None):
-    token = _CONTROL.set((check_cancel, progress))
+    parent_cancel, parent_progress = _CONTROL.get()
+    def combined_cancel():
+        if parent_cancel:
+            parent_cancel()
+        if check_cancel:
+            check_cancel()
+    def combined_progress(value):
+        if parent_progress:
+            parent_progress(value)
+        if progress:
+            progress(value)
+    token = _CONTROL.set((combined_cancel, combined_progress))
     try:
         yield
     finally:
@@ -249,7 +260,7 @@ def _openai_messages(messages):
 
 async def _openai_stream(client, config, payload):
     """Separate seam for SDK-free contract tests; caller's SDK remains used for diagnostics."""
-    async with httpx.AsyncClient(timeout=config.http_timeout, headers=_headers(config)) as http:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(config.load_seconds, connect=config.connect_seconds), headers=_headers(config)) as http:
         async with http.stream('POST', config.base_url + '/chat/completions', json=payload) as response:
             if response.is_error:
                 await response.aread()
@@ -308,9 +319,13 @@ async def _generate(client, config, kwargs, progress):
             payload['think'] = think
         if response_format and response_format['type'] != 'text':
             payload['format'] = 'json' if response_format['type'] == 'json_object' else response_format['json_schema']['schema']
-        async with httpx.AsyncClient(timeout=config.http_timeout, headers=_headers(config)) as http:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(config.load_seconds, connect=config.connect_seconds), headers=_headers(config)) as http:
             metadata = await _metadata(http, config)
             snapshot.update(metadata)
+            import durable_jobs as durable
+            identity = durable.checkpoint('model:' + config.model, lambda: metadata['digest'])
+            if identity != metadata['digest']:
+                raise ModelConfigurationError('Model digest changed since job started')
             expected = _EXPECTED_DIGEST.get()
             if expected and expected[0] is config and expected[1] != metadata['digest']:
                 raise ModelConfigurationError('Model tag changed after cache lookup')
@@ -333,7 +348,8 @@ async def _generate(client, config, kwargs, progress):
                         raise ModelConfigurationError('Provider changed the requested model')
                     message = data.get('message', {})
                     append_content(message.get('content', ''))
-                    progress('thinking' if message.get('thinking') else 'generating')
+                    if message.get('thinking') or message.get('content'):
+                        progress('thinking' if message.get('thinking') else 'generating')
                     if data.get('done'):
                         final = data
                         break
@@ -367,7 +383,8 @@ async def _generate(client, config, kwargs, progress):
             for choice in data.get('choices', []):
                 delta = choice.get('delta', {})
                 append_content(delta.get('content') or '')
-                progress('thinking' if delta.get('reasoning_content') or delta.get('reasoning') else 'generating')
+                if delta.get('content') or delta.get('reasoning_content') or delta.get('reasoning'):
+                    progress('thinking' if delta.get('reasoning_content') or delta.get('reasoning') else 'generating')
                 if choice.get('finish_reason') is not None:
                     finish = choice['finish_reason']
             if data.get('usage'):
@@ -394,18 +411,35 @@ async def _run(client, config, kwargs, check_cancel, progress, operation=None):
         if config.total_seconds and time.monotonic() - started >= config.total_seconds:
             raise LLMTotalTimeout('LLM total runtime exceeded')
     last_report = [0.0]
+    last_delta = [None]
+    phase_state = ['loading']
+    attempt_started = [started]
     def report(phase):
         now = time.monotonic()
+        if phase in {'thinking', 'generating'}:
+            last_delta[0] = now
+            phase_state[0] = phase
+        elif phase == 'retrying':
+            phase_state[0] = phase
         if progress and (now - last_report[0] >= 1 or phase == 'retrying'):
-            progress({'phase': phase, 'elapsed_seconds': round(now - started, 1),
+            progress({'phase': phase_state[0], 'elapsed_seconds': round(now - started, 1),
+                      'last_delta_at': time.time() - (now - last_delta[0]) if last_delta[0] is not None else None,
+                      'silence_seconds': round(now - (last_delta[0] or attempt_started[0]), 1),
                       'model': config.model, 'config_id': config.public_snapshot()['config_id']})
             last_report[0] = now
     for attempt in range(config.max_retries + 1):
         check()
+        last_delta[0] = None
+        phase_state[0] = 'loading'
+        attempt_started[0] = time.monotonic()
         task = asyncio.create_task(operation() if operation else _generate(client, config, kwargs, report))
         try:
             while not task.done():
                 check()
+                now = time.monotonic()
+                limit = config.timeout_seconds if last_delta[0] is not None else config.load_seconds
+                if now - (last_delta[0] or attempt_started[0]) >= limit:
+                    raise TimeoutError('Model generation stalled' if last_delta[0] is not None else 'Model load/first token timeout')
                 report('waiting')
                 await asyncio.wait({task}, timeout=0.1)
             result = task.result()
@@ -466,6 +500,15 @@ def _complete(client, config, **kwargs):
 
 
 def cache_read(key):
+    import durable_jobs as durable
+    ctx = durable.CURRENT.get()
+    if ctx and key is not None:
+        durable.check()
+        with durable.persistence.connect() as db:
+            row = db.execute('SELECT value FROM durable_steps WHERE job_id=? AND step_key=?',
+                (ctx.job_id, 'cache:' + hashlib.sha256(key.encode()).hexdigest())).fetchone()
+        if row:
+            return json.loads(row[0])
     if key is None:
         return None
     directory = os.environ.get('LLM_CACHE_DIR')
@@ -479,6 +522,9 @@ def cache_read(key):
 
 
 def cache_write(key, value):
+    import durable_jobs as durable
+    if durable.CURRENT.get() and key is not None:
+        durable.checkpoint('cache:' + hashlib.sha256(key.encode()).hexdigest(), lambda: value)
     if key is None:
         return None
     directory = os.environ.get('LLM_CACHE_DIR')

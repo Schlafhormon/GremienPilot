@@ -106,6 +106,7 @@ export type PipelineStage =
   | string;
 
 export interface PipelineJob {
+  execution?: import('./api').ModelJob | null;
   pipeline_id: string;
   session_id?: string | null;
   transcription_job_id?: string | null;
@@ -289,6 +290,7 @@ export interface SummaryState {
 }
 
 export interface SummaryJob {
+  execution?: import('./api').ModelJob | null;
   summary_job_id: string;
   session_id: string;
   status: 'pending' | 'processing' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | string;
@@ -336,6 +338,8 @@ export interface AssignmentSuggestionsResponse {
 }
 
 export interface AgendaDetectionRequest {
+  signal?: AbortSignal;
+  onStatus?: (job: import('./api').ModelJob) => void;
   topIds?: string[];
   fresh?: boolean;
   cacheNamespace?: string;
@@ -468,6 +472,8 @@ export interface AssignmentStepProps {
   agendaDetectionStale?: boolean;
   isDetectingAgenda?: boolean;
   onDetectAgenda?: (fresh?: boolean) => void;
+  onCancelAgenda?: () => void;
+  agendaJobPhase?: string;
   onTranscriptStructureChange?: () => void;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;

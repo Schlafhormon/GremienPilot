@@ -300,7 +300,9 @@ export default function SummaryStep({
               <div className="mt-1" aria-live="polite">
                 {summaryJob.completed_tops ?? 0} von {summaryJob.total_tops} TOPs abgeschlossen
                 {summaryJob.current_top_id && <div>Aktuell: {jobTopTitle(summaryJob.current_top_id)}</div>}
-                {summaryJob.status === 'pending' && <div>Wartet auf Verarbeitung</div>}
+                {summaryJob.execution?.state === 'retry_wait' ? <div>Vorübergehend gestört; erneuter Versuch folgt</div> : summaryJob.status === 'pending' && <div>Wartet auf Verarbeitung</div>}
+                {summaryJob.execution?.state === 'review_required' && <div>Ergebnisse benötigen fachliche Prüfung</div>}
+                {summaryJob.execution?.progress?.phase === 'loading' && <div>Modell lädt oder verarbeitet die Eingabe</div>}
                 {summaryJob.status === 'cancelling' && <div>Abbruch angefordert</div>}
                 {summaryJob.error && <div role="alert">{summaryJob.error}</div>}
                 {Object.entries(summaryJob.outcomes ?? {}).filter(([, outcome]) => outcome.status === 'failed').map(([id, outcome]) => (

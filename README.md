@@ -290,6 +290,8 @@ Sitzung, qualifizierte Sekunden, Segmentfilterung, lokale
 
 ## Konfiguration
 
+Modelljobs benötigen persistente SQLite- und Upload-Verzeichnisse auf einem lokalen Dateisystem sowie **einen Backend-Prozess / eine Replik** (`workers=1`); eine exklusive Sperre erzwingt dies. Die gemeinsame Jobwarteschlange arbeitet seriell, unabhängig von älteren Parallelitätseinstellungen. Es gibt kein Gesamtlaufzeitlimit für Jobs. PDF-/TOP-Starts unter `/api/extract-tops/jobs` und `/api/agenda-detection/jobs` liefern Job-IDs; bisherige Endpunkte behalten ihre wartenden Antwortformate. Details zu Wiederaufnahme, Status und expliziter PDF-Bereinigung: [Dauerhafte Jobs](docs/durable-jobs.md).
+
 Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 
 | Variable | Beschreibung | Standard |
@@ -358,9 +360,12 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE` / `AGENDA_DETECTION_CONTEXT_WINDOW_AFTER` | Historische Heuristikfenster; für vollständige LLM-Zuordnung nicht mehr verwendet | `4` / `8` |
 | `PERSISTENCE_DB_PATH` | SQLite-Pfad im Backend-Container | `/app/data/sessions.sqlite3` |
 | `MAX_UPLOAD_BYTES` | maximale Uploadgröße | `524288000` |
-| `TRANSCRIPTION_CONCURRENCY` | parallele Transkriptionsjobs | `1` |
-| `PIPELINE_CONCURRENCY` | parallele End-to-End-Pipelinejobs | `1` |
-| `SUMMARY_CONCURRENCY` | parallele, manuell bestätigte TOP-Regenerierungsjobs | `1` |
+| `TRANSCRIPTION_CONCURRENCY` | Legacy-Einstellung; dauerhafte Jobs verwenden die gemeinsame serielle Warteschlange | `1` |
+| `PIPELINE_CONCURRENCY` | Legacy-Einstellung; dauerhafte Jobs verwenden die gemeinsame serielle Warteschlange | `1` |
+| `SUMMARY_CONCURRENCY` | Legacy-Einstellung; dauerhafte Modelljobs werden gemeinsam seriell verarbeitet | `1` |
+| `MODEL_JOB_LEASE_SECONDS` / `MODEL_JOB_MAX_ATTEMPTS` | Übernahme-Lease mit Heartbeat / begrenzte Jobversuche einschließlich Neustarts | `60` / `3` |
+| `LLM_LOAD_TIMEOUT_SECONDS` | Modellladen/erste Ausgabe; danach zählt nur echte Ausgabe gegen das Lese-Inaktivitätslimit | `1800` |
+| `MODEL_DOCUMENT_RETENTION_DAYS` | PDF-Aufbewahrung nach Abschluss/Abbruch; `0` unbegrenzt, Bereinigung nur explizit | `0` |
 
 Weitere Optionen stehen in `.env.example`. In Docker Compose sollte
 `LLM_BASE_URL` normalerweise nicht gesetzt werden; der Backend-Container nutzt

@@ -134,3 +134,14 @@ def fake_openai_module(monkeypatch):
         yield {'choices': [{'delta': {'content': response.choices[0].message.content}, 'finish_reason': 'stop'}]}
     monkeypatch.setattr(llm_transport, '_openai_stream', stream)
     return FakeOpenAI
+
+
+@pytest.fixture(autouse=True)
+def isolated_job_storage(tmp_path_factory, monkeypatch):
+    """Even lifespan/API tests without an explicit database must never touch user jobs."""
+    tmp_path = tmp_path_factory.mktemp("job-storage")
+    monkeypatch.setenv('PERSISTENCE_DB_PATH', str(tmp_path / 'isolated.sqlite3'))
+    import persistence
+    persistence.init_db()
+    if 'main' in sys.modules:
+        monkeypatch.setattr(sys.modules['main'], 'UPLOAD_DIR', tmp_path / 'uploads')

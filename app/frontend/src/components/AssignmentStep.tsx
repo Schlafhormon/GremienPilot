@@ -44,6 +44,8 @@ export default function AssignmentStep({
   agendaDetectionStale = false,
   isDetectingAgenda = false,
   onDetectAgenda,
+  onCancelAgenda,
+  agendaJobPhase,
   onTranscriptStructureChange,
   audioUrl,
   speakerNames,
@@ -546,7 +548,10 @@ export default function AssignmentStep({
           <span className="text-gray-600">{hasSummaries ? 'Entwurf vorbereitet' : 'Entwurf nach Prüfung'}</span>
         </div>
       </div>
-      {isDetectingAgenda && <p role="status" className="text-sm text-blue-700">TOP-Erkennung läuft …</p>}
+      {isDetectingAgenda && <div className="flex gap-3 items-center">
+        <p role="status" className="text-sm text-blue-700">{agendaJobPhase || 'TOP-Erkennung läuft …'}</p>
+        {onCancelAgenda && <button type="button" onClick={onCancelAgenda}>Erkennung abbrechen</button>}
+      </div>}
       {agendaDetectionError && <p role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">TOP-Erkennung fehlgeschlagen: {agendaDetectionError}. Manuelle Zuordnung bleibt verfügbar.</p>}
       {agendaDetectionStale && <p className="rounded border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900">Vorschläge veraltet oder ohne überprüfbaren Quellenstand. Übernehmen gesperrt; bitte erneut berechnen. Bisherige Unsicherheiten bleiben sichtbar, Zeilenangaben beziehen sich auf den alten Stand.</p>}
 

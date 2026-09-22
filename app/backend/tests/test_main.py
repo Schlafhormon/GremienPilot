@@ -489,7 +489,7 @@ def test_cancel_pending_job_marks_cancelled_and_cleans_upload(tmp_path, monkeypa
         )
 
 
-def test_cancel_processing_job_is_terminal_and_cleans_upload_after_worker_stops(
+def test_cancel_processing_job_is_terminal_and_retains_source_for_review(
     tmp_path, monkeypatch
 ):
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
@@ -524,10 +524,10 @@ def test_cancel_processing_job_is_terminal_and_cleans_upload_after_worker_stops(
 
         assert cancel_response.status_code == 200
         assert cancel_response.json()["status"] == "cancelled"
-        assert wait_until(lambda: not upload_path.exists())
+        assert upload_path.exists()
         final_job = client.get(f"/api/transcribe/{job_id}").json()
         assert final_job["status"] == "cancelled"
-        assert final_job["audio_url"] is None
+        assert final_job["audio_url"] == f"/api/audio/{job_id}"
 
 
 def test_pdf_upload_validation_accepts_pdf_mime_or_extension():
@@ -642,28 +642,26 @@ def test_agenda_detection_endpoint_retains_short_tail_on_repeated_requests(tops)
     )
     source = [{"line_id": "source-line", "speaker": "SPEAKER_04", "text": text,
                "start": 10.0, "end": 20.0}]
-    # No lifespan is needed: this endpoint uses neither models nor persistence.
-    client = TestClient(main.app)
-    response = client.post("/api/agenda-detection", json={
-        "transcript": source, "tops": tops, "use_llm": False,
-    })
+    with TestClient(main.app) as client:
+        response = client.post("/api/agenda-detection", json={
+            "transcript": source, "tops": tops, "use_llm": False,
+        })
 
-    assert response.status_code == 200
-    data = response.json()
-    lines = data["transcript"]
-    assert len(lines) == 3
-    assert lines[-1]["text"] == "TOP 2."
-    assert " ".join(line["text"] for line in lines) == text
-    assert lines[0]["line_id"] == "source-line"
-    assert len(data["assignments"]) == len(lines)
+        assert response.status_code == 200
+        data = response.json()
+        lines = data["transcript"]
+        assert len(lines) == 3
+        assert lines[-1]["text"] == "TOP 2."
+        assert " ".join(line["text"] for line in lines) == text
+        assert lines[0]["line_id"] == "source-line"
+        assert len(data["assignments"]) == len(lines)
 
-    repeated = client.post("/api/agenda-detection", json={
-        "transcript": lines, "tops": tops, "use_llm": False,
-    })
-    assert repeated.status_code == 200
-    assert repeated.json()["transcript"] == lines
-    assert repeated.json()["assignments"] == data["assignments"]
-
+        repeated = client.post("/api/agenda-detection", json={
+            "transcript": lines, "tops": tops, "use_llm": False,
+        })
+        assert repeated.status_code == 200
+        assert repeated.json()["transcript"] == lines
+        assert repeated.json()["assignments"] == data["assignments"]
 
 def test_agenda_detection_endpoint_splits_mid_utterance_top_transition():
     with TestClient(main.app) as client:
@@ -1529,7 +1527,7 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
         )
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
-    assert result["pipeline"]["status"] == "completed"
+    assert result["pipeline"]["status"] == "failed"
     assert result["session"]["summaries"]["0"] == "Haushalt wurde zusammengefasst."
     assert result["session"]["summaries"]["1"] == ""
     assert result["session"]["summary_reviews"]["1"]["review_warnings"][0]["severity"] == "error"
@@ -1551,12 +1549,13 @@ def test_pipeline_persists_incomplete_source_check_without_losing_draft(tmp_path
             'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'false',
         }, files={'audio': ('meeting.mp3', b'audio', 'audio/mpeg')})
         pipeline_id = started.json()['pipeline_id']
-        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'completed')
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == ('failed' if grounding_incomplete else 'completed'))
         result = client.get(f'/api/pipeline/{pipeline_id}/result').json()
         session = client.get('/api/sessions/' + result['session']['session_id']).json()
     assert main.load_pipeline_job(pipeline_id)['result_refs']['processing_complete'] is not grounding_incomplete
     assert session['summaries']['0'] == 'Entwurf bleibt prüfbar.'
     assert session['summary_reviews']['0']['llm_usage']['grounding_incomplete'] is grounding_incomplete
+    assert session['summary_states']['0']['status'] == ('failed' if grounding_incomplete else 'ready')
 
 
 def test_pipeline_fails_clearly_when_transcription_fails(tmp_path, monkeypatch):
@@ -1723,20 +1722,19 @@ def test_agenda_api_explicit_llm_policy(monkeypatch, fake_openai_module, known_t
     monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_USE_LLM", default)
     fake_openai_module.responses = [TimeoutError("SECRET")]
     # No lifespan or real models needed for the stateless detection endpoint.
-    client = TestClient(main.app)
-    payload = {
-        "transcript": [{"speaker": "MOD", "text": "TOP 1 Haushalt.", "start": 0, "end": 1}],
-        "tops": ["Haushalt"] if known_tops else [],
-        "model": "test-model", "system_prompt": "custom", "use_llm": decision,
-    }
-    response = client.post("/api/agenda-detection", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["llm"]["enabled"] is enabled
-    assert data["llm"]["status"] == (("failed" if known_tops else "fallback") if enabled else "disabled")
-    assert bool(data["warnings"]) is enabled
-    assert "SECRET" not in response.text
-
+    with TestClient(main.app) as client:
+        payload = {
+            "transcript": [{"speaker": "MOD", "text": "TOP 1 Haushalt.", "start": 0, "end": 1}],
+            "tops": ["Haushalt"] if known_tops else [],
+            "model": "test-model", "system_prompt": "custom", "use_llm": decision,
+        }
+        response = client.post("/api/agenda-detection", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["llm"]["enabled"] is enabled
+        assert data["llm"]["status"] == (("failed" if known_tops else "fallback") if enabled else "disabled")
+        assert bool(data["warnings"]) is enabled
+        assert "SECRET" not in response.text
 
 @pytest.mark.parametrize("decision", ["false", "true", 1, 0, [], {}])
 def test_agenda_json_rejects_non_boolean_decisions(decision):
@@ -1772,7 +1770,7 @@ def test_pipeline_llm_policy_and_persisted_fallback(
         response = client.post("/api/pipeline/start", data=data, files={"audio": ("test.mp3", b"fake", "audio/mpeg")})
         assert response.status_code == 200
         pipeline_id = response.json()["pipeline_id"]
-        assert wait_until(lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"] == "completed")
+        assert wait_until(lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"] in {"completed", "failed"})
         main.jobs.clear()
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
     usage = result["agenda_detection"]["llm"]
@@ -1802,26 +1800,25 @@ def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path,
         {"number":"7","title":"Anfragen","section":"public"},
         {"number":"2","title":"Vergabe","section":"nonpublic"}
     ]}'''
-    client = TestClient(main.app)
-    response = client.post('/api/extract-tops', files={'pdf': ('agenda.pdf', pdf.getvalue(), 'application/pdf')})
-    assert response.status_code == 200
-    tops = response.json()['tops']
-    assert tops == ['[Öffentlich] 2 Haushalt', '[Öffentlich] 2.1 Schulbau', '[Öffentlich] 7 Anfragen', '[Nichtöffentlich] 2 Vergabe']
-    response = client.post('/api/agenda-detection', json={
-        'tops': tops, 'use_llm': False,
-        'transcript': [{'speaker': 'MOD', 'text': text, 'start': i, 'end': i+1} for i, text in enumerate([
-            'TOP 2 öffentlich Haushalt', 'Beratung', 'TOP 2.1 Schulbau', 'Beratung',
-            'TOP sieben Anfragen', 'Beratung', 'TOP 2 Vergabe', 'Beratung',
-        ])],
-    })
-    assert response.status_code == 200
-    result = response.json()
-    assert result['tops'] == tops
-    assert not result['segments'][1]['uncertain']
-    assert not result['segments'][2]['uncertain']
-    assert result['assignments'][6:] == [None, None]
-    assert len(result['segments']) == 3
-
+    with TestClient(main.app) as client:
+        response = client.post('/api/extract-tops', files={'pdf': ('agenda.pdf', pdf.getvalue(), 'application/pdf')})
+        assert response.status_code == 200
+        tops = response.json()['tops']
+        assert tops == ['[Öffentlich] 2 Haushalt', '[Öffentlich] 2.1 Schulbau', '[Öffentlich] 7 Anfragen', '[Nichtöffentlich] 2 Vergabe']
+        response = client.post('/api/agenda-detection', json={
+            'tops': tops, 'use_llm': False,
+            'transcript': [{'speaker': 'MOD', 'text': text, 'start': i, 'end': i+1} for i, text in enumerate([
+                'TOP 2 öffentlich Haushalt', 'Beratung', 'TOP 2.1 Schulbau', 'Beratung',
+                'TOP sieben Anfragen', 'Beratung', 'TOP 2 Vergabe', 'Beratung',
+            ])],
+        })
+        assert response.status_code == 200
+        result = response.json()
+        assert result['tops'] == tops
+        assert not result['segments'][1]['uncertain']
+        assert not result['segments'][2]['uncertain']
+        assert result['assignments'][6:] == [None, None]
+        assert len(result['segments']) == 3
 
 def test_pipeline_known_fallback_keeps_absence_of_evidence_visible(monkeypatch):
     transcript = [{'speaker': 'A', 'text': 'Allgemeine Diskussion.'}]
@@ -1844,20 +1841,20 @@ def test_agenda_api_preserves_identity_and_validation_diagnostics(fake_openai_mo
         'top_id': top_id, 'top_title': 'Schulbau', 'start_index': 0, 'end_index': 0,
         'confidence': 0.99, 'evidence_text': 'SECRET invented quotation', 'evidence_index': 0,
     }]})
-    response = TestClient(main.app).post('/api/agenda-detection', json={
-        'transcript': [{'speaker': 'A', 'text': 'Allgemeine Diskussion.', 'start': 0, 'end': 1}],
-        'tops': ['Haushalt', 'Schulbau'], 'use_llm': True,
-    })
-    assert response.status_code == 200
-    data = response.json()
-    assert data['tops'] == ['Haushalt', 'Schulbau']
-    assert data['assignments'] == [None]
-    assert data['llm']['gaps'][0]['kind'] == 'technical'
-    assert data['warnings']
-    assert data['llm']['status'] == 'failed'  # Invalid evidence is not a successful LLM result.
-    assert 'SECRET' not in response.text
-    assert data['segments'] == []
-
+    with TestClient(main.app) as client:
+        response = client.post('/api/agenda-detection', json={
+            'transcript': [{'speaker': 'A', 'text': 'Allgemeine Diskussion.', 'start': 0, 'end': 1}],
+            'tops': ['Haushalt', 'Schulbau'], 'use_llm': True,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data['tops'] == ['Haushalt', 'Schulbau']
+        assert data['assignments'] == [None]
+        assert data['llm']['gaps'][0]['kind'] == 'technical'
+        assert data['warnings']
+        assert data['llm']['status'] == 'failed'  # Invalid evidence is not a successful LLM result.
+        assert 'SECRET' not in response.text
+        assert data['segments'] == []
 
 def test_known_agenda_total_failure_is_persisted_as_incomplete(tmp_path, monkeypatch, fake_openai_module):
     configure_test_app(tmp_path, monkeypatch)
@@ -1870,7 +1867,7 @@ def test_known_agenda_total_failure_is_persisted_as_incomplete(tmp_path, monkeyp
             'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'true', 'model': 'test-model',
         }, files={'audio': ('meeting.mp3', b'audio', 'audio/mpeg')})
         pipeline_id = started.json()['pipeline_id']
-        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'completed')
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'failed')
         result = client.get(f'/api/pipeline/{pipeline_id}/result').json()
         session = client.get('/api/sessions/' + result['session']['session_id']).json()
     assert result['agenda_detection']['llm']['status'] == 'failed'

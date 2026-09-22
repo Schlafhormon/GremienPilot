@@ -29,12 +29,19 @@ export default function ProcessingStep({
     active: normalizedProgress < 100 && index === activeIndex,
   }));
 
-  const headline =
+  const executionLabels = {
+    queued: 'Verarbeitung wartet...', running: 'Verarbeitung läuft...',
+    retry_wait: 'Vorübergehend gestört – erneuter Versuch folgt',
+    review_required: 'Verarbeitung benötigt Prüfung', completed: 'Verarbeitung abgeschlossen',
+    failed: 'Verarbeitung technisch unvollständig', cancelled: 'Verarbeitung abgebrochen',
+    superseded: 'Eingaben wurden geändert – Ergebnis nicht übernommen',
+  };
+  const headline = pipeline?.execution ? executionLabels[pipeline.execution.state] :
     pipeline?.status === 'pending'
       ? 'Verarbeitung wartet...'
       : pipeline?.status === 'completed'
         ? 'Verarbeitung abgeschlossen'
-        : 'Verarbeitung läuft...';
+        : pipeline?.status === 'failed' ? 'Verarbeitung technisch unvollständig' : pipeline?.status === 'cancelled' ? 'Verarbeitung abgebrochen' : 'Verarbeitung läuft...';
 
   const stageStatus =
     status ||
@@ -120,6 +127,8 @@ export default function ProcessingStep({
         {stageStatus && (
           <div className={`mt-6 p-4 rounded-lg ${statusClass}`}>
             <p className="text-sm">{stageStatus}</p>
+            {pipeline?.execution?.progress?.phase === 'loading' && <p className="text-sm">Modell lädt oder verarbeitet die Eingabe; noch keine Ausgabe empfangen.</p>}
+            {pipeline?.execution?.progress?.last_delta_at != null && <p className="text-sm">Letzte Modellausgabe vor {Math.round(pipeline.execution.progress.silence_seconds ?? 0)} Sekunden.</p>}
           </div>
         )}
 

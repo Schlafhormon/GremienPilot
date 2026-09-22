@@ -16,7 +16,6 @@ import hashlib
 from collections import OrderedDict
 from dataclasses import asdict
 from contextlib import asynccontextmanager
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
@@ -87,9 +86,6 @@ from persistence import (
     load_speaker_observations,
     load_speaker_profile,
     load_speaker_profiles,
-    mark_interrupted_jobs,
-    mark_interrupted_pipeline_jobs,
-    mark_interrupted_summary_jobs,
     prune_speaker_embeddings,
     reject_speaker_observation,
     load_pipeline_job,
@@ -122,6 +118,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+import durable_jobs as durable
 from llm_transport import request_control, work_slot, LLMCancelledError
 
 
@@ -131,67 +128,32 @@ class CancellationRequested(LLMCancelledError):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    FastAPI lifespan event handler.
-    Prepares models (on demand in GPU switching mode) and cleans up on shutdown.
-    """
-    logger.info("Server starting up - initializing persistence...")
-
-    try:
-        init_db()
-        mark_interrupted_jobs()
-        mark_interrupted_pipeline_jobs()
-        mark_interrupted_summary_jobs()
-        jobs.clear()
-        jobs.update(load_jobs())
-        logger.info(f"Loaded {len(jobs)} persisted jobs")
-    except Exception as e:
-        logger.error(f"Failed to initialize persistence: {e}", exc_info=True)
-
-    logger.info("Preparing transcription models...")
-
-    try:
-        # Managed GPU models are prepared here and loaded only inside a job.
-        app.state.models = load_models()
-        app.state.models_loaded = True
-        logger.info("Transcription model holder ready")
-    except Exception as e:
-        logger.error(f"Failed to load models: {e}", exc_info=True)
-        app.state.models = None
-        app.state.models_loaded = False
-
-    app.state.job_manager = TranscriptionJobManager(
-        models_provider=lambda: getattr(app.state, "models", None),
-        concurrency_limit=TRANSCRIPTION_CONCURRENCY,
-    )
-    await app.state.job_manager.start()
-    app.state.pipeline_manager = PipelineJobManager(
-        models_provider=lambda: getattr(app.state, "models", None),
-        concurrency_limit=PIPELINE_CONCURRENCY,
-    )
-    await app.state.pipeline_manager.start()
-    app.state.summary_job_manager = SummaryJobManager(
-        concurrency_limit=SUMMARY_CONCURRENCY
-    )
-    await app.state.summary_job_manager.start()
-
-    yield  # Server is running
-
-    # Cleanup on shutdown - properly release GPU resources
-    logger.info("Server shutting down - cleaning up...")
-    if hasattr(app.state, "pipeline_manager"):
-        await app.state.pipeline_manager.stop()
-    if hasattr(app.state, "summary_job_manager"):
-        await app.state.summary_job_manager.stop()
-    if hasattr(app.state, "job_manager"):
-        await app.state.job_manager.stop()
-    mark_active_jobs_failed("Transkription wurde durch Backend-Shutdown unterbrochen")
-    if hasattr(app.state, "models") and app.state.models is not None:
-        device = app.state.models.device
-        del app.state.models
-        _cleanup_memory(device)
+    manager = durable.Manager(run_durable_job, mirror_durable_job)
+    manager.lock = durable.ProcessLock().__enter__()
+    app.state.durable_manager = manager
     app.state.models = None
     app.state.models_loaded = False
+    try:
+        init_db()
+        jobs.clear()
+        jobs.update(load_jobs())
+        try:
+            app.state.models = load_models()
+            app.state.models_loaded = True
+        except Exception:
+            logger.error("Could not prepare transcription models", exc_info=True)
+        recover_legacy_jobs()
+        await manager.start()
+        yield
+    finally:
+        if manager.started:
+            await manager.stop()
+        else:
+            manager.lock.__exit__()
+        if app.state.models is not None:
+            _cleanup_memory(app.state.models.device)
+        app.state.models = None
+        app.state.models_loaded = False
 
 
 app = FastAPI(
@@ -393,6 +355,7 @@ def persist_job_state(job_id: str) -> None:
 
 
 def update_job_state(job_id: str, **changes: Any) -> dict[str, Any] | None:
+    durable.check()
     with JOB_LOCK:
         job = jobs.get(job_id)
         if job is None:
@@ -422,6 +385,7 @@ def get_job_from_cache_or_db(job_id: str) -> dict[str, Any] | None:
 
 
 def is_job_cancelled(job_id: str) -> bool:
+    durable.check()
     job = get_job_from_cache_or_db(job_id)
     if not job:
         return True
@@ -443,140 +407,8 @@ def cleanup_job_uploads(job_id: str, job_data: dict[str, Any]) -> None:
         persist_job_state(job_id)
 
 
-def mark_active_jobs_failed(message: str) -> None:
-    with JOB_LOCK:
-        active_job_ids = [
-            job_id
-            for job_id, job in jobs.items()
-            if job.get("status") in {JOB_STATUS_PENDING, JOB_STATUS_PROCESSING}
-        ]
-
-    for job_id in active_job_ids:
-        update_job_state(
-            job_id,
-            status=JOB_STATUS_FAILED,
-            progress=0,
-            message=message,
-            error=message,
-        )
-
-
-class TranscriptionJobManager:
-    """Owns transcription queueing and worker concurrency for this process."""
-
-    def __init__(
-        self,
-        *,
-        models_provider: Callable[[], TranscriptionModels | None],
-        concurrency_limit: int,
-    ) -> None:
-        self.models_provider = models_provider
-        self.concurrency_limit = max(1, concurrency_limit)
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
-        self.executor = ThreadPoolExecutor(
-            max_workers=self.concurrency_limit,
-            thread_name_prefix="transcription-worker",
-        )
-        self.workers: list[asyncio.Task] = []
-        self.started = False
-
-    async def start(self) -> None:
-        if self.started:
-            return
-        self.started = True
-        self.workers = [
-            asyncio.create_task(self._worker(index))
-            for index in range(self.concurrency_limit)
-        ]
-        logger.info(
-            "Transcription job manager started with concurrency=%s",
-            self.concurrency_limit,
-        )
-
-    async def stop(self) -> None:
-        if not self.started:
-            return
-        self.started = False
-        for worker in self.workers:
-            worker.cancel()
-        await asyncio.gather(*self.workers, return_exceptions=True)
-        self.workers = []
-        self.executor.shutdown(wait=False, cancel_futures=True)
-
-    async def enqueue(self, job_id: str) -> None:
-        if not self.started:
-            await self.start()
-        await self.queue.put(job_id)
-
-    async def _worker(self, worker_index: int) -> None:
-        while True:
-            job_id = await self.queue.get()
-            try:
-                job = get_job_from_cache_or_db(job_id)
-                if not job:
-                    continue
-                if job.get("status") in TERMINAL_JOB_STATUSES:
-                    continue
-                if is_job_cancelled(job_id):
-                    update_job_state(
-                        job_id,
-                        status=JOB_STATUS_CANCELLED,
-                        message="Transkription abgebrochen",
-                        error=None,
-                    )
-                    cleanup_job_uploads(job_id, job)
-                    continue
-
-                models = self.models_provider()
-                if models is None:
-                    update_job_state(
-                        job_id,
-                        status=JOB_STATUS_FAILED,
-                        progress=0,
-                        message="Modelle sind nicht geladen",
-                        error="Modelle sind nicht geladen",
-                    )
-                    continue
-
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    self.executor,
-                    run_transcription,
-                    job_id,
-                    job.get("file_path"),
-                    models,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(
-                    "[Worker %s] Unhandled transcription worker error for job %s: %s",
-                    worker_index,
-                    job_id,
-                    e,
-                    exc_info=True,
-                )
-                update_job_state(
-                    job_id,
-                    status=JOB_STATUS_FAILED,
-                    message=f"Fehler: {str(e)}",
-                    error=str(e),
-                )
-            finally:
-                self.queue.task_done()
-
-
-async def get_or_create_job_manager() -> TranscriptionJobManager:
-    manager = getattr(app.state, "job_manager", None)
-    if manager is None:
-        manager = TranscriptionJobManager(
-            models_provider=lambda: getattr(app.state, "models", None),
-            concurrency_limit=TRANSCRIPTION_CONCURRENCY,
-        )
-        app.state.job_manager = manager
-    if not manager.started:
-        await manager.start()
-    return manager
+async def get_or_create_job_manager():
+    return DurableSubmission("transcription")
 
 
 def _pipeline_refs(job: dict[str, Any] | None) -> dict[str, Any]:
@@ -584,6 +416,7 @@ def _pipeline_refs(job: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def save_pipeline_state(pipeline_id: str, **changes: Any) -> dict[str, Any] | None:
+    durable.check()
     job = load_pipeline_job(pipeline_id)
     if job is None:
         return None
@@ -620,202 +453,22 @@ def is_pipeline_cancelled(pipeline_id: str) -> bool:
 
 
 def ensure_pipeline_not_cancelled(pipeline_id: str) -> None:
+    durable.check()
     if is_pipeline_cancelled(pipeline_id):
         raise CancellationRequested()
 
 
-class PipelineJobManager:
-    """Runs backend-controlled end-to-end protocol generation pipelines."""
-
-    def __init__(
-        self,
-        *,
-        models_provider: Callable[[], TranscriptionModels | None],
-        concurrency_limit: int,
-    ) -> None:
-        self.models_provider = models_provider
-        self.concurrency_limit = max(1, concurrency_limit)
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
-        self.executor = ThreadPoolExecutor(
-            max_workers=self.concurrency_limit,
-            thread_name_prefix="pipeline-worker",
-        )
-        self.workers: list[asyncio.Task] = []
-        self.started = False
-
-    async def start(self) -> None:
-        if self.started:
-            return
-        self.started = True
-        self.workers = [
-            asyncio.create_task(self._worker(index))
-            for index in range(self.concurrency_limit)
-        ]
-        logger.info(
-            "Pipeline job manager started with concurrency=%s",
-            self.concurrency_limit,
-        )
-
-    async def stop(self) -> None:
-        if not self.started:
-            return
-        self.started = False
-        for worker in self.workers:
-            worker.cancel()
-        await asyncio.gather(*self.workers, return_exceptions=True)
-        self.workers = []
-        self.executor.shutdown(wait=False, cancel_futures=True)
-
-    async def enqueue(self, pipeline_id: str) -> None:
-        if not self.started:
-            await self.start()
-        await self.queue.put(pipeline_id)
-
-    async def _worker(self, worker_index: int) -> None:
-        while True:
-            pipeline_id = await self.queue.get()
-            try:
-                job = load_pipeline_job(pipeline_id)
-                if not job or job.get("status") in TERMINAL_PIPELINE_STATUSES:
-                    continue
-                models = self.models_provider()
-                if models is None:
-                    save_pipeline_state(
-                        pipeline_id,
-                        status=PIPELINE_STATUS_FAILED,
-                        error="Modelle sind nicht geladen",
-                        progress=0,
-                    )
-                    continue
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    self.executor,
-                    run_pipeline_job,
-                    pipeline_id,
-                    models,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(
-                    "[Pipeline worker %s] Unhandled error for pipeline %s: %s",
-                    worker_index,
-                    pipeline_id,
-                    e,
-                    exc_info=True,
-                )
-                save_pipeline_state(
-                    pipeline_id,
-                    status=PIPELINE_STATUS_FAILED,
-                    error=str(e),
-                )
-            finally:
-                self.queue.task_done()
+async def get_or_create_pipeline_manager():
+    return DurableSubmission("pipeline")
 
 
-async def get_or_create_pipeline_manager() -> PipelineJobManager:
-    manager = getattr(app.state, "pipeline_manager", None)
-    if manager is None:
-        manager = PipelineJobManager(
-            models_provider=lambda: getattr(app.state, "models", None),
-            concurrency_limit=PIPELINE_CONCURRENCY,
-        )
-        app.state.pipeline_manager = manager
-    if not manager.started:
-        await manager.start()
-    return manager
-
-
-class SummaryJobManager:
-    """Runs explicitly confirmed, selective summary regeneration jobs."""
-
-    def __init__(self, *, concurrency_limit: int = 1) -> None:
-        self.concurrency_limit = max(1, concurrency_limit)
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
-        self.executor = ThreadPoolExecutor(
-            max_workers=self.concurrency_limit,
-            thread_name_prefix="summary-worker",
-        )
-        self.workers: list[asyncio.Task] = []
-        self.started = False
-
-    async def start(self) -> None:
-        if self.started:
-            return
-        self.started = True
-        self.workers = [
-            asyncio.create_task(self._worker(index))
-            for index in range(self.concurrency_limit)
-        ]
-
-    async def stop(self) -> None:
-        if not self.started:
-            return
-        self.started = False
-        for worker in self.workers:
-            worker.cancel()
-        await asyncio.gather(*self.workers, return_exceptions=True)
-        self.workers = []
-        self.executor.shutdown(wait=False, cancel_futures=True)
-
-    async def enqueue(self, summary_job_id: str) -> None:
-        if not self.started:
-            await self.start()
-        await self.queue.put(summary_job_id)
-
-    async def _worker(self, worker_index: int) -> None:
-        while True:
-            summary_job_id = await self.queue.get()
-            try:
-                job = load_summary_job(summary_job_id)
-                if not job or job.get("status") in {"completed", "failed", "cancelled"}:
-                    continue
-                if summary_job_cancelled(summary_job_id):
-                    finalize_summary_job_cancellation(summary_job_id, job)
-                    continue
-                if (
-                    load_pipeline_jobs(status=PIPELINE_STATUS_PROCESSING)
-                    or load_pipeline_jobs(status=PIPELINE_STATUS_PENDING)
-                ):
-                    await asyncio.sleep(1)
-                    await self.queue.put(summary_job_id)
-                    continue
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    self.executor,
-                    run_summary_job,
-                    summary_job_id,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.error(
-                    "[Summary worker %s] job %s failed: %s",
-                    worker_index,
-                    summary_job_id,
-                    safe_exception_label(exc),
-                    exc_info=True,
-                )
-                update_summary_job(
-                    summary_job_id,
-                    status="failed",
-                    error=safe_exception_label(exc),
-                )
-            finally:
-                self.queue.task_done()
-
-
-async def get_or_create_summary_job_manager() -> SummaryJobManager:
-    manager = getattr(app.state, "summary_job_manager", None)
-    if manager is None:
-        manager = SummaryJobManager(concurrency_limit=SUMMARY_CONCURRENCY)
-        app.state.summary_job_manager = manager
-    if not manager.started:
-        await manager.start()
-    return manager
+async def get_or_create_summary_job_manager():
+    return DurableSubmission("summary")
 
 
 def request_job_cancellation(job_id: str) -> dict[str, Any] | None:
+    if durable.load(job_id):
+        durable.cancel(job_id)
     job = get_job_from_cache_or_db(job_id)
     if job is None:
         return None
@@ -871,7 +524,9 @@ def cleanup_old_jobs() -> int:
     removed = 0
 
     def cleanup_job_audio(job_id: str, job_data: dict) -> None:
-        """Clean up audio file associated with a job."""
+        """Clean up audio file associated with a legacy job only."""
+        if durable.load(job_id) or load_latest_pipeline_job_for_session(job_data.get("session_id") or ""):
+            return
         if not DELETE_UPLOADS_ON_JOB_CLEANUP:
             return
         file_paths = {
@@ -972,6 +627,7 @@ class PipelineStartResponse(BaseModel):
 
 
 class PipelineStatusResponse(BaseModel):
+    execution: Optional[Dict[str, Any]] = None
     pipeline_id: str
     session_id: Optional[str] = None
     transcription_job_id: Optional[str] = None
@@ -985,6 +641,7 @@ class PipelineStatusResponse(BaseModel):
 
 
 class SummaryJobResponse(BaseModel):
+    execution: Optional[Dict[str, Any]] = None
     summary_job_id: str
     session_id: str
     status: str
@@ -1492,6 +1149,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
 def build_summary_job_response(job: dict[str, Any]) -> SummaryJobResponse:
     refs = dict(job.get("refs") or {})
     return SummaryJobResponse(
+        execution=durable.public(work) if (work := durable.load(job["summary_job_id"])) else None,
         summary_job_id=job["summary_job_id"],
         session_id=job["session_id"],
         status=job["status"],
@@ -2164,6 +1822,7 @@ def parse_pipeline_options(raw_options: str | None) -> dict[str, Any]:
 def build_pipeline_status_response(job: dict[str, Any]) -> PipelineStatusResponse:
     refs = _pipeline_refs(job)
     return PipelineStatusResponse(
+        execution=durable.public(work) if (work := durable.load(job["pipeline_job_id"])) else None,
         pipeline_id=job["pipeline_job_id"],
         session_id=job.get("session_id"),
         transcription_job_id=job.get("transcription_job_id"),
@@ -2557,7 +2216,8 @@ def build_generated_summary_states(
             index,
             no_top_mode=not bool(tops),
         )
-        has_error = any(
+        review = summary_reviews.get(index) or {}
+        has_error = bool(review.get("error") or (review.get("llm_usage") or {}).get("grounding_incomplete")) or any(
             str(item.get("severity", "")).lower() == "error"
             for item in (summary_reviews.get(index) or {}).get("review_warnings", [])
             if isinstance(item, dict)
@@ -2565,10 +2225,8 @@ def build_generated_summary_states(
         states[index] = {
             "top_id": top_id,
             "status": (
-                "ready"
-                if str(summaries.get(index) or "").strip()
-                else "failed"
-                if has_error
+                "failed" if has_error
+                else "ready" if str(summaries.get(index) or "").strip()
                 else "missing"
             ),
             "input_hash": summary_snapshot_hash(snapshot),
@@ -2583,6 +2241,7 @@ def build_generated_summary_states(
 
 
 def update_summary_job(summary_job_id: str, **changes: Any) -> dict[str, Any] | None:
+    durable.check()
     job = load_summary_job(summary_job_id)
     if job is None:
         return None
@@ -2596,6 +2255,7 @@ def update_summary_job(summary_job_id: str, **changes: Any) -> dict[str, Any] | 
 
 
 def summary_job_cancelled(summary_job_id: str) -> bool:
+    durable.check()
     job = load_summary_job(summary_job_id)
     if job is None:
         return True
@@ -2653,7 +2313,7 @@ def finalize_summary_job_cancellation(summary_job_id: str, job: dict[str, Any]) 
                 continue
             index = ids.index(top_id)
             state = (session.get("summary_states") or {}).get(index, {})
-            if state.get("status") in {"queued", "running"}:
+            if state.get("status") in {"queued", "running"} and state.get("generation_job_id", summary_job_id) == summary_job_id:
                 state["status"] = refs.get("previous_statuses", {}).get(top_id, "missing")
                 state["updated_at"] = time.time()
     mutate_summary_session(job["session_id"], restore)
@@ -2677,7 +2337,7 @@ def _run_summary_job(summary_job_id: str) -> None:
         return
     refs = dict(job.get("refs") or {})
     top_ids = list(refs.get("top_ids") or [])
-    outcomes: dict[str, Any] = {}
+    outcomes: dict[str, Any] = dict(refs.get("outcomes") or {})
     total = len(top_ids)
 
     def report(**changes):
@@ -2688,6 +2348,9 @@ def _run_summary_job(summary_job_id: str) -> None:
     current_top_id: str | None = None
     report(status="processing", progress=0, current_top=0, total_tops=total, error=None)
     for position, top_id in enumerate(top_ids):
+        if outcomes.get(top_id, {}).get("status") == "completed" or durable.published("summary:" + top_id):
+            outcomes[top_id] = {"status": "completed"}
+            continue
         if summary_job_cancelled(summary_job_id):
             finalize_summary_job_cancellation(summary_job_id, job)
             return
@@ -2729,6 +2392,8 @@ def _run_summary_job(summary_job_id: str) -> None:
                 return
             review = build_summary_review(structured=result.structured, summary=result.summary,
                 lines=[{**line, "speaker": names.get(line["speaker"], line["speaker"])} for line in lines])
+            if getattr(result, "llm_usage", {}).get("grounding_incomplete"):
+                raise RuntimeError("Zusammenfassung technisch unvollständig")
             if not result.summary.strip():
                 raise SummaryJobInputChanged("Die Generierung lieferte keine Zusammenfassung")
 
@@ -2750,12 +2415,16 @@ def _run_summary_job(summary_job_id: str) -> None:
                     current_input_hash=input_hash, source_snapshot=snapshot,
                     change_reasons=[], origin="manual_regeneration",
                     generated_at=time.time(), updated_at=time.time())
-            mutate_summary_session(job["session_id"], publish)
+            with durable.publication("summary:" + top_id):
+                mutate_summary_session(job["session_id"], publish)
             outcomes[top_id] = {"status": "completed"}
         except LLMCancelledError:
+            if durable.CURRENT.get():
+                raise
             finalize_summary_job_cancellation(summary_job_id, job)
             return
         except Exception as exc:
+            durable.raise_if_transient(exc)
             # Retain successful TOPs and continue the same serial job after a failure.
             message = str(exc) if isinstance(exc, SummaryJobInputChanged) else safe_exception_label(exc)
             outcomes[top_id] = {"status": "failed", "error": message}
@@ -2802,6 +2471,11 @@ def save_pipeline_session(
     skipped_assignment: bool | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id) or {"session_id": session_id}
+    ctx = durable.CURRENT.get()
+    if ctx and summaries is None:
+        return session
+    if ctx and durable.published("pipeline:published"):
+        return session
     state = dict(session)
     if job_id is not None:
         state["job_id"] = job_id
@@ -2852,7 +2526,10 @@ def save_pipeline_session(
     state.setdefault("summary_states", {})
     state.setdefault("export_metadata", {})
     state.setdefault("skipped_assignment", False)
-    return save_session(session_id, state, bump_revision=False)
+    with durable.publication("pipeline:published"):
+        return save_session(session_id, state,
+            expected_revision=ctx.payload.get("session_revision") if ctx else session.get("revision"),
+            bump_revision=True)
 
 
 def fallback_agenda(
@@ -2894,6 +2571,7 @@ def detect_pipeline_agenda(
 ) -> tuple[list[str], list[int | None], dict[str, Any], dict[str, Any]]:
     agenda_tops = [top.strip() for top in known_tops if top.strip()]
     pdf_metadata: dict[str, Any] = {}
+    pdf_incomplete = False
     model = options.get("agenda_model") or options.get("model")
     # The legacy system_prompt belongs only to summarization.
     system_prompt = options.get("agenda_system_prompt")
@@ -2906,25 +2584,33 @@ def detect_pipeline_agenda(
 
     if not agenda_tops and pdf_path and options.get("auto_detect_tops_from_pdf"):
         try:
-            extracted = extract_agenda_data_from_pdf(
-                pdf_path,
-                model=model,
-                system_prompt=options.get("pdf_system_prompt"),
-            )
-            extracted_tops = extracted.tops
-            pdf_metadata = extracted.metadata.to_dict()
+            def extract_pdf():
+                extracted = extract_agenda_data_from_pdf(pdf_path, model=model,
+                    system_prompt=options.get("pdf_system_prompt"))
+                return {"tops": extracted.tops, "metadata": extracted.metadata.to_dict(),
+                    "processing_complete": getattr(extracted, "processing_complete", True),
+                    "review_required": getattr(extracted, "review_required", False)}
+            extracted = durable.checkpoint("pipeline:pdf", extract_pdf)
+            extracted_tops = extracted["tops"]
+            pdf_metadata = extracted["metadata"]
+            pdf_incomplete = not extracted["processing_complete"]
+            if extracted.get("review_required"):
+                append_pipeline_warning(pipeline_id, "PDF-Erkennung benötigt Nachprüfung; Original bleibt gespeichert.")
             if extracted_tops:
                 agenda_tops = [top.strip() for top in extracted_tops if top.strip()]
         except LLMCancelledError:
             raise
         except Exception as exc:
+            durable.raise_if_transient(exc)
+            if durable.CURRENT.get():
+                raise
             append_pipeline_warning(
                 pipeline_id,
                 "TOP-Erkennung aus PDF fehlgeschlagen, nutze Fallback "
                 f"({safe_exception_label(exc)}).",
             )
 
-    detection_details: dict[str, Any] = {}
+    detection_details: dict[str, Any] = {"pdf_incomplete": pdf_incomplete}
     try:
         utterances = transcript_utterances(transcript)
         if agenda_tops:
@@ -2947,7 +2633,7 @@ def detect_pipeline_agenda(
             )
         usage = result.llm
         warnings = usage.warnings if usage else []
-        detection_details = {"llm": asdict(usage) if usage else None, "warnings": warnings}
+        detection_details = {"pdf_incomplete": pdf_incomplete, "llm": asdict(usage) if usage else None, "warnings": warnings}
         for warning in warnings:
             append_pipeline_warning(pipeline_id, warning)
         if result.tops and result.assignments:
@@ -2964,6 +2650,7 @@ def detect_pipeline_agenda(
     except LLMCancelledError:
         raise
     except Exception as exc:
+        durable.raise_if_transient(exc)
         message = f"TOP-Erkennung technisch fehlgeschlagen ({safe_exception_label(exc)}); Zuordnung prüfen."
         append_pipeline_warning(pipeline_id, message)
         if agenda_tops:
@@ -3001,8 +2688,9 @@ def summarize_pipeline_segments(
     options: dict[str, Any],
     speaker_names: dict[str, str] | None = None,
 ) -> tuple[dict[int, str], dict[int, Any]]:
-    summaries: dict[int, str] = {}
-    summary_reviews: dict[int, Any] = {}
+    prior = _pipeline_refs(load_pipeline_job(pipeline_id)).get("summary_progress") or {}
+    summaries = {int(k): v for k, v in (prior.get("summaries") or {}).items()}
+    summary_reviews = {int(k): v for k, v in (prior.get("summary_reviews") or {}).items()}
     model = options.get("summary_model") or options.get("model")
     system_prompt = options.get("summary_system_prompt")
     if system_prompt is None:
@@ -3042,6 +2730,7 @@ def summarize_pipeline_segments(
         except LLMCancelledError:
             raise
         except Exception as exc:
+            durable.raise_if_transient(exc)
             if isinstance(exc, LLMCallError):
                 message = str(exc)
             else:
@@ -3068,6 +2757,8 @@ def summarize_pipeline_segments(
             }
 
     for top_index, top_title in enumerate(tops):
+        if top_index in summaries and not summary_reviews.get(top_index, {}).get("error"):
+            continue
         lines = [
             line
             for line_index, line in enumerate(transcript)
@@ -3122,6 +2813,7 @@ def summarize_pipeline_segments(
         except LLMCancelledError:
             raise
         except Exception as exc:
+            durable.raise_if_transient(exc)
             if isinstance(exc, LLMCallError):
                 message = str(exc)
             else:
@@ -3192,7 +2884,8 @@ def _run_pipeline_job(
             progress=15,
             error=None,
         )
-        run_transcription(transcription_job_id, audio_path, models)
+        if (load_job(transcription_job_id) or {}).get("status") != JOB_STATUS_COMPLETED:
+            run_transcription(transcription_job_id, audio_path, models)
         ensure_pipeline_not_cancelled(pipeline_id)
 
         transcription_job = load_job(transcription_job_id)
@@ -3204,9 +2897,8 @@ def _run_pipeline_job(
             )
             raise RuntimeError(error or "Transkription fehlgeschlagen")
 
-        transcript = [
-            line_to_dict(line) for line in (transcription_job.get("transcript") or [])
-        ]
+        transcript = durable.checkpoint("pipeline:transcript", lambda: [
+            line_to_dict(line) for line in (transcription_job.get("transcript") or [])])
         save_pipeline_session(
             session_id,
             job_id=transcription_job_id,
@@ -3242,14 +2934,9 @@ def _run_pipeline_job(
             progress=72,
         )
         transcript = split_transcript_for_agenda_detection(transcript)
-        tops, assignments, agenda_info, pdf_metadata = detect_pipeline_agenda(
-            pipeline_id,
-            transcript,
-            known_tops=known_tops,
-            pdf_path=pdf_path,
-            options=options,
-        )
-        top_ids = [str(uuid.uuid4()) for _ in tops]
+        tops, assignments, agenda_info, pdf_metadata = durable.checkpoint("pipeline:agenda", lambda: detect_pipeline_agenda(
+            pipeline_id, transcript, known_tops=known_tops, pdf_path=pdf_path, options=options))
+        top_ids = durable.checkpoint("pipeline:top_ids", lambda: [str(uuid.uuid4()) for _ in tops])
         for identity in ((agenda_info.get('llm') or {}).get('provenance') or {}).get('identities', []):
             identity['top_uid'] = top_ids[identity['top_index']]
         # Freeze the exact detector input and result before manual editing begins.
@@ -3284,13 +2971,10 @@ def _run_pipeline_job(
             stage=PIPELINE_STAGE_SUMMARIZE,
             progress=82,
         )
-        summaries, summary_reviews = summarize_pipeline_segments(
-            pipeline_id,
-            transcript=transcript,
-            tops=tops,
-            assignments=assignments,
-            options=options,
-        )
+        summaries, summary_reviews = durable.checkpoint("pipeline:summaries", lambda: summarize_pipeline_segments(
+            pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options))
+        summaries = {int(k): v for k, v in summaries.items()}
+        summary_reviews = {int(k): v for k, v in summary_reviews.items()}
         summary_states = build_generated_summary_states(
             session_id=session_id,
             transcript=transcript,
@@ -3311,26 +2995,30 @@ def _run_pipeline_job(
             summaries=summaries,
             summary_reviews=summary_reviews,
             summary_states=summary_states,
+            agenda_proposals=agenda_proposals,
+            export_metadata=pdf_metadata,
             skipped_assignment=not bool(tops),
             current_step=2 if not tops else 3,
         )
 
         ensure_pipeline_not_cancelled(pipeline_id)
+        complete = (not agenda_info.get("pdf_incomplete") and (agenda_info.get("llm") or {}).get("status") not in
+                    {"failed", "partial_failure", "fallback", "partial_fallback"}
+                    and not any(review.get("error") or (review.get("llm_usage") or {}).get("grounding_incomplete")
+                                for review in summary_reviews.values()))
         save_pipeline_state(
             pipeline_id,
-            status=PIPELINE_STATUS_COMPLETED,
+            status=PIPELINE_STATUS_COMPLETED if complete else PIPELINE_STATUS_FAILED,
             stage=PIPELINE_STAGE_READY_FOR_REVIEW,
             progress=100,
             error=None,
             result_refs={"ready_for_review": True,
-                         "processing_complete": (
-                             (agenda_info.get("llm") or {}).get("status") not in
-                             {"failed", "partial_failure", "fallback", "partial_fallback"}
-                             and not any(review.get("error") or (review.get("llm_usage") or {}).get("grounding_incomplete")
-                                         for review in summary_reviews.values())),
+                         "processing_complete": complete,
                          "unassigned_line_count": assignments.count(None)},
         )
-    except CancellationRequested:
+    except LLMCancelledError:
+        if durable.CURRENT.get():
+            raise
         save_pipeline_state(
             pipeline_id,
             status=PIPELINE_STATUS_CANCELLED,
@@ -3338,6 +3026,8 @@ def _run_pipeline_job(
             result_refs={"cancel_requested": True},
         )
     except Exception as exc:
+        if durable.CURRENT.get():
+            raise
         logger.error(
             "[Pipeline %s] failed (%s)",
             pipeline_id,
@@ -3349,12 +3039,11 @@ def _run_pipeline_job(
             status=PIPELINE_STATUS_FAILED,
             error=safe_exception_label(exc),
         )
-    finally:
-        if pdf_path:
-            remove_upload_file(pdf_path)
 
 
 def request_pipeline_cancellation(pipeline_id: str) -> dict[str, Any] | None:
+    if durable.load(pipeline_id):
+        durable.cancel(pipeline_id)
     job = load_pipeline_job(pipeline_id)
     if job is None:
         return None
@@ -3382,9 +3071,6 @@ def request_pipeline_cancellation(pipeline_id: str) -> dict[str, Any] | None:
         except HTTPException as exc:
             if exc.status_code != 409:
                 raise
-
-    if refs.get("pdf_path"):
-        remove_upload_file(refs.get("pdf_path"))
 
     return updated
 
@@ -3615,7 +3301,7 @@ async def get_pipeline_result(pipeline_id: str):
     if pipeline_job is None:
         raise HTTPException(status_code=404, detail="Pipeline nicht gefunden")
     if (
-        pipeline_job.get("status") != PIPELINE_STATUS_COMPLETED
+        pipeline_job.get("status") not in {PIPELINE_STATUS_COMPLETED, PIPELINE_STATUS_FAILED}
         or pipeline_job.get("stage") != PIPELINE_STAGE_READY_FOR_REVIEW
     ):
         raise HTTPException(status_code=409, detail="Pipeline ist noch nicht reviewbar")
@@ -3827,6 +3513,7 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
     )
     for top_index, fallback_state in fallback_states.items():
         states.setdefault(top_index, fallback_state)
+    summary_job_id = str(uuid.uuid4())
     for top_id in selected:
         top_index = effective_ids.index(top_id)
         _, input_hash = current_summary_input(session, top_index)
@@ -3839,6 +3526,7 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
             **dict(states.get(top_index) or {}),
             "top_id": top_id,
             "status": "queued",
+            "generation_job_id": summary_job_id,
             "current_input_hash": input_hash,
             "updated_at": time.time(),
         }
@@ -3846,7 +3534,6 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
     saved = save_session_or_conflict(session_id, session, request.revision)
 
     now = time.time()
-    summary_job_id = str(uuid.uuid4())
     job = save_summary_job(
         summary_job_id,
         {
@@ -3865,6 +3552,7 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
                 "model": request.model,
                 "system_prompt": request.system_prompt,
                 "session_revision": saved.get("revision"),
+                "input_snapshot": saved,
             },
         },
     )
@@ -3883,6 +3571,9 @@ async def get_summary_job(summary_job_id: str):
 
 @app.post("/api/summary-jobs/{summary_job_id}/cancel", response_model=SummaryJobResponse)
 async def cancel_summary_job(summary_job_id: str):
+    if durable.load(summary_job_id):
+        cancelled = durable.cancel(summary_job_id)
+        mirror_durable_job(cancelled)
     job = load_summary_job(summary_job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Zusammenfassungsjob nicht gefunden")
@@ -4589,7 +4280,9 @@ async def generate_summary(request: SummarizeRequest):
 
 
 @app.post("/api/extract-tops", response_model=ExtractTOPsResponse)
+@app.post("/api/extract-tops/jobs", status_code=202)
 async def extract_tops_endpoint(
+    request: Request,
     pdf: UploadFile = File(...),
     model: Optional[str] = Form(None),
     system_prompt: Optional[str] = Form(None),
@@ -4598,6 +4291,7 @@ async def extract_tops_endpoint(
     Extract TOPs (agenda items) from a German municipal meeting invitation PDF.
     Uses LLM to intelligently parse the document structure.
     """
+    respond_async = request.url.path.endswith("/jobs") or request.headers.get("prefer") == "respond-async"
     logger.info("Received PDF for TOP extraction (%s)", pdf.content_type)
 
     # Validate file type
@@ -4619,17 +4313,13 @@ async def extract_tops_endpoint(
         size_bytes = await save_upload_with_size_limit(pdf, file_path)
         logger.info("Saved uploaded PDF for TOP extraction (%s bytes)", size_bytes)
 
-        # Extract TOPs and session metadata using LLM
-        extraction = await run_in_threadpool(
-            extract_agenda_data_from_pdf,
-            str(file_path),
-            model=model,
-            system_prompt=system_prompt,
-        )
-        tops = extraction.tops
-
-        logger.info("Successfully extracted %s TOPs from uploaded PDF", len(tops))
-        return ExtractTOPsResponse(tops=tops, metadata=extraction.metadata.to_dict())
+        job = durable.submit("pdf", {"path": str(file_path.resolve()), "model": model,
+            "system_prompt": system_prompt}, documents=[durable.document(file_path)])
+        if respond_async:
+            return Response(content=json.dumps(durable.public(job)), status_code=202,
+                media_type="application/json", headers={"Location": f"/api/model-jobs/{job['job_id']}"})
+        result = await await_durable_result(job["job_id"])
+        return ExtractTOPsResponse(**result)
 
     except HTTPException:
         raise
@@ -4643,14 +4333,6 @@ async def extract_tops_endpoint(
             status_code=500, detail=f"Fehler bei der TOP-Extraktion: {str(e)}"
         )
 
-    finally:
-        # Clean up uploaded file
-        try:
-            if file_path.exists():
-                os.remove(file_path)
-                logger.info("Cleaned up uploaded PDF")
-        except Exception as cleanup_error:
-            logger.warning(f"Failed to clean up PDF: {cleanup_error}")
 
 
 @app.post("/api/assignment-suggestions", response_model=AssignmentSuggestionsResponse)
@@ -4692,8 +4374,7 @@ async def assignment_suggestions_endpoint(request: AssignmentSuggestionsRequest)
     )
 
 
-@app.post("/api/agenda-detection", response_model=AgendaDetectionResponse)
-def agenda_detection_endpoint(request: AgendaDetectionRequest):
+def calculate_agenda(request: AgendaDetectionRequest):
     """
     Detect reviewable TOPs and transcript segments.
 
@@ -4854,7 +4535,9 @@ def run_transcription(
             f"[Job {job_id}] Transcription completed successfully with {transcript_line_count} lines"
         )
 
-    except CancellationRequested:
+    except LLMCancelledError:
+        if durable.CURRENT.get():
+            raise
         logger.info(f"[Job {job_id}] Transcription cancelled")
         job = update_job_state(
             job_id,
@@ -4863,9 +4546,11 @@ def run_transcription(
             error=None,
             cancellation_requested=True,
         )
-        if DELETE_UPLOADS_ON_CANCEL_OR_FAILURE and job:
+        if DELETE_UPLOADS_ON_CANCEL_OR_FAILURE and job and durable.CURRENT.get() is None:
             cleanup_job_uploads(job_id, job)
     except Exception as e:
+        if durable.CURRENT.get():
+            raise
         logger.error(
             "[Job %s] Transcription failed (%s)",
             job_id,
@@ -4878,7 +4563,7 @@ def run_transcription(
             error=str(e),
             message=f"Fehler: {str(e)}",
         )
-        if DELETE_UPLOADS_ON_CANCEL_OR_FAILURE and job:
+        if DELETE_UPLOADS_ON_CANCEL_OR_FAILURE and job and durable.CURRENT.get() is None:
             cleanup_job_uploads(job_id, job)
     finally:
         # Clean up GPU memory after every terminal worker run.
@@ -4892,6 +4577,165 @@ def run_transcription(
                 logger.info(f"[Job {job_id}] GPU memory cleared")
         except Exception:
             pass
+
+
+
+
+class DurableSubmission:
+    def __init__(self, kind):
+        self.kind = kind
+
+    async def enqueue(self, job_id):
+        submit_legacy_job(self.kind, job_id)
+
+
+def submit_legacy_job(kind, job_id):
+    if durable.load(job_id):
+        return
+    loaders = {"pipeline": load_pipeline_job, "summary": load_summary_job, "transcription": load_job}
+    old = loaders[kind](job_id)
+    if old is None:
+        return
+    session = load_session(old.get("session_id")) if old.get("session_id") else None
+    refs = _pipeline_refs(old) if kind == "pipeline" else old.get("refs") or {}
+    pdf = refs.get("pdf_path")
+    durable.submit(kind, {"legacy_snapshot": old, "session_snapshot": session,
+        "session_revision": session.get("revision") if session else None}, job_id,
+        documents=[durable.document(pdf)] if pdf and Path(pdf).exists() else [])
+
+
+def recover_legacy_jobs():
+    with durable.persistence.connect() as db:
+        for kind, table, key in [("pipeline", "pipeline_jobs", "pipeline_job_id"),
+                                  ("summary", "summary_jobs", "summary_job_id"),
+                                  ("transcription", "transcription_jobs", "job_id")]:
+            rows = db.execute(f"SELECT {key} FROM {table} WHERE status IN ('pending','processing','cancelling')").fetchall()
+            for row in rows:
+                if kind == "transcription" and db.execute(
+                    "SELECT 1 FROM pipeline_jobs WHERE transcription_job_id=? AND status IN ('pending','processing')", (row[0],)).fetchone():
+                    continue
+                submit_legacy_job(kind, row[0])
+
+
+def mirror_durable_job(job):
+    if not job:
+        return
+    state = job["state"]
+    status = {"queued": "pending", "running": "processing", "retry_wait": "pending",
+              "review_required": "completed", "superseded": "failed"}.get(state, state)
+    if state == 'review_required' and job.get('result') is None:
+        status = 'failed'
+    if job['kind'] == 'pipeline':
+        # Technical failures never turn into a successful legacy completion.
+        old = save_pipeline_state(job['job_id'], status=status, error=job.get('error'),
+            result_refs={"execution_state": state})
+        transcription_id = (old or {}).get('transcription_job_id')
+        if transcription_id and state in {'failed', 'cancelled'}:
+            transcription = load_job(transcription_id)
+            if transcription and transcription['status'] in {'pending', 'processing'}:
+                update_job_state(transcription_id, status=status, error=job.get('error'))
+    elif job['kind'] == 'summary':
+        old = load_summary_job(job['job_id'])
+        if old is None or (old['status'] == status and old.get('refs', {}).get('execution_state') == state):
+            return
+        if state == 'cancelled':
+            finalize_summary_job_cancellation(job['job_id'], old)
+        update_summary_job(job['job_id'], status=status, error=job.get('error'), refs={"execution_state": state})
+    elif job['kind'] == 'transcription':
+        update_job_state(job['job_id'], status=status, error=job.get('error'))
+
+
+def run_durable_job(job):
+    payload = job['payload']
+    for doc in job.get('documents') or []:
+        if durable.document(doc['path'])['sha256'] != doc['sha256']:
+            raise ValueError('Source PDF changed')
+    if job['kind'] == 'pdf':
+        def extract():
+            value = extract_agenda_data_from_pdf(payload['path'], model=payload.get('model'),
+                                                system_prompt=payload.get('system_prompt'))
+            return {"tops": value.tops, "metadata": value.metadata.to_dict(),
+                "processing_complete": getattr(value, "processing_complete", True),
+                "review_required": getattr(value, "review_required", False)}
+        result = durable.checkpoint('pdf:validated', extract)
+        state = 'review_required' if result['review_required'] or not result['tops'] else 'completed'
+        return result, state if result['processing_complete'] else 'failed'
+    if job['kind'] == 'agenda':
+        result = durable.checkpoint('agenda:validated', lambda: calculate_agenda(
+            AgendaDetectionRequest(**payload['request'])).model_dump())
+        state = (result.get('llm') or {}).get('status')
+        if state in {'failed', 'partial_failure', 'fallback', 'partial_fallback'}:
+            return result, 'failed'
+        return result, 'review_required' if result.get('uncertain_count') or None in result.get('assignments', []) else 'completed'
+    if job['kind'] == 'pipeline':
+        run_pipeline_job(job['job_id'], app.state.models)
+        old = load_pipeline_job(job['job_id'])
+        refs = _pipeline_refs(old)
+        state = old['status']
+        if state == 'completed':
+            session = load_session(old['session_id']) or {}
+            needs_review = refs.get('warnings') or refs.get('unassigned_line_count') or any(
+                (review or {}).get('review_warnings') for review in (session.get('summary_reviews') or {}).values())
+            state = 'review_required' if refs.get('processing_complete') and needs_review else 'completed'
+            if refs.get('processing_complete') is False:
+                state = 'failed'
+        return {'session_id': old['session_id']}, state
+    if job['kind'] == 'summary':
+        run_summary_job(job['job_id'])
+        old = load_summary_job(job['job_id'])
+        state = old['status']
+        session = load_session(old['session_id'])
+        if state == 'completed' and any((review or {}).get('review_warnings') for review in (session.get('summary_reviews') or {}).values()):
+            state = 'review_required'
+        return old.get('refs', {}).get('outcomes'), state
+    run_transcription(job['job_id'], payload['legacy_snapshot'].get('file_path'), app.state.models)
+    return None, load_job(job['job_id'])['status']
+
+
+async def await_durable_result(job_id):
+    manager = getattr(app.state, "durable_manager", None)
+    if manager is None or not manager.started:
+        raise HTTPException(503, "Job ist gespeichert; Worker ist noch nicht gestartet")
+    while True:
+        job = durable.load(job_id)
+        if job['state'] in {'completed', 'review_required'} or (job['state'] == 'failed' and job['result'] is not None):
+            if job['result'] is None:
+                raise HTTPException(409, job.get('error') or 'Job benötigt Prüfung')
+            return job['result']
+        if job['state'] in durable.TERMINAL:
+            raise HTTPException(409 if job['state'] in {'cancelled', 'superseded'} else 500,
+                                job.get('error') or 'Verarbeitung unvollständig')
+        await asyncio.sleep(0.5)
+
+
+@app.get('/api/model-jobs/{job_id}')
+async def model_job_status(job_id: str):
+    job = durable.load(job_id)
+    if job is None:
+        raise HTTPException(404, 'Job nicht gefunden')
+    return durable.public(job)
+
+
+@app.post('/api/model-jobs/{job_id}/cancel')
+async def cancel_model_job(job_id: str):
+    job = durable.cancel(job_id)
+    if job is None:
+        raise HTTPException(404, 'Job nicht gefunden')
+    mirror_durable_job(job)
+    return durable.public(job)
+
+
+@app.post('/api/agenda-detection/jobs', status_code=202)
+async def start_agenda_job(request: AgendaDetectionRequest):
+    if not request.transcript:
+        raise HTTPException(400, 'Kein Transkript vorhanden')
+    return durable.public(durable.submit('agenda', {'request': request.model_dump()}))
+
+
+@app.post('/api/agenda-detection', response_model=AgendaDetectionResponse)
+async def agenda_detection_endpoint(request: AgendaDetectionRequest):
+    job = await start_agenda_job(request)
+    return await await_durable_result(job['job_id'])
 
 
 if __name__ == "__main__":

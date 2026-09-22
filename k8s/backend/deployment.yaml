@@ -6,6 +6,8 @@ metadata:
     app: tops-backend
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: tops-backend

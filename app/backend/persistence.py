@@ -43,6 +43,8 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
 def init_db(db_path: Path | None = None) -> None:
     """Create or migrate the local SQLite database."""
     with connect(db_path) as db:
+        from durable_jobs import init_schema
+        init_schema(db)
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -1448,9 +1450,11 @@ def save_session(
 ) -> dict[str, Any]:
     now = time.time()
     with connect(db_path) as db:
+        from durable_jobs import fence, record_publication
         # Serialize the revision check and write so concurrent autosaves cannot
         # both validate the same revision before either one commits.
         db.execute("BEGIN IMMEDIATE")
+        fence(db)
         existing = db.execute(
             "SELECT created_at, revision FROM sessions WHERE session_id = ?",
             (session_id,),
@@ -1618,6 +1622,8 @@ def save_session(
                     for index, line in enumerate(state.get("transcript") or [])
                 ],
             )
+
+        record_publication(db)
 
     return load_session(session_id, db_path=db_path) or {}
 

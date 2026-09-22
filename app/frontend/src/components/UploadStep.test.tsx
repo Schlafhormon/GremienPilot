@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { extractAgendaDataFromPDF } from '../api';
@@ -106,7 +106,7 @@ describe('UploadStep', () => {
     fireEvent.change(input!, { target: { files: [pdf] } });
 
     await waitFor(() => {
-      expect(extractAgendaDataFromPDF).toHaveBeenCalledWith(pdf, { model: 'qwen3:8b' });
+      expect(extractAgendaDataFromPDF).toHaveBeenCalledWith(pdf, expect.objectContaining({ model: 'qwen3:8b' }));
       expect(setTops).toHaveBeenCalledWith(['Begruessung', 'Haushalt']);
       expect(setPdfFile).toHaveBeenCalledWith(pdf);
       expect(setExportMetadata).toHaveBeenCalledWith(
@@ -196,4 +196,20 @@ it('keeps original numbers and sections in manual input without positional numbe
     target: { value: '[Öffentlich] 2.2 Schulbau' },
   });
   expect(setTops).toHaveBeenCalledWith(['2 Haushalt', '[Öffentlich] 2.2 Schulbau', '[Nichtöffentlich] 2.1 Vergabe', '7 Anfragen']);
+});
+
+
+it('preserves manual TOP and metadata edits made while a PDF job is running', async () => {
+  let finish!: (value: { tops: string[]; metadata: { title: string } }) => void;
+  vi.mocked(extractAgendaDataFromPDF).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const setTops = vi.fn();
+  const setExportMetadata = vi.fn();
+  const { container, rerender } = renderUploadStep({ setTops, setExportMetadata });
+  const input = container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]')!;
+  fireEvent.change(input, { target: { files: [new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' })] } });
+  rerender(<UploadStep {...defaultProps} tops={['Manual']} exportMetadata={{ ...defaultProps.exportMetadata, title: 'Manual title' }} setTops={setTops} setExportMetadata={setExportMetadata} />);
+  await act(async () => { finish({ tops: ['Automatic'], metadata: { title: 'Automatic title' } }); });
+  expect(setTops).not.toHaveBeenCalled();
+  expect(setExportMetadata).not.toHaveBeenCalled();
+  expect(screen.getByText(/Eingaben wurden geändert/)).toBeInTheDocument();
 });

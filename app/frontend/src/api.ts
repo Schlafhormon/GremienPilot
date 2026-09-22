@@ -191,10 +191,10 @@ export async function startPipeline(
  * Get the current status of an end-to-end pipeline job.
  */
 export async function getPipelineStatus(pipelineId: string): Promise<PipelineJob> {
-  const response = await fetch(`${API_BASE}/api/pipeline/${pipelineId}`);
+  const response = await fetch(`${API_BASE}/api/pipeline/${pipelineId}`, { signal: AbortSignal.timeout(15000) });
 
   if (!response.ok) {
-    throw await readApiError(response, "Fehler beim Abrufen des Pipeline-Status");
+    throw new ModelJobStatusError(response.status);
   }
 
   return normalizePipelineJob(await response.json());
@@ -245,7 +245,14 @@ export async function pollPipeline(
   intervalMs = 1000
 ): Promise<PipelineJob> {
   while (true) {
-    const status = await getPipelineStatus(pipelineId);
+    let status: PipelineJob;
+    try {
+      status = await getPipelineStatus(pipelineId);
+    } catch (error) {
+      if (error instanceof ModelJobStatusError && error.status >= 400 && error.status < 500 && error.status !== 429) throw error;
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+      continue;
+    }
     onStatus?.(status);
 
     if (status.status === "completed") {
@@ -587,12 +594,72 @@ export async function generateAssignmentSuggestions(
 /**
  * Detect agenda titles and reviewable TOP assignments for a transcript.
  */
+export interface ModelJob {
+  job_id: string;
+  kind: string;
+  state: 'queued' | 'running' | 'retry_wait' | 'review_required' | 'failed' | 'completed' | 'cancelled' | 'superseded';
+  progress?: { phase?: string; last_delta_at?: number | null; silence_seconds?: number };
+  error?: string | null;
+  result?: unknown;
+}
+
+class ModelJobStatusError extends Error {
+  constructor(public status: number) { super(`Jobstatus nicht verfügbar (${status})`); }
+}
+
+export async function getModelJob(jobId: string): Promise<ModelJob> {
+  const response = await fetch(`${API_BASE}/api/model-jobs/${jobId}`, { signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new ModelJobStatusError(response.status);
+  return response.json();
+}
+
+export async function cancelModelJob(jobId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/model-jobs/${jobId}/cancel`, { method: 'POST', signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error('Abbruch konnte nicht bestätigt werden');
+}
+
+export async function pollModelJob<T>(jobId: string, signal?: AbortSignal,
+  onStatus?: (job: ModelJob) => void): Promise<T> {
+  let cancellation: Promise<Error | null> | undefined;
+  const requestCancel = () => {
+    cancellation ??= cancelModelJob(jobId).then(() => null, error => error as Error);
+  };
+  signal?.addEventListener('abort', requestCancel, { once: true });
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        requestCancel();
+        const error = await cancellation;
+        throw error || new Error('Verarbeitung abgebrochen');
+      }
+      let job: ModelJob;
+      try {
+        job = await getModelJob(jobId);
+      } catch (error) {
+        if (error instanceof ModelJobStatusError && error.status >= 400 && error.status < 500 && error.status !== 429) throw error;
+        // Reconnect to the existing job; never resubmit model work on a polling failure.
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      onStatus?.(job);
+      if (signal?.aborted) continue;
+      if (['completed', 'review_required'].includes(job.state) && job.result != null) return job.result as T;
+      if (['failed', 'cancelled', 'superseded', 'review_required'].includes(job.state)) {
+        throw new Error(job.error || `Verarbeitung: ${job.state}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  } finally {
+    signal?.removeEventListener('abort', requestCancel);
+  }
+}
+
 export async function detectAgenda(
   request: AgendaDetectionRequest
 ): Promise<AgendaDetectionResponse> {
   assertClientLlmPayloadFits(request.transcript, "Das Transkript");
 
-  const response = await fetch(`${API_BASE}/api/agenda-detection`, {
+  const response = await fetch(`${API_BASE}/api/agenda-detection/jobs`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -615,7 +682,10 @@ export async function detectAgenda(
     throw new Error(error.detail || "Fehler bei der automatischen TOP-Erkennung");
   }
 
-  const data = await response.json();
+  const started = await response.json();
+  const data = started.job_id
+    ? await pollModelJob<AgendaDetectionResponse>(started.job_id, request.signal, request.onStatus)
+    : started;
   return {
     tops: data.tops ?? [],
     transcript: data.transcript ?? request.transcript,
@@ -903,6 +973,8 @@ export async function createManualSpeakerObservation(
  * Options for TOP extraction from PDF.
  */
 export interface ExtractTOPsOptions {
+  signal?: AbortSignal;
+  onStatus?: (job: ModelJob) => void;
   model?: string;
   systemPrompt?: string;
 }
@@ -925,7 +997,7 @@ export async function extractAgendaDataFromPDF(
     formData.append("system_prompt", options.systemPrompt);
   }
 
-  const response = await fetch(`${API_BASE}/api/extract-tops`, {
+  const response = await fetch(`${API_BASE}/api/extract-tops/jobs`, {
     method: "POST",
     body: formData,
   });
@@ -935,7 +1007,10 @@ export async function extractAgendaDataFromPDF(
     throw new Error(error.detail || "Fehler beim Extrahieren der TOPs");
   }
 
-  const data = await response.json();
+  const started = await response.json();
+  const data = started.job_id
+    ? await pollModelJob<PdfAgendaExtractionResult>(started.job_id, options?.signal, options?.onStatus)
+    : started;
   return {
     tops: data.tops ?? [],
     metadata: data.metadata ?? {},

@@ -93,6 +93,8 @@ class PdfSessionMetadata:
 class PdfAgendaExtractionResult:
     tops: list[str] = field(default_factory=list)
     metadata: PdfSessionMetadata = field(default_factory=PdfSessionMetadata)
+    processing_complete: bool = True
+    review_required: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -342,6 +344,8 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         text_parts = []
         with pdfplumber.open(pdf_path) as pdf:
             for i, page in enumerate(pdf.pages):
+                from durable_jobs import check
+                check()
                 page_text = page.extract_text()
                 if page_text:
                     text_parts.append(page_text)
@@ -534,9 +538,12 @@ def parse_agenda_data_response(
         normalize_metadata((payload.get("metadata") or payload) if payload else None),
         fallback_metadata,
     )
-    if len(fallback_tops) > len(tops):
+    supplemented = len(fallback_tops) > len(tops)
+    if supplemented:
         tops = fallback_tops
-    return PdfAgendaExtractionResult(tops=tops, metadata=metadata)
+    structured = bool(payload is not None and isinstance(payload.get("tops", payload.get("agenda")), list))
+    return PdfAgendaExtractionResult(tops=tops, metadata=metadata,
+        processing_complete=structured, review_required=supplemented or not structured)
 
 
 def is_agenda_section_heading(value: str) -> bool:
@@ -637,7 +644,7 @@ JSON:"""
         raise
     except Exception as e:
         logger.error("LLM agenda data extraction failed (%s)", e.__class__.__name__)
-        raise RuntimeError(f"PDF-Datenextraktion fehlgeschlagen: {str(e)}")
+        raise RuntimeError(f"PDF-Datenextraktion fehlgeschlagen: {str(e)}") from e
 
 
 def extract_agenda_data_from_pdf(
@@ -650,5 +657,6 @@ def extract_agenda_data_from_pdf(
 
     Keeps PDF text extraction shared with the legacy TOP-only path.
     """
-    pdf_text = extract_text_from_pdf(pdf_path)
+    from durable_jobs import checkpoint
+    pdf_text = checkpoint("pdf:text", lambda: extract_text_from_pdf(pdf_path))
     return extract_agenda_data_from_text(pdf_text, model, system_prompt)

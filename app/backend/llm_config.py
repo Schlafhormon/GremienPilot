@@ -110,6 +110,7 @@ class LLMConfig:
     gpu_layers: int | None = None
     keep_alive: str = '5m'
     connect_seconds: float = 10
+    load_seconds: float = 1800
     total_seconds: float = 0
     max_retries: int = 2
     retry_backoff_seconds: float = 0.5
@@ -121,7 +122,7 @@ class LLMConfig:
 
     def __post_init__(self):
         for name in ('context_tokens', 'timeout_seconds', 'connect_seconds', 'total_seconds',
-                     'max_retries', 'retry_backoff_seconds', 'thinking_tokens', 'image_tokens'):
+                     'max_retries', 'retry_backoff_seconds', 'thinking_tokens', 'image_tokens', 'load_seconds'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ModelConfigurationError(f'{name} must be nonnegative and finite')
@@ -238,6 +239,7 @@ def get_llm_config(model=None, *, resolved=None):
         keep_alive=os.environ.get('LLM_KEEP_ALIVE') or os.environ.get('OLLAMA_KEEP_ALIVE', '5m'),
         connect_seconds=_number('LLM_CONNECT_TIMEOUT_SECONDS', 10, minimum=0.001),
         timeout_seconds=_number('LLM_READ_TIMEOUT_SECONDS', os.environ.get('LLM_TIMEOUT_SECONDS') or 120, minimum=0.001),
+        load_seconds=_number('LLM_LOAD_TIMEOUT_SECONDS', 1800, minimum=0.001),
         total_seconds=_number('LLM_TOTAL_TIMEOUT_SECONDS', 0),
         max_retries=_number('LLM_MAX_RETRIES', 2, integer=True),
         retry_backoff_seconds=_number('LLM_RETRY_BACKOFF_SECONDS', 0.5),

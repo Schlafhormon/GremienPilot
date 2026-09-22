@@ -6,6 +6,7 @@ import {
   getPipelineResult,
   pollPipeline,
   pollSummaryJob,
+  pollModelJob,
   confirmSpeakerObservation,
   createManualSpeakerObservation,
   createSpeakerProfile,
@@ -181,7 +182,7 @@ describe('api session client', () => {
     );
 
     const body = fetchMock.mock.calls[0]![1]!.body as FormData;
-    expect(fetchMock).toHaveBeenCalledWith('/api/extract-tops', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/extract-tops/jobs', {
       method: 'POST',
       body,
     });
@@ -495,7 +496,7 @@ describe('api session client', () => {
 
     expect(result.assignments).toEqual([0, 1]);
     expect(result.transcript).toHaveLength(2);
-    expect(fetchMock.mock.calls[0]![0]).toBe('/api/agenda-detection');
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/agenda-detection/jobs');
     expect(fetchMock.mock.calls[0]![1]!.method).toBe('POST');
     expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toMatchObject({
       tops: ['Begruessung', 'Haushalt'],
@@ -751,5 +752,43 @@ describe('explicit agenda LLM policy', () => {
     const result = await getPipelineResult('test');
     expect(result.agenda_detection?.llm).toEqual(agenda.llm);
     expect(result.agenda_detection?.warnings).toEqual(agenda.warnings);
+  });
+});
+
+
+describe('durable model jobs', () => {
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it('reconnects after a backend interruption without submitting another job', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'j', state: 'running' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'j', state: 'completed', result: { tops: ['A'] } }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const result = pollModelJob('j');
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(await result).toEqual({ tops: ['A'] });
+    expect(fetchMock.mock.calls.every(call => call[0] === '/api/model-jobs/j')).toBe(true);
+  });
+
+  it('requests server cancellation immediately while a status request is outstanding', async () => {
+    let resolveStatus!: (value: unknown) => void;
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise(resolve => { resolveStatus = resolve; }))
+      .mockResolvedValueOnce({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    const result = pollModelJob('j', controller.signal);
+    const rejected = expect(result).rejects.toThrow('abgebrochen');
+    controller.abort();
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/model-jobs/j/cancel', expect.objectContaining({ method: 'POST' }));
+    resolveStatus({ ok: true, json: async () => ({ job_id: 'j', state: 'completed', result: { tops: ['late'] } }) });
+    await rejected;
+  });
+
+  it('does not return technical partial results as successful', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ state: 'failed', result: { tops: ['partial'] } }) }));
+    await expect(pollModelJob('j')).rejects.toThrow('failed');
   });
 });

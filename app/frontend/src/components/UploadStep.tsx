@@ -1,4 +1,4 @@
-import { useState, useRef, type DragEvent, type ChangeEvent } from 'react';
+import { useState, useRef, useEffect, type DragEvent, type ChangeEvent } from 'react';
 import type { UploadStepProps } from '../types';
 import { extractAgendaDataFromPDF } from '../api';
 
@@ -20,6 +20,11 @@ export default function UploadStep({
   exportMetadata,
   setExportMetadata,
 }: UploadStepProps) {
+  const currentInput = useRef('');
+  currentInput.current = JSON.stringify({ tops, exportMetadata });
+  const extractionAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => extractionAbort.current?.abort(), []);
+  const [jobPhase, setJobPhase] = useState('');
   const audioInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -108,6 +113,10 @@ export default function UploadStep({
   };
 
   const extractTopsFromFile = async (file: File) => {
+    extractionAbort.current?.abort();
+    const controller = new AbortController();
+    extractionAbort.current = controller;
+    const snapshot = currentInput.current;
     setIsExtractingTops(true);
     setExtractionError(null);
     setExtractedCount(null);
@@ -115,7 +124,14 @@ export default function UploadStep({
     try {
       const extracted = await extractAgendaDataFromPDF(file, {
         model: llmSettings?.model,
+        signal: controller.signal,
+        onStatus: job => setJobPhase(job.state === 'queued' ? 'Wartet auf Verarbeitung' : job.state === 'retry_wait' ? 'Vorübergehend gestört; erneuter Versuch folgt' : job.progress?.phase === 'loading' ? 'Modell lädt / wartet auf erste Ausgabe' : 'PDF wird verarbeitet'),
       });
+      if (controller.signal.aborted) return;
+      if (snapshot !== currentInput.current) {
+        setExtractionError('Eingaben wurden geändert. PDF-Ergebnis wurde nicht übernommen.');
+        return;
+      }
       const extractedTops = extracted.tops.map((top) => top.trim()).filter(Boolean);
       applyDetectedMetadata(extracted.metadata ?? {});
 
@@ -130,10 +146,11 @@ export default function UploadStep({
         setExtractionError('Keine TOPs im PDF gefunden. Bitte manuell eingeben.');
       }
     } catch (error) {
+      if (extractionAbort.current !== controller) return;
       const errorMessage = error instanceof Error ? error.message : 'Unbekannter Fehler';
       setExtractionError(errorMessage);
     } finally {
-      setIsExtractingTops(false);
+      if (extractionAbort.current === controller) setIsExtractingTops(false);
     }
   };
 
@@ -372,8 +389,9 @@ export default function UploadStep({
                   />
                 </svg>
                 <span className="text-blue-700 font-medium">
-                  TOPs werden extrahiert...
+                  {jobPhase || 'TOPs werden extrahiert...'}
                 </span>
+                <button type="button" onClick={(event) => { event.stopPropagation(); extractionAbort.current?.abort(); }}>Abbrechen</button>
               </div>
             ) : (
               <div className="cursor-pointer flex items-center justify-center gap-3 py-3">

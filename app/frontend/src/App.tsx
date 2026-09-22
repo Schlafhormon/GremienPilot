@@ -382,11 +382,14 @@ export default function App() {
   const agendaDetectionStale = Boolean(agendaProposals) &&
     !proposalsAreValid(agendaProposals, tops, topIds, transcript);
   const [isDetectingAgenda, setIsDetectingAgenda] = useState(false);
+  const [agendaJobPhase, setAgendaJobPhase] = useState('');
   const agendaRequestRef = useRef(0);
+  const agendaAbortRef = useRef<AbortController | null>(null);
   const agendaInputEpochRef = useRef(0);
   const agendaInputKey = JSON.stringify(agendaSource(tops, topIds, transcript));
   useEffect(() => {
     agendaInputEpochRef.current += 1;
+    agendaAbortRef.current?.abort();
   }, [agendaInputKey, route.view, route.sessionId]);
   const [agendaDetectionError, setAgendaDetectionError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
@@ -1377,6 +1380,9 @@ export default function App() {
   };
 
   const handleDetectAgenda = async (fresh = false) => {
+    agendaAbortRef.current?.abort();
+    const controller = new AbortController();
+    agendaAbortRef.current = controller;
     const requestId = ++agendaRequestRef.current;
     const inputEpoch = agendaInputEpochRef.current;
     const source = agendaSource(tops, topIds, transcript);
@@ -1385,7 +1391,8 @@ export default function App() {
     try {
       const result = await detectAgenda({
         tops, transcript, model: llmSettings.model,
-        fresh, topIds,
+        fresh, topIds, signal: controller.signal,
+        onStatus: job => setAgendaJobPhase(job.state === 'queued' ? 'Wartet auf Verarbeitung' : job.state === 'retry_wait' ? 'Vorübergehend gestört; erneuter Versuch folgt' : job.progress?.phase === 'loading' ? 'Modell lädt / wartet auf erste Ausgabe' : 'TOP-Erkennung läuft …'),
         preserveTranscriptStructure: true,
       });
       if (requestId !== agendaRequestRef.current) return;
@@ -1652,6 +1659,8 @@ export default function App() {
           agendaDetectionStale={agendaDetectionStale}
           isDetectingAgenda={isDetectingAgenda}
           onDetectAgenda={handleDetectAgenda}
+          onCancelAgenda={() => agendaAbortRef.current?.abort()}
+          agendaJobPhase={agendaJobPhase}
           onTranscriptStructureChange={handleTranscriptStructureChange}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}

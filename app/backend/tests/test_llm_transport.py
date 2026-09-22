@@ -335,7 +335,7 @@ def test_real_http_active_stream_outlives_read_timeout(streaming_http_server):
 
 
 def test_real_http_read_timeout_before_first_token(streaming_http_server):
-    config = replace(get_llm_config(), base_url=streaming_http_server+'/silent', timeout_seconds=.05)
+    config = replace(get_llm_config(), base_url=streaming_http_server+'/silent', timeout_seconds=.05, load_seconds=.05)
     with pytest.raises(httpx.ReadTimeout):
         call(config)
 
@@ -351,7 +351,8 @@ def test_progress_and_cancellation_during_model_metadata_load(server, monkeypatc
             raise transport.LLMCancelledError()
     with pytest.raises(transport.LLMCancelledError):
         call(check_cancel=check, progress_callback=updates.append)
-    assert updates[0]['phase'] == 'waiting'
+    assert updates[0]['phase'] == 'loading'
+    assert updates[0]['last_delta_at'] is None
     assert not server['calls']
 
 
