@@ -163,7 +163,7 @@ function Get-ProjectVolumeName {
 function Test-VolumeExists {
     param([string]$VolumeName)
     $null = docker volume inspect $VolumeName 2>&1
-    return $LASTEXITCODE -eq 0
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Remove-ExistingContainersForRebuild {
@@ -339,7 +339,7 @@ function Test-ImageExists {
 
     try {
         $null = docker image inspect $ImageName 2>&1
-        return $LASTEXITCODE -eq 0
+        return ($LASTEXITCODE -eq 0)
     } catch {
         return $false
     }
@@ -349,21 +349,9 @@ function Test-ImageExists {
 # Check if Ollama model is downloaded
 #######################################
 function Test-OllamaModelExists {
-    $volumeName = (Split-Path -Leaf $ScriptDir) + "_ollama_data"
-
-    try {
-        $null = docker volume inspect $volumeName 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            # Volume exists, assume model might be downloaded
-            $volumeInfo = docker system df -v 2>&1 | Select-String $volumeName
-            if ($volumeInfo -and $volumeInfo -notmatch "0B") {
-                return $true
-            }
-        }
-    } catch {
-        # Volume doesn't exist
-    }
-    return $false
+    # Ask for the effective Compose model; unrelated cached weights are not proof.
+    docker compose exec -T ollama sh -c 'ollama show "$OLLAMA_MODEL" >/dev/null 2>&1' 2>&1 | Out-Null
+    return ($LASTEXITCODE -eq 0)
 }
 
 #######################################
@@ -392,8 +380,13 @@ function Test-DiskSpace {
     }
 
     if (-not (Test-OllamaModelExists)) {
-        $requiredGB += 5
-        $script:MissingItems += "Sprachmodell (~5GB)"
+        $modelDiskGB = if ($env:PROTOKOLL_MODEL_DISK_GB) { $env:PROTOKOLL_MODEL_DISK_GB } else { "40" }
+        if ($modelDiskGB -notmatch '^[1-9][0-9]*$') {
+            Write-Err "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
+            return $false
+        }
+        $requiredGB += [int]$modelDiskGB
+        $script:MissingItems += "Sprachmodell (Planungsreserve ${modelDiskGB}GB; modellabhaengig)"
     }
 
     # Get available disk space

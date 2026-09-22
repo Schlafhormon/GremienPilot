@@ -328,17 +328,8 @@ image_exists() {
 # Check if Ollama model is downloaded
 ########################################
 ollama_model_exists() {
-    local volume_name="${SCRIPT_DIR##*/}_ollama_data"
-    # Check if volume exists and has data
-    if docker volume inspect "$volume_name" &> /dev/null; then
-        # Volume exists, check if model is likely downloaded (volume has data)
-        local volume_size
-        volume_size=$(docker system df -v 2>/dev/null | grep "$volume_name" | awk '{print $3}' | head -1)
-        if [[ -n "$volume_size" && "$volume_size" != "0B" ]]; then
-            return 0
-        fi
-    fi
-    return 1
+    # Ask for the effective Compose model; unrelated cached weights are not proof.
+    docker compose exec -T ollama sh -c 'ollama show "$OLLAMA_MODEL" >/dev/null 2>&1' >/dev/null 2>&1
 }
 
 ########################################
@@ -367,8 +358,13 @@ check_disk_space() {
     fi
 
     if ! ollama_model_exists; then
-        required_gb=$((required_gb + 5))
-        MISSING_ITEMS+=("Sprachmodell (~5GB)")
+        local model_disk_gb="${PROTOKOLL_MODEL_DISK_GB:-40}"
+        if ! [[ "$model_disk_gb" =~ ^[1-9][0-9]*$ ]]; then
+            error "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
+            return 1
+        fi
+        required_gb=$((required_gb + model_disk_gb))
+        MISSING_ITEMS+=("Sprachmodell (Planungsreserve ${model_disk_gb}GB; modellabhaengig)")
     fi
 
     # Get available disk space

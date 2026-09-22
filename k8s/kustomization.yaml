@@ -6,6 +6,7 @@ namespace: tops
 resources:
   - namespace.yaml
   - backend/configmap.yaml
+  - ollama/deployment.yaml
   - backend/pvc.yaml
   - backend/deployment.yaml
   - backend/service.yaml

@@ -309,6 +309,7 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `GPU_MODEL_SWITCHING` | Whisper und lokales Ollama abwechselnd auf einer GPU laden; erfordert einen Backend-Prozess | `false` |
 | `GPU_MODEL_UNLOAD_TIMEOUT_SECONDS` | Positives, endliches Zeitlimit für die bestätigte Ollama-Speicherfreigabe vor der Transkription | `120` |
 | `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://ollama:11434/v1`, lokale Backend-Entwicklung: `http://localhost:11434/v1` |
+| `PROTOKOLL_MODEL_DISK_GB` | Setup-Umgebungsvariable: Modell-Speicherplatzreserve in GB, keine RAM-Messung | `40` |
 | `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `gemma4:31b-it-q4_K_M` |
 | `LLM_PROVIDER` | `ollama` oder `openai-compatible`; leer erhält bisherige Erkennung | leer |
 | `LLM_THINKING` / `LLM_THINKING_TOKENS` | Nativer Denk-Schalter / zusätzliche Tokenreserve, kein separates hartes Denklimit | leer / `0` |
@@ -323,16 +324,13 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `LLM_REASONING_EFFORT` | Reasoning für alle LLM-Aufgaben: leer = bisheriges Verhalten, `none` = aus, `low`/`medium`/`high`/`max` = an (modell-/serverabhängig) | leer |
 | `LLM_TIMEOUT_SECONDS` | Veralteter Alias für das gemeinsame Lese-/Inaktivitätslimit | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
+| `SUMMARY_OUTPUT_TOKENS` | Ausgabe je Zusammenfassungs-/Prüfaufruf; alle Prüfungen verpflichtend | `4096` |
+| `SUMMARY_MODEL_ATTEMPTS` | Versuche für ungültige strukturierte Modellantworten | `2` |
+| `SUMMARY_RECONCILIATION_ROUNDS` | Gezielte Modellklärung, danach konkrete Prüffragen | `2` |
 | `LLM_OLLAMA_NATIVE` | Veraltete Providerwahl; `LLM_PROVIDER` hat Vorrang | leer |
 | `LLM_CONTEXT_TOKENS` | Gemeinsames Eingabe-/Ausgabebudget; wird an Ollama übermittelt | `16384` |
 | `LLM_CPU_THREADS` | Ollama-Inferenzthreads, unabhängig von Whisper; leer: Providerwahl | leer |
 | `LLM_MAX_RETRIES` | Gemeinsame Wiederholungen vorübergehender Transportfehler | `2` |
-| `LLM_REPAIR_SPLIT_DEPTH` | Fehlerhafte Zuordnungs-/Zusammenfassungsteile durch Halbierung reparieren; `0` deaktiviert | `1` |
-| `LLM_SUMMARY_FACT_REVIEW_MAX_CALLS` | Zusätzliche Faktenprüfungen je TOP; `0` deaktiviert | `3` |
-| `LLM_SUMMARY_FACT_REVIEW_THINK` | Separater Ollama-Denkmodus für Faktenprüfungen; leer erbt die globale Einstellung | Compose: `true` |
-| `LLM_SUMMARY_FACT_REVIEW_MAX_TOKENS` | Ausgabetokens je Generierungsphase der Faktenprüfung | `5120` |
-| `LLM_SUMMARY_GROUNDING_MAX_CALLS` | Kurze Belegprüfungen je TOP; `0` deaktiviert | `32` |
-| `LLM_SUMMARY_GROUNDING_THINK` | Separater Ollama-Denkmodus für kurze Belegprüfungen | `false` |
 | `LLM_CACHE_DIR` | Cache validierter Antworten; enthält vertrauliche Sitzungsdaten, leer deaktiviert | Compose: `/app/data/llm-cache` |
 | `LLM_AUDIT_DIR` | Optionaler privater Diagnoseordner für Anfrage, Endergebnis und Konfigurationsstand | leer |
 | `OLLAMA_NUM_PARALLEL` | Gleichzeitige Anfragen je Ollama-Modell | Compose: `1` |

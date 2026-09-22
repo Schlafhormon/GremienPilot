@@ -49,7 +49,7 @@ def test_multi_top_progress_partial_failure_and_unselected_content(session, monk
             assert persistence.load_session("meeting")["summaries"][0] == "Neu A"
         if title == "B":
             raise RuntimeError("private transport details")
-        return SummarizationResult(summary=f"Neu {title}", duration_seconds=1.5)
+        return SummarizationResult(summary=f"Neu {title}", duration_seconds=1.5, llm_usage={"processing_complete": True})
     monkeypatch.setattr(main, "summarize_segment", generate)
     main.run_summary_job(job_id)
     job = main.build_summary_job_response(persistence.load_summary_job(job_id))
@@ -92,7 +92,7 @@ def test_edits_during_generation_are_preserved(session, monkeypatch, change):
             for key in ("summaries", "summary_reviews", "summary_states"):
                 edited[key] = {i - 1: value for i, value in latest[key].items() if i > 0}
         persistence.save_session("meeting", main.reconcile_session_summaries(latest, edited))
-        return SummarizationResult(summary="LLM-Ergebnis", duration_seconds=1)
+        return SummarizationResult(summary="LLM-Ergebnis", duration_seconds=1, llm_usage={"processing_complete": True})
     monkeypatch.setattr(main, "summarize_segment", generate)
     main.run_summary_job(job_id)
     saved = persistence.load_session("meeting")
@@ -114,7 +114,7 @@ def test_publish_retries_revision_race_without_repeating_llm(session, monkeypatc
     job_id = start(session, ["a"])
     calls = []
     monkeypatch.setattr(main, "summarize_segment", lambda *a, **k:
-        calls.append(1) or SummarizationResult(summary="Neu A", duration_seconds=1))
+        calls.append(1) or SummarizationResult(summary="Neu A", duration_seconds=1, llm_usage={"processing_complete": True}))
     original_save = main.save_session
     raced = False
     def save(session_id, state, **kwargs):
@@ -138,7 +138,7 @@ def test_empty_top_does_not_abort_remaining_selection(session, monkeypatch):
     job_id = start(session, ["a", "b"])
     calls = []
     monkeypatch.setattr(main, "summarize_segment", lambda title, *a, **k:
-        calls.append(title) or SummarizationResult(summary="Neu B", duration_seconds=1))
+        calls.append(title) or SummarizationResult(summary="Neu B", duration_seconds=1, llm_usage={"processing_complete": True}))
     main.run_summary_job(job_id)
     assert calls == ["B"]
     assert persistence.load_summary_job(job_id)["status"] == "failed"
@@ -154,7 +154,7 @@ def test_manual_edit_while_queued_skips_only_that_top(session, monkeypatch):
             latest = persistence.load_session("meeting")
             edited = {**latest, "summaries": {**latest["summaries"], 1: "Manuell B"}}
             persistence.save_session("meeting", main.reconcile_session_summaries(latest, edited))
-        return SummarizationResult(summary=f"Neu {title}", duration_seconds=1)
+        return SummarizationResult(summary=f"Neu {title}", duration_seconds=1, llm_usage={"processing_complete": True})
     monkeypatch.setattr(main, "summarize_segment", generate)
     main.run_summary_job(job_id)
     assert calls == ["A", "C"]
@@ -169,7 +169,7 @@ def test_cancellation_keeps_completed_results_and_restores_unprocessed_tops(sess
     def generate(title, *args, **kwargs):
         if title == "B":
             main.update_summary_job(job_id, status="cancelling", refs={"cancel_requested": True})
-        return SummarizationResult(summary=f"Neu {title}", duration_seconds=1)
+        return SummarizationResult(summary=f"Neu {title}", duration_seconds=1, llm_usage={"processing_complete": True})
     monkeypatch.setattr(main, "summarize_segment", generate)
     main.run_summary_job(job_id)
     saved = persistence.load_session("meeting")
@@ -230,3 +230,20 @@ def test_cancellation_reaches_waiting_llm_and_preserves_manual_content(session, 
     main.run_summary_job(job_id)
     assert persistence.load_summary_job(job_id)['status'] == 'cancelled'
     assert persistence.load_session('meeting')['summaries'] == session['summaries']
+
+
+def test_concurrent_speaker_and_time_edit_is_not_overwritten(session, monkeypatch):
+    job_id = start(session, ['a'])
+    def generate(*args, **kwargs):
+        latest = persistence.load_session('meeting')
+        latest['transcript'][0]['speaker'] = 'OTHER'
+        latest['transcript'][0]['start'] = 0.25
+        persistence.save_session('meeting', latest, expected_revision=latest['revision'])
+        return SummarizationResult(summary='Stale result', duration_seconds=1,
+                                   llm_usage={'processing_complete': True})
+    monkeypatch.setattr(main, 'summarize_segment', generate)
+    main.run_summary_job(job_id)
+    latest = persistence.load_session('meeting')
+    assert latest['summaries'][0] == 'Alt A'
+    assert latest['transcript'][0]['speaker'] == 'OTHER'
+    assert persistence.load_summary_job(job_id)['status'] == 'failed'

@@ -48,7 +48,7 @@ class AgendaLLMUsage:
         semantic = sum(r['status'] == 'unassigned' for r in self.line_results)
         joint = sum(len(r['top_ids']) > 1 for r in self.line_results)
         if joint:
-            warnings.append(f'{joint} Zeilen gemeinsam mehreren TOPs zugeordnet. Die bisherigen Einzel-TOP-Zusammenfassungen übernehmen diese Mehrfachvorschläge noch nicht.')
+            warnings.append(f'{joint} Zeilen gemeinsam mehreren TOPs zugeordnet. Die Zusammenfassungen berücksichtigen die gemeinsamen Quellen; Zuordnung prüfen.')
         if technical:
             warnings.append(f'TOP-Zuordnung technisch unvollständig: {technical} Zeilen nicht verarbeitet.')
         if semantic:

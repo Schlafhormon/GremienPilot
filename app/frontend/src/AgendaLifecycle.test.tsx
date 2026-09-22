@@ -16,6 +16,11 @@ function detection(input: AgendaDetectionRequest): AgendaDetectionResponse {
   const tops = input.tops!;
   return {
     tops, transcript: input.transcript, assignments: [0, tops.length - 1],
+    llm: { enabled: true, source: 'request', status: 'success', timeout_seconds: 120,
+      attempted_calls: 2, failed_calls: 0, failure_reasons: [], processing_complete: true, review_complete: true,
+      provenance: {identities: tops.map((title, top_index) => ({title, top_index, top_id: `agenda:${top_index}`}))},
+      line_results: input.transcript.map((line, index) => ({line_id: line.line_id!, index,
+        top_ids: [`agenda:${index ? tops.length - 1 : 0}`], status: 'assigned', review_status: index ? 'agreed' : 'unresolved', reason: 'Modellprüfung', evidence: []})) },
     strategy: 'test', uncertain_count: 1, warnings: ['Grenze bitte prüfen.'],
     segments: [0, tops.length - 1].map((top_index, index) => ({
       top_index, top_title: tops[top_index]!, start_index: index, end_index: index,

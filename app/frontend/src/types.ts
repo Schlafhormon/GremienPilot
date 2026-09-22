@@ -229,6 +229,8 @@ export interface StructuredSummary {
 }
 
 export interface SummarySourceLink {
+  source_ids?: string[];
+  scope?: string | null;
   section: keyof StructuredSummary | string;
   item_index: number;
   item_text: string;

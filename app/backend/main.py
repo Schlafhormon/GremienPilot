@@ -845,6 +845,9 @@ class SummarizeRequest(BaseModel):
 
 
 class StructuredSummaryResponse(BaseModel):
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    review_questions: List[Dict[str, Any]] = Field(default_factory=list)
+    verification: Dict[str, Any] = Field(default_factory=dict)
     discussion: List[str] = Field(default_factory=list)
     decisions: List[str] = Field(default_factory=list)
     votes: List[str] = Field(default_factory=list)
@@ -854,6 +857,8 @@ class StructuredSummaryResponse(BaseModel):
 
 
 class SummarySourceLinkResponse(BaseModel):
+    source_ids: List[str] = Field(default_factory=list)
+    scope: Optional[str] = None
     section: str
     item_index: int
     item_text: str
@@ -1962,15 +1967,48 @@ def summary_snapshot_hash(snapshot: list[dict[str, str]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def summary_line_indices(session: dict[str, Any], top_index: int) -> list[int]:
+    """Include model-proven joint deliberations while honoring manual assignments."""
+    transcript = session.get('transcript') or []
+    assignments = session.get('assignments') or []
+    if session.get('skipped_assignment') or not session.get('tops'):
+        return list(range(len(transcript)))
+    selected = {i for i, value in enumerate(assignments) if value == top_index and i < len(transcript)}
+    proposals = session.get('agenda_proposals') or {}
+    source = proposals.get('source') or {}
+    result = proposals.get('result') or {}
+    usage = result.get('llm') or {}
+    ids = session.get('top_ids') or []
+    original_ids = source.get('top_ids') or []
+    if top_index >= len(ids) or ids[top_index] not in original_ids:
+        return sorted(selected)
+    original_index = original_ids.index(ids[top_index])
+    identities = (usage.get('provenance') or {}).get('identities') or []
+    model_ids = {item['top_id'] for item in identities if item.get('top_index') == original_index}
+    original_lines = source.get('transcript') or []
+    original_assignments = result.get('assignments') or []
+    for row in usage.get('line_results') or []:
+        i = row.get('index')
+        if (type(i) is not int or i < 0 or i >= min(len(transcript), len(original_lines), len(assignments), len(original_assignments))
+                or assignments[i] is not None or original_assignments[i] is not None
+                or len(row.get('top_ids') or []) < 2 or not model_ids.intersection(row['top_ids'])):
+            continue
+        current, original = line_to_dict(transcript[i]), line_to_dict(original_lines[i])
+        if all(current.get(key) == original.get(key) for key in ('line_id', 'speaker', 'text', 'start', 'end')):
+            selected.add(i)
+    return sorted(selected)
+
+
 def current_summary_input(
     session: dict[str, Any], top_index: int
 ) -> tuple[list[dict[str, str]], str]:
     transcript = [line_to_dict(line) for line in (session.get("transcript") or [])]
     tops = list(session.get("tops") or [])
     no_top_mode = bool(session.get("skipped_assignment")) or not tops
+    selected = set(summary_line_indices(session, top_index))
     snapshot = summary_source_snapshot(
         transcript,
-        list(session.get("assignments") or []),
+        [top_index if i in selected else None for i in range(len(transcript))],
         top_index,
         no_top_mode=no_top_mode,
     )
@@ -2162,6 +2200,20 @@ def reconcile_session_summaries(
             review = {}
 
         snapshot, input_hash = current_summary_input(state, index)
+        proof = (review.get('structured') or {}).get('verification') or {}
+        if proof:
+            from summary_grounding import digest
+            names = state.get('speaker_names') or {}
+            source_lines = [format_line_for_summary(line_to_dict(state['transcript'][i]), names)
+                            for i in summary_line_indices(state, index)]
+            if proof.get('summary_sha256') != digest(summary) or proof.get('source_sha256') != digest(source_lines):
+                review['source_links'] = []
+                review['structured']['verification']['processing_complete'] = False
+                review['llm_usage'] = {**review.get('llm_usage', {}), 'processing_complete': False}
+                review['llm_usage'].pop('original_line_indices', None)
+                review['review_warnings'] = [*[w for w in review.get('review_warnings', []) if w.get('kind') != 'verification_required'], {
+                    'kind': 'verification_required', 'severity': 'warning', 'line_indices': [], 'excerpt': '',
+                    'message': 'Text oder Quellen wurden geändert; die automatische Prüfung gilt für die frühere Fassung.'}]
         baseline_snapshot = list(previous_state.get("source_snapshot") or [])
         baseline_hash = str(previous_state.get("input_hash") or "")
         status = str(previous_state.get("status") or "")
@@ -2295,6 +2347,7 @@ def summary_edit_fingerprint(session: dict[str, Any], index: int) -> str:
     _, input_hash = current_summary_input(session, index)
     return hashlib.sha256(json.dumps({
         "input": input_hash,
+        "source_details": [line_to_dict(session['transcript'][i]) for i in summary_line_indices(session, index)],
         "title": "Gesamtes Gespräch" if session.get("skipped_assignment") else (session.get("tops") or ["Gesamtes Gespräch"])[index],
         "speakers": session.get("speaker_names") or {},
         "summary": (session.get("summaries") or {}).get(index),
@@ -2392,8 +2445,8 @@ def _run_summary_job(summary_job_id: str) -> None:
             transcript = [line_to_dict(line) for line in session.get("transcript", [])]
             assignments = session.get("assignments") or []
             no_top_mode = not session.get("tops") or session.get("skipped_assignment")
-            lines = [line for i, line in enumerate(transcript)
-                     if no_top_mode or (i < len(assignments) and assignments[i] == index)]
+            source_indices = summary_line_indices(session, index)
+            lines = [transcript[i] for i in source_indices]
             if not lines:
                 raise SummaryJobInputChanged("Für den ausgewählten TOP sind keine Zeilen vorhanden")
             title = "Gesamtes Gespräch" if no_top_mode else session["tops"][index]
@@ -2402,13 +2455,15 @@ def _run_summary_job(summary_job_id: str) -> None:
             with work_slot(LLM_WORK_LOCK):
                 result = summarize_segment(title, text, model=refs.get("model"),
                     system_prompt=refs.get("system_prompt"),
-                    meeting_context=meeting_context_from_transcript(transcript))
+                    meeting_context=meeting_context_from_transcript(transcript),
+                    source_lines=[format_line_for_summary(line, names) for line in lines])
+            result.llm_usage["original_line_indices"] = source_indices
             if summary_job_cancelled(summary_job_id):
                 finalize_summary_job_cancellation(summary_job_id, job)
                 return
             review = build_summary_review(structured=result.structured, summary=result.summary,
                 lines=[{**line, "speaker": names.get(line["speaker"], line["speaker"])} for line in lines])
-            if getattr(result, "llm_usage", {}).get("grounding_incomplete"):
+            if not getattr(result, "llm_usage", {}).get("processing_complete"):
                 raise RuntimeError("Zusammenfassung technisch unvollständig")
             if not result.summary.strip():
                 raise SummaryJobInputChanged("Die Generierung lieferte keine Zusammenfassung")
@@ -2674,6 +2729,7 @@ def summarize_pipeline_segments(
     assignments: list[int | None],
     options: dict[str, Any],
     speaker_names: dict[str, str] | None = None,
+    source_session: dict[str, Any] | None = None,
 ) -> tuple[dict[int, str], dict[int, Any]]:
     prior = _pipeline_refs(load_pipeline_job(pipeline_id)).get("summary_progress") or {}
     summaries = {int(k): v for k, v in (prior.get("summaries") or {}).items()}
@@ -2691,13 +2747,14 @@ def summarize_pipeline_segments(
                 result = summarize_segment(
                     "Gesamtes Gespräch",
                     transcript_text,
+                    source_lines=[format_line_for_summary(line, speaker_names) for line in transcript],
                     model=model,
                     system_prompt=system_prompt,
                 )
             review = build_summary_review(
                 structured=result.structured,
                 summary=result.summary,
-                lines=transcript,
+                lines=[{**line, "speaker": (speaker_names or {}).get(line["speaker"], line["speaker"])} for line in transcript],
             )
             return {
                 0: result.summary,
@@ -2746,11 +2803,9 @@ def summarize_pipeline_segments(
     for top_index, top_title in enumerate(tops):
         if top_index in summaries and not summary_reviews.get(top_index, {}).get("error"):
             continue
-        lines = [
-            line
-            for line_index, line in enumerate(transcript)
-            if line_index < len(assignments) and assignments[line_index] == top_index
-        ]
+        source_indices = (summary_line_indices(source_session, top_index) if source_session else
+                          [i for i in range(len(transcript)) if i < len(assignments) and assignments[i] == top_index])
+        lines = [transcript[i] for i in source_indices]
         if not lines:
             summaries[top_index] = ""
             summary_reviews[top_index] = {
@@ -2776,6 +2831,7 @@ def summarize_pipeline_segments(
                 result = summarize_segment(
                     top_title,
                     transcript_text,
+                    source_lines=[format_line_for_summary(line, speaker_names) for line in lines],
                     model=model,
                     system_prompt=system_prompt,
                     meeting_context=meeting_context_from_transcript(transcript),
@@ -2783,8 +2839,9 @@ def summarize_pipeline_segments(
             review = build_summary_review(
                 structured=result.structured,
                 summary=result.summary,
-                lines=lines,
+                lines=[{**line, "speaker": (speaker_names or {}).get(line["speaker"], line["speaker"])} for line in lines],
             )
+            result.llm_usage["original_line_indices"] = source_indices
             summaries[top_index] = result.summary
             summary_reviews[top_index] = {
                 "structured": (
@@ -2969,7 +3026,9 @@ def _run_pipeline_job(
             append_pipeline_warning(pipeline_id, 'Keine belegte Agenda; keine automatische Ersatz-Zusammenfassung.')
         else:
             summaries, summary_reviews = durable.checkpoint("pipeline:summaries", lambda: summarize_pipeline_segments(
-                pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options))
+                pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options,
+                source_session=dict(transcript=transcript, tops=tops, top_ids=top_ids,
+                                    assignments=assignments, agenda_proposals=agenda_proposals)))
         summaries = {int(k): v for k, v in summaries.items()}
         summary_reviews = {int(k): v for k, v in summary_reviews.items()}
         summary_states = build_generated_summary_states(
@@ -2982,6 +3041,10 @@ def _run_pipeline_job(
             summary_reviews=summary_reviews,
             origin="pipeline",
         )
+        for index, state in summary_states.items():
+            snapshot, source_hash = current_summary_input(dict(transcript=transcript, tops=tops,
+                top_ids=top_ids, assignments=assignments, agenda_proposals=agenda_proposals), index)
+            state.update(source_snapshot=snapshot, input_hash=source_hash, current_input_hash=source_hash)
         save_pipeline_session(
             session_id,
             job_id=transcription_job_id,
@@ -2999,10 +3062,18 @@ def _run_pipeline_job(
         )
 
         ensure_pipeline_not_cancelled(pipeline_id)
-        complete = (not agenda_info.get("pdf_incomplete") and (agenda_info.get("llm") or {}).get("status") not in
-                    {"disabled", "failed", "partial_failure", "fallback", "partial_fallback"}
-                    and not any(review.get("error") or (review.get("llm_usage") or {}).get("grounding_incomplete")
-                                for review in summary_reviews.values()))
+        agenda_usage = agenda_info.get("llm") or {}
+        expected = {i for i in range(len(tops)) if summary_line_indices(dict(
+            transcript=transcript, tops=tops, top_ids=top_ids, assignments=assignments,
+            agenda_proposals=agenda_proposals), i)} if tops else {0}
+        complete = (not agenda_info.get("pdf_incomplete")
+                    and (options.get('skip_agenda_detection') or
+                         (agenda_usage.get('processing_complete') and agenda_usage.get('review_complete')))
+                    and expected <= set(summary_reviews)
+                    and all(not summary_reviews[i].get("error")
+                            and (summary_reviews[i].get("llm_usage") or {}).get("processing_complete")
+                            for i in expected)
+                    and (not tops or len(assignments) == len(transcript)))
         save_pipeline_state(
             pipeline_id,
             status=PIPELINE_STATUS_COMPLETED if complete else PIPELINE_STATUS_FAILED,
@@ -3640,12 +3711,7 @@ async def accept_existing_summary(
     snapshot, input_hash = current_summary_input(session, top_index)
     transcript = [line_to_dict(line) for line in (session.get("transcript") or [])]
     assignments = list(session.get("assignments") or [])
-    lines = [
-        line
-        for line_index, line in enumerate(transcript)
-        if no_top_mode
-        or (line_index < len(assignments) and assignments[line_index] == top_index)
-    ]
+    lines = [transcript[i] for i in summary_line_indices(session, top_index)]
     review = dict((session.get("summary_reviews") or {}).get(top_index) or {})
     structured_data = review.get("structured")
     structured = None
@@ -4259,6 +4325,7 @@ async def generate_summary(request: SummarizeRequest):
                 return summarize_segment(
                     request.top_title,
                     text,
+                    source_lines=[f"{line.speaker}: {line.text}" for line in request.lines],
                     model=request.model,
                     system_prompt=request.system_prompt,
                 )

@@ -22,5 +22,24 @@ def test_installation_defaults_match_without_overwriting_external_provider_model
                      '.env.example', 'app/backend/.env.example', 'docker-compose.yml',
                      'app/backend/llm_config.py']:
         assert default in (ROOT / relative).read_text()
-    assert 'LLM_PROVIDER: "openai-compatible"' in (ROOT / 'k8s/backend/configmap.yaml').read_text()
+    assert 'LLM_PROVIDER: "ollama"' in (ROOT / 'k8s/backend/configmap.yaml').read_text()
     assert 'OLLAMA_LOAD_TIMEOUT=${OLLAMA_LOAD_TIMEOUT:-5m}' in (ROOT / 'docker-compose.yml').read_text()
+
+
+def test_mandatory_summary_policy_is_consistent_and_not_disablable_by_legacy_flags():
+    values = {'SUMMARY_OUTPUT_TOKENS': '4096', 'SUMMARY_MODEL_ATTEMPTS': '2', 'SUMMARY_RECONCILIATION_ROUNDS': '2'}
+    for name, default in values.items():
+        for path in ['.env.example', 'app/backend/.env.example']:
+            assert f'{name}={default}' in (ROOT / path).read_text()
+        assert f'{name}=${{{name}:-{default}}}' in (ROOT / 'docker-compose.yml').read_text()
+        assert f'{name}: "{default}"' in (ROOT / 'k8s/backend/configmap.yaml').read_text()
+    for path in ['summarize.py', 'summary_grounding.py']:
+        assert 'LLM_SUMMARY_GROUNDING_MAX_CALLS' not in (ROOT / 'app/backend' / path).read_text()
+        assert 'LLM_STRUCTURED_FALLBACK' not in (ROOT / 'app/backend' / path).read_text()
+
+
+def test_kubernetes_default_endpoint_has_a_matching_internal_service():
+    assert 'ollama/deployment.yaml' in (ROOT / 'k8s/kustomization.yaml').read_text()
+    text = (ROOT / 'k8s/ollama/deployment.yaml').read_text()
+    assert 'kind: Service' in text and 'name: ollama' in text
+    assert 'key: LLM_MODEL' in text

@@ -9,6 +9,7 @@ import extract_tops
 from pdf_fixtures import agenda
 import summarize
 from assignment_suggestions import TranscriptUtterance
+from summary_fixtures import SummaryModel
 
 
 SUMMARY = json.dumps({
@@ -27,7 +28,7 @@ def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, ef
         monkeypatch.setenv("LLM_REASONING_EFFORT", effort)
     normalized = (effort or "").strip().lower()
     if task == "summary":
-        fake_openai_module.content = SUMMARY
+        fake_openai_module.content = SummaryModel()
         summarize.summarize_segment("Haushalt", "MOD: Der Haushalt wurde beraten.")
     elif task.startswith("pdf"):
         fake_openai_module.content = json.dumps(agenda())
@@ -66,22 +67,13 @@ def test_invalid_reasoning_setting_is_rejected(monkeypatch, effort):
         summarize.get_llm_config()
 
 
-def test_reasoning_applies_to_summary_chunks_reduce_and_fallback(monkeypatch, fake_openai_module):
+def test_reasoning_applies_to_all_summary_reviews(monkeypatch, fake_openai_module):
     monkeypatch.setenv("LLM_REASONING_EFFORT", "none")
-    monkeypatch.setattr(summarize, "LLM_CHUNK_CHARS", 80)
-    fake_openai_module.responses = [
-        SUMMARY, SUMMARY, "invalid JSON",
-        "Teilzusammenfassung A.", "Teilzusammenfassung B.", "Zusammenfassung als Freitext.",
-    ]
-    transcript = "\n".join([
-        "A: " + "Haushaltsansatz und Begründung. " * 2,
-        "B: " + "Nachfrage zu Kosten und Fristen. " * 2,
-    ])
-    result = summarize.summarize_segment("Haushalt", transcript)
-    calls = fake_openai_module.instances[0].calls
-    assert not result.fallback_used
-    assert len(calls) == 2
-    assert all(call["reasoning_effort"] == "none" for call in calls)
+    model = SummaryModel()
+    fake_openai_module.content = model
+    summarize.summarize_segment("Haushalt", "A: Beratung.")
+    assert len(model.calls) == 6
+    assert all(request["reasoning_effort"] == "none" for _, request in model.calls)
 
 
 @pytest.mark.parametrize("extract", [extract_tops.extract_tops_from_text, extract_tops.extract_agenda_data_from_text])
@@ -112,6 +104,7 @@ def test_real_sdk_serializes_reasoning_without_network(monkeypatch, effort):
 
     real_client = openai.OpenAI
     requests = []
+    model = SummaryModel()
 
     def respond(request):
         if request.method == "GET" and request.url.path == "/v1/models":
@@ -125,7 +118,7 @@ def test_real_sdk_serializes_reasoning_without_network(monkeypatch, effort):
         requests.append(json.loads(request.content))
         return httpx.Response(200, text='data: ' + json.dumps({
             'model': 'qwen3.5:9b', 'choices': [{'index': 0, 'finish_reason': 'stop',
-                'delta': {'content': SUMMARY, 'reasoning': 'This is not the final answer.'}}]
+                'delta': {'content': model(requests[-1]), 'reasoning': 'This is not the final answer.'}}]
         }) + '\n\ndata: [DONE]\n\n')
 
     monkeypatch.setenv("LLM_REASONING_EFFORT", effort)
@@ -139,5 +132,5 @@ def test_real_sdk_serializes_reasoning_without_network(monkeypatch, effort):
         result = summarize.summarize_segment("Haushalt", "MOD: Der Haushalt wurde beraten.")
     assert not result.fallback_used
     assert "This is not the final answer" not in result.summary
-    assert len(requests) == 1
+    assert len(requests) == 6
     assert requests[0]["reasoning_effort"] == effort

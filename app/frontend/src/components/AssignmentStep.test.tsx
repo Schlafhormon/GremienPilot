@@ -1,13 +1,21 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AssignmentStepProps, TranscriptLine } from '../types';
+import type { AgendaLLMUsage, AssignmentStepProps, TranscriptLine } from '../types';
 import AssignmentStep from './AssignmentStep';
 
 const transcript: TranscriptLine[] = [
   { line_id: 'line-0', speaker: 'SPEAKER_00', text: 'Hallo zusammen', start: 0, end: 4 },
   { line_id: 'line-1', speaker: 'SPEAKER_01', text: 'Wir beraten den Haushalt', start: 5, end: 9 },
 ];
+
+function reviewedLines(count: number, unassigned: number[] = []): AgendaLLMUsage {
+  return { enabled: true, source: 'request', status: 'success', timeout_seconds: 120,
+    attempted_calls: 2, failed_calls: 0, failure_reasons: [], chunks: [],
+    processing_complete: true, review_complete: true,
+    line_results: Array.from({length: count}, (_, index) => ({ line_id: `line-${index}`, index,
+      top_ids: unassigned.includes(index) ? [] : ['model'], status: unassigned.includes(index) ? 'unassigned' : 'assigned', review_status: 'agreed', reason: 'Geprüft.', evidence: [] })) };
+}
 
 const defaultProps: AssignmentStepProps = {
   onNext: vi.fn(),
@@ -21,7 +29,8 @@ const defaultProps: AssignmentStepProps = {
   agendaDetection: {
     tops: ['Begruessung', 'Haushalt'],
     assignments: [0, 1],
-    strategy: 'known_agenda_heuristic',
+    strategy: 'model_agenda_v1',
+    llm: reviewedLines(2),
     uncertain_count: 1,
     segments: [
       {
@@ -350,7 +359,8 @@ it('shows missing evidence even when no uncertain segments exist', () => {
       assignments: [null, null],
       segments: [],
       uncertain_count: 0,
-      strategy: 'known_agenda_heuristic',
+      strategy: 'model_agenda_v1',
+      llm: undefined,
     },
   });
   expect(screen.getByText('2 Zeilen ohne automatischen Zuordnungsvorschlag.')).toBeInTheDocument();
@@ -377,7 +387,8 @@ it('applies reordered and resumed safe segments while leaving gaps and uncertain
         { ...segment, top_index: 0, start_index: 4, end_index: 4, confidence: 0.5, uncertain: true },
       ],
       uncertain_count: 1,
-      strategy: 'known_agenda_heuristic',
+      strategy: 'model_agenda_v1',
+      llm: reviewedLines(5, [0]),
     },
   });
   fireEvent.click(screen.getByRole('button', { name: 'Alle sicheren übernehmen' }));
@@ -423,4 +434,11 @@ it('shows joint model decisions, agenda status and technical review gaps without
   expect(screen.getByText(/Technische Prüflücke/)).toBeInTheDocument();
   expect(setAssignments).not.toHaveBeenCalled();
   expect(screen.getByRole('button', { name: 'Alle übernehmen' })).toBeDisabled();
+});
+
+
+it('does not certify legacy confidence without completed independent checks', () => {
+  renderAssignmentStep({agendaDetection: { ...defaultProps.agendaDetection!, llm: undefined,
+    segments: defaultProps.agendaDetection!.segments.map(segment => ({...segment, confidence: 1, uncertain: false})) }});
+  expect(screen.getByRole('button', {name: 'Alle sicheren übernehmen'})).toBeDisabled();
 });

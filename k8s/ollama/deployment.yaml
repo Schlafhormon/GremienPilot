@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ollama
+spec:
+  serviceName: ollama
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+          env:
+            - name: OLLAMA_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: tops-backend-config
+                  key: LLM_MODEL
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
+            - name: OLLAMA_MAX_LOADED_MODELS
+              value: "1"
+            - name: OLLAMA_KV_CACHE_TYPE
+              value: "f16"
+            - name: OLLAMA_FLASH_ATTENTION
+              value: "1"
+            - name: OLLAMA_LOAD_TIMEOUT
+              value: "5m"
+          lifecycle:
+            postStart:
+              exec:
+                command: ["sh", "-c", "until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull \"$OLLAMA_MODEL\""]
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+  volumeClaimTemplates:
+    - metadata:
+        name: models
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 64Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+spec:
+  selector:
+    app: ollama
+  ports:
+    - port: 11434
+      targetPort: 11434

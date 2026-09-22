@@ -74,6 +74,7 @@ scripts/research/**/generated_protocol*.txt
 scripts/research/**/segmented_transcript*.txt
 scripts/research/**/llm_summarised_transcript*.txt
 Testsdata/
+testdata/
 
 # Kubernetes secrets (keep example templates)
 k8s/secrets/*.yaml

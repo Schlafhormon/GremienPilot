@@ -106,6 +106,16 @@ export default function LLMSettingsPanel({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div>
+            <label htmlFor="llm-model" className="block text-sm font-medium text-gray-700">Modellüberschreibung</label>
+            <input id="llm-model" value={settings.model}
+              onChange={(event) => onSettingsChange({ ...settings, model: event.target.value.trim() })}
+              placeholder="Serverkonfiguration verwenden"
+              className="mt-2 w-full rounded border border-gray-300 p-2 text-sm" />
+            <p className="mt-2 text-xs text-gray-500">Leer verwendet das konfigurierte Servermodell. Gespeicherte Überschreibungen gelten auch für neue Jobs.</p>
+            {settings.model && <button type="button" className="mt-2 text-sm text-blue-700"
+              onClick={() => onSettingsChange({ ...settings, model: '' })}>Servermodell verwenden</button>}
+          </div>
           {/* System Prompt */}
           <div>
             <div className="flex items-center justify-between mb-3">

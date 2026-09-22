@@ -80,8 +80,12 @@ export default function SummaryStep({
   } = useAudioSync(transcript);
 
   const getTranscriptForTop = useCallback((topIndex: number) => {
+    const indices = summaryReviews[topIndex]?.llm_usage?.original_line_indices;
+    if (Array.isArray(indices) && indices.every(i => Number.isInteger(i) && i >= 0 && i < transcript.length)) {
+      return indices.map(i => transcript[i]!).filter(Boolean);
+    }
     return transcript.filter((_, i) => assignments[i] === topIndex);
-  }, [assignments, transcript]);
+  }, [assignments, transcript, summaryReviews]);
 
   useEffect(() => {
     setActiveSourceLine(null);
@@ -530,11 +534,14 @@ export default function SummaryStep({
                 />
               ) : hasReviewContent ? (
                 <div className="space-y-3">
+                  {selectedReview?.llm_usage?.processing_complete === true && (
+                    <p className="text-xs text-gray-600">Automatische Quellen- und Vollständigkeitsprüfung abgeschlossen. Offene Prüffragen bleiben gesondert sichtbar.</p>
+                  )}
                   {selectedWarnings.length > 0 && (
                     <div className="rounded-md border border-yellow-200 bg-yellow-50 px-3 py-2 text-sm text-yellow-900">
                       <div className="font-medium">Prüfhinweise</div>
                       <div className="mt-1 space-y-1">
-                        {selectedWarnings.slice(0, 3).map((warning, index) => (
+                        {selectedWarnings.map((warning, index) => (
                           <button
                             key={`${warning.kind}-${warning.keyword ?? ''}-${index}`}
                             type="button"
@@ -546,11 +553,7 @@ export default function SummaryStep({
                             {warning.message}
                           </button>
                         ))}
-                        {selectedWarnings.length > 3 && (
-                          <div className="text-yellow-800">
-                            +{selectedWarnings.length - 3} weitere Hinweise
-                          </div>
-                        )}
+
                       </div>
                     </div>
                   )}
@@ -594,14 +597,15 @@ export default function SummaryStep({
                                           Quelle fehlt
                                         </span>
                                       ) : source?.line_indices?.length ? (
-                                        <button
+                                        source.line_indices.map((lineIndex, evidenceIndex) => <button
+                                          key={lineIndex}
                                           type="button"
-                                          onClick={() => jumpToTranscriptLine(source.line_indices[0])}
+                                          onClick={() => jumpToTranscriptLine(lineIndex)}
                                           className="rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
-                                          title={source.excerpt || 'Transkriptstelle anzeigen'}
+                                          title={[source.excerpt, ...(source.source_ids ?? [])].filter(Boolean).join(' · ') || 'Transkriptstelle anzeigen'}
                                         >
-                                          Beleg {source.start != null ? formatTime(source.start) : ''}
-                                        </button>
+                                          Beleg {evidenceIndex + 1} {topLines[lineIndex]?.start != null ? formatTime(topLines[lineIndex]!.start) : ''}
+                                        </button>)
                                       ) : null}
                                     </div>
                                   </li>

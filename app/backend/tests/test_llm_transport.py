@@ -395,8 +395,8 @@ def test_external_cache_without_revision_does_not_break_summary(fake_openai_modu
     monkeypatch.setenv('LLM_CACHE_DIR', str(tmp_path))
     monkeypatch.delenv('LLM_MODEL_REVISION')
     monkeypatch.setenv('LLM_SUMMARY_GROUNDING_MAX_CALLS', '1')
-    fake_openai_module.content = json.dumps({'discussion': ['Beratung.'], 'decisions': [], 'votes': [],
-        'action_items': [], 'open_points': [], 'uncertainties': []})
+    from summary_fixtures import SummaryModel
+    fake_openai_module.content = SummaryModel()
     result = summarize.summarize_segment('TOP', 'Beratung.')
     assert result.summary
     assert not list(tmp_path.iterdir())

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import LLMSettingsPanel, { DEFAULT_LLM_SETTINGS } from './LLMSettingsPanel';
 
@@ -45,4 +45,15 @@ describe('LLMSettingsPanel', () => {
     expect(await screen.findByText('Profilverwaltung')).toBeInTheDocument();
     expect(screen.getByText('Herr Rudolf')).toBeInTheDocument();
   });
+});
+
+
+it('shows persisted model overrides and allows returning to the server default', () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([])));
+  const change = vi.fn();
+  render(<LLMSettingsPanel isOpen onClose={vi.fn()}
+    settings={{...DEFAULT_LLM_SETTINGS, model: 'explicit-model'}} onSettingsChange={change} />);
+  expect(screen.getByLabelText('Modellüberschreibung')).toHaveValue('explicit-model');
+  fireEvent.click(screen.getByRole('button', {name: 'Servermodell verwenden'}));
+  expect(change).toHaveBeenCalledWith({...DEFAULT_LLM_SETTINGS, model: ''});
 });

@@ -74,24 +74,31 @@ def public(job):
     }
 
 
-def version_snapshot():
+def version_snapshot(payload=None):
     # Code hashes include prompts, validators and chunking policy. No credentials.
     from llm_config import get_llm_config
-    files = ("summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_detection.py",
+    files = ("llm_config.py", "durable_jobs.py", "summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_detection.py",
              "extract_tops.py", "llm_transport.py", "main.py", "agenda_context.py",
              "agenda_labels.py", "assignment_suggestions.py")
     policy_keys = (
         "PDF_RENDER_DPI", "PDF_MAX_PAGE_PIXELS", "PDF_MAX_PAGES", "PDF_OUTPUT_TOKENS",
         "PDF_MODEL_ATTEMPTS", "PDF_REVIEW_ROUNDS",
-        "LLM_CHUNK_CHARS", "LLM_STRUCTURED_FALLBACK", "LLM_REPAIR_SPLIT_DEPTH",
-        "LLM_SUMMARY_FACT_REVIEW_MAX_CALLS", "LLM_SUMMARY_FACT_REVIEW_MAX_TOKENS",
-        "LLM_SUMMARY_FACT_REVIEW_THINK", "LLM_SUMMARY_GROUNDING_MAX_CALLS", "LLM_SUMMARY_GROUNDING_THINK",
+        "LLM_CHUNK_CHARS", "SUMMARY_OUTPUT_TOKENS", "SUMMARY_MODEL_ATTEMPTS",
+        "SUMMARY_RECONCILIATION_ROUNDS",
         "AGENDA_DETECTION_USE_LLM", "AGENDA_DETECTION_CHUNK_LINES", "AGENDA_DETECTION_CHUNK_OVERLAP_LINES",
         "AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE", "AGENDA_DETECTION_CONTEXT_WINDOW_AFTER",
         "AGENDA_OUTPUT_TOKENS", "AGENDA_OUTPUT_TOKENS_PER_LINE", "AGENDA_REPAIR_SPLIT_DEPTH",
         "AGENDA_MODEL_ATTEMPTS", "AGENDA_SOURCE_REQUEST_ROUNDS",
     )
-    return {"model": get_llm_config().public_snapshot(), "policy": {
+    payload = payload or {}
+    legacy = payload.get('legacy_snapshot') or {}
+    refs = legacy.get('refs') or legacy.get('result_refs') or {}
+    if isinstance(refs, str):
+        refs = json.loads(refs)
+    request = payload.get('request') or refs.get('options') or refs
+    models = {name: get_llm_config(request.get(name)).public_snapshot()
+              for name in ('model', 'summary_model') if request.get(name)}
+    return {"overrides": models, "model": get_llm_config(request.get("model")).public_snapshot(), "policy": {
         key: os.environ.get(key) for key in policy_keys
     }, "code": {
         name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in files}}
@@ -99,7 +106,7 @@ def version_snapshot():
 
 def submit(kind, payload, job_id=None, documents=None):
     job_id = job_id or str(uuid.uuid4())
-    payload = {**payload, "versions": version_snapshot()}
+    payload = {**payload, "versions": version_snapshot(payload)}
     now = time.time()
     with persistence.connect() as db:
         db.execute("""INSERT OR IGNORE INTO durable_jobs
@@ -311,10 +318,21 @@ class Manager:
         try:
             if job['attempt'] > self.max_attempts:
                 raise RuntimeError("Job retry budget exhausted")
-            if job["payload"]["versions"] != version_snapshot():
-                state, error = "review_required", "Modell-/Promptkonfiguration geändert; neue Verarbeitung erforderlich"
+            if job["payload"]["versions"] != version_snapshot(job["payload"]):
+                state, error = "failed", "Modell-/Promptkonfiguration geändert; neue Verarbeitung erforderlich"
             else:
                 with request_control(check, progress):
+                    if job['kind'] in {'summary', 'pipeline', 'agenda', 'pdf'}:
+                        from llm_config import get_llm_config
+                        from llm_transport import model_fingerprint
+                        snapshots = job['payload']['versions']
+                        names = {snapshots['model']['model']} | {
+                            cfg['model'] for cfg in snapshots.get('overrides', {}).values()}
+                        identities = {name: model_fingerprint(get_llm_config(name)) for name in sorted(names)}
+                        original = checkpoint('model-identities', lambda: identities)
+                        if original != identities or (job['attempt'] > 1 and
+                                any(not identity.get('digest') for identity in identities.values())):
+                            raise RuntimeError('Model identity changed or is not immutable; start a new job')
                     result, state = self.runner(job)
                 check()
         except WorkerStopped:

@@ -84,6 +84,8 @@ def fake_openai_module(monkeypatch):
                 content = response
             else:
                 content = self.owner.content
+            if callable(content):
+                content = content(kwargs)
             return types.SimpleNamespace(
                 choices=[
                     types.SimpleNamespace(
@@ -158,3 +160,11 @@ def isolated_job_storage(tmp_path_factory, monkeypatch):
 def agenda_model(monkeypatch, fake_openai_module):
     from agenda_fixtures import AgendaModel
     return AgendaModel(monkeypatch)
+
+
+@pytest.fixture
+def summary_model(fake_openai_module):
+    from summary_fixtures import SummaryModel
+    model = SummaryModel()
+    fake_openai_module.content = model
+    return model

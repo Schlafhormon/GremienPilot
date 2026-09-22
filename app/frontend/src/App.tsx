@@ -500,7 +500,9 @@ export default function App() {
     try {
       const saved = localStorage.getItem(LLM_SETTINGS_KEY);
       if (saved) {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        return { model: typeof parsed.model === 'string' ? parsed.model.trim() : '',
+          systemPrompt: typeof parsed.systemPrompt === 'string' ? parsed.systemPrompt : DEFAULT_LLM_SETTINGS.systemPrompt };
       }
     } catch (e) {
       console.error("Failed to load LLM settings from localStorage:", e);

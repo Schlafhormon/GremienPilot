@@ -30,8 +30,7 @@ einen booleschen Schalter, andere Ollama-Modelle ihre benannte Stufe.
 OpenAI-kompatible Server erhalten `reasoning_effort` ausschließlich, wenn
 konfiguriert. Sie müssen die gewählte Stufe unterstützen. Beide Variablen
 zusammen werden abgewiesen. Leere Einstellungen lassen den Provider entscheiden.
-Die vorhandenen fachlichen `*_THINK`-Überschreibungen betreffen weiterhin nur
-Ollama. Qwen-Steuerzeilen werden aus Systemprompts entfernt. Denktext wird
+Alle Zusammenfassungs- und Prüfphasen erben jetzt dieselbe zentrale Thinking-Konfiguration; die früheren `LLM_SUMMARY_*_THINK`-Schalter entfallen. Qwen-Steuerzeilen werden aus Systemprompts entfernt. Denktext wird
 weder als Ergebnis interpretiert noch in normale Logs oder Audits geschrieben.
 [Ollama Thinking](https://docs.ollama.com/capabilities/thinking).
 
@@ -138,3 +137,5 @@ unversionierte `.env`. Vor einer späteren Aktivierung sind ein kontrollierter
 Ladeversuch, die tatsächliche KV-/RSS-Belegung, Durchsatz, Bildtokenisierung und
 fachliche Qualität zu prüfen. Modellgewichte allein belegen keinen passenden
 Kontext. Änderungen dieser Arbeit starten keine Dienste und laden kein Modell.
+
+Die verpflichtende Quellenprüfung, Offline-Bewertung und Grenzen sehr großer Notizinventare sind in [quality-verification.md](quality-verification.md) beschrieben.

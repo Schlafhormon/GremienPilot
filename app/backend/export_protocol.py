@@ -62,6 +62,8 @@ class ProtocolTop:
     votes: list[str] = field(default_factory=list)
     action_items: list[str] = field(default_factory=list)
     open_points: list[str] = field(default_factory=list)
+    uncertainties: list[str] = field(default_factory=list)
+    review_questions: list[str] = field(default_factory=list)
     combined_action_heading: bool = False
 
 
@@ -197,6 +199,9 @@ def build_protocol_document(
                 votes=sections["votes"],
                 action_items=sections["action_items"],
                 open_points=sections["open_points"],
+                uncertainties=sections["uncertainties"],
+                review_questions=[str(w['message']) for w in
+                    (summary_reviews.get(index) or {}).get('review_warnings', []) if w.get('message')],
                 combined_action_heading=bool(re.search(
                     r'^\s*Ma(?:ß|ss)nahmen/offene Punkte:', editable_summary or '', re.I | re.M)),
             )
@@ -247,6 +252,8 @@ def render_txt(document: ProtocolDocument) -> str:
         _append_text_section(lines, "Abstimmung", top.votes)
         _append_text_section(lines, "Maßnahmen/offene Punkte" if top.combined_action_heading else "Maßnahmen", top.action_items)
         _append_text_section(lines, "Offene Punkte", top.open_points)
+        _append_text_section(lines, "Unsicherheiten", top.uncertainties)
+        _append_text_section(lines, "Prüffragen", top.review_questions)
         lines.append("")
 
     _append_text_appendix(lines, document)
@@ -296,6 +303,8 @@ def render_docx(document: ProtocolDocument) -> bytes:
             top.action_items,
         )
         _add_docx_section(doc, "Offene Punkte", top.open_points)
+        _add_docx_section(doc, "Unsicherheiten", top.uncertainties)
+        _add_docx_section(doc, "Prüffragen", top.review_questions)
 
     _add_docx_appendix(doc, document)
 
@@ -350,6 +359,8 @@ def render_pdf(document: ProtocolDocument) -> bytes:
         _append_pdf_section(story, styles, "Abstimmung", top.votes)
         _append_pdf_section(story, styles, "Maßnahmen/offene Punkte" if top.combined_action_heading else "Maßnahmen", top.action_items)
         _append_pdf_section(story, styles, "Offene Punkte", top.open_points)
+        _append_pdf_section(story, styles, "Unsicherheiten", top.uncertainties)
+        _append_pdf_section(story, styles, "Prüffragen", top.review_questions)
 
     _append_pdf_appendix(story, styles, document)
     doc.build(story)

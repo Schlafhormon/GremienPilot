@@ -83,8 +83,8 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         data["auto_detect_tops_from_pdf"] = "true"
         files["pdf"] = ("agenda.pdf", pdf_bytes(), "application/pdf")
         fake_openai_module.responses.extend(json.dumps(v) for v in [agenda(), agenda(), audit()])
-    fake_openai_module.responses.append(json.dumps({"discussion": ["Der Haushalt wurde beraten."],
-        "decisions": [], "votes": [], "action_items": [], "open_points": [], "uncertainties": []}))
+    from summary_fixtures import SummaryModel
+    fake_openai_module.content = SummaryModel()
     with TestClient(main.app) as client:
         response = client.post("/api/pipeline/start", data=data, files=files)
         assert response.status_code == 200
@@ -93,11 +93,11 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
     calls = [call for instance in fake_openai_module.instances for call in instance.calls]
-    assert len(calls) == (4 if agenda_source == "pdf" else 1)
+    assert len(calls) == (9 if agenda_source == "pdf" else 6)
     assert len(agenda_model.calls) == 6
     routed = [(call, 'agenda_system_prompt') for _, call in agenda_model.calls]
-    routed += [(call, 'pdf_system_prompt' if i < 2 else 'audit') for i, call in enumerate(calls[:-1])]
-    routed += [(calls[-1], 'summary_system_prompt')]
+    routed += [(call, 'pdf_system_prompt' if i < 2 else 'audit') for i, call in enumerate(calls[:-6])]
+    routed += [(call, 'summary_system_prompt') for call in calls[-6:]]
     for call, key in routed:
         assert call['model'] == 'test-model'
         prompt = call['messages'][0]['content']
@@ -106,7 +106,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         for scoped_key, custom_prompt in scoped.items():
             assert (custom_prompt in prompt) == (prompt_mode.startswith('scoped_') and key == scoped_key)
     expected_top = 'Haushalt'
-    assert f'TOP: {expected_top}' in calls[-1]['messages'][1]['content']
+    assert f'TOP: {expected_top}' in calls[-1]['messages'][0]['content']
     assert result['session']['tops'] == [expected_top]
     assert result["session"]["assignments"] == [0]
     proposals = result["session"]["agenda_proposals"]
@@ -744,11 +744,11 @@ def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clea
             audio_duration_seconds=7.0,
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
         structured = summarize.StructuredSummary(
             discussion=[f"{top_title} wurde beraten."]
         )
-        return summarize.SummarizationResult(
+        return summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary=f"Zusammenfassung {top_title}",
             duration_seconds=0.01,
             structured=structured,
@@ -886,7 +886,7 @@ def test_selective_summary_job_updates_requested_top_with_speaker_names(
         },
     )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
         captured.append(
             {
                 "top_title": top_title,
@@ -895,7 +895,7 @@ def test_selective_summary_job_updates_requested_top_with_speaker_names(
                 "system_prompt": system_prompt,
             }
         )
-        return summarize.SummarizationResult(
+        return summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary=f"Neu: {top_title}",
             duration_seconds=0.01,
             structured=summarize.StructuredSummary(
@@ -1149,8 +1149,8 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
             ),
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
-        return summarize.SummarizationResult(
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
+        return summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary=f"Zusammenfassung {top_title}",
             duration_seconds=0.01,
             structured=summarize.StructuredSummary(
@@ -1229,8 +1229,8 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
             metadata=SimpleNamespace(to_dict=lambda: {"committee": "Nicht genutzt"}),
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
-        return summarize.SummarizationResult(
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
+        return summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary=f"Zusammenfassung {top_title}",
             duration_seconds=0.01,
             structured=summarize.StructuredSummary(
@@ -1299,7 +1299,7 @@ def test_pipeline_failure_keeps_technical_gap_without_invented_agenda(
     monkeypatch.setattr(
         main,
         "summarize_segment",
-        lambda *args, **kwargs: summarize.SummarizationResult(
+        lambda *args, **kwargs: summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary="Gesamtes Gespräch wurde zusammengefasst.",
             duration_seconds=0.01,
             structured=None,
@@ -1352,7 +1352,7 @@ def test_pipeline_without_tops_stays_on_review_step_for_speaker_assignment(
     monkeypatch.setattr(
         main,
         "summarize_segment",
-        lambda *args, **kwargs: summarize.SummarizationResult(
+        lambda *args, **kwargs: summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary="Gesamtes Gespräch wurde zusammengefasst.",
             duration_seconds=0.01,
             structured=None,
@@ -1497,10 +1497,10 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
         ),
     )
 
-    def maybe_fail_summary(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None):
+    def maybe_fail_summary(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
         if "Fehler" in top_title:
             raise RuntimeError("LLM nicht verfügbar")
-        return summarize.SummarizationResult(
+        return summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary="Haushalt wurde zusammengefasst.",
             duration_seconds=0.01,
             structured=None,
@@ -1538,7 +1538,7 @@ def test_pipeline_persists_incomplete_source_check_without_losing_draft(tmp_path
         audio_duration_seconds=2))
     monkeypatch.setattr(main, 'summarize_segment', lambda *args, **kwargs: summarize.SummarizationResult(
         summary='Entwurf bleibt prüfbar.', duration_seconds=0.01,
-        llm_usage={'grounding_incomplete': grounding_incomplete}))
+        llm_usage={'grounding_incomplete': grounding_incomplete, 'processing_complete': not grounding_incomplete}))
     with TestClient(main.app) as client:
         started = client.post('/api/pipeline/start', data={
             'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'true',
@@ -1753,7 +1753,7 @@ def test_pipeline_llm_policy_and_persisted_fallback(
         transcript=[{"speaker": "MOD", "text": "TOP 1 Haushalt.", "start": 0, "end": 1}],
         audio_duration_seconds=1,
     ))
-    monkeypatch.setattr(main, "summarize_segment", lambda *args, **kwargs: summarize.SummarizationResult(
+    monkeypatch.setattr(main, "summarize_segment", lambda *args, **kwargs: summarize.SummarizationResult(llm_usage={'processing_complete': True},
         summary="Haushalt beraten.", duration_seconds=0.01,
         structured=summarize.StructuredSummary(discussion=["Haushalt beraten."]),
     ))
@@ -1888,7 +1888,7 @@ def test_reuse_verified_pdf_keeps_source_and_ids_without_browser_file(tmp_path, 
     fake_openai_module.responses = [json.dumps(v) for v in [agenda(), agenda(), audit()]]
     monkeypatch.setattr(main, 'transcribe_audio', lambda *a, **kw: FakeTranscriptionResult(
         transcript=[{'speaker': 'MOD', 'text': 'Allgemeine Beratung', 'start': 0, 'end': 1}], audio_duration_seconds=1))
-    monkeypatch.setattr(main, 'summarize_segment', lambda *a, **kw: summarize.SummarizationResult(summary='Beratung', duration_seconds=0))
+    monkeypatch.setattr(main, 'summarize_segment', lambda *a, **kw: summarize.SummarizationResult(summary='Beratung', duration_seconds=0, llm_usage={'processing_complete': True}))
     with TestClient(main.app) as client:
         extracted = client.post('/api/extract-tops', files={'pdf': ('source.pdf', pdf_bytes(), 'application/pdf')}).json()
         response = client.post('/api/pipeline/start', files={'audio': ('a.mp3', b'audio', 'audio/mpeg')},

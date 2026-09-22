@@ -178,7 +178,7 @@ def test_bounded_retries_and_changed_configuration(monkeypatch):
     new = jobs.submit('test', {})
     monkeypatch.setenv('LLM_MODEL', 'other-model')
     manager.execute(jobs.claim(manager.owner, 60))
-    assert jobs.load(new['job_id'])['state'] == 'review_required'
+    assert jobs.load(new['job_id'])['state'] == 'failed'
 
 
 def test_atomic_publication_and_revision_check():
@@ -292,7 +292,7 @@ def test_summary_crash_after_publication_does_not_regenerate_successful_top(monk
     calls = []
     def generate(title, *args, **kwargs):
         calls.append(title)
-        return SummarizationResult(summary='New ' + title, duration_seconds=.1)
+        return SummarizationResult(summary='New ' + title, duration_seconds=.1, llm_usage={'processing_complete': True})
     monkeypatch.setattr(main, 'summarize_segment', generate)
     report = main.update_summary_job
     def crash_after_publish(*args, **kwargs):
@@ -326,7 +326,7 @@ def test_pipeline_snapshot_rejects_manual_edits_and_retains_computed_result(monk
         source = persistence.load_session(target['session_id'])
         persistence.save_session(target['session_id'], {**source, 'tops': ['Manual edit']},
                                  expected_revision=source['revision'])
-        return SummarizationResult(summary='Automatic text', duration_seconds=.1)
+        return SummarizationResult(summary='Automatic text', duration_seconds=.1, llm_usage={'processing_complete': True})
     monkeypatch.setattr(main, 'summarize_segment', generate)
     with TestClient(main.app) as client:
         start = client.post('/api/pipeline/start', files={'audio': ('a.mp3', b'audio', 'audio/mpeg')},
@@ -446,10 +446,10 @@ def test_pipeline_restart_reuses_transcription_agenda_and_summaries(monkeypatch)
             audio_duration_seconds=1)
     def agenda(*args, **kwargs):
         calls['agenda'] += 1
-        return ['1 Haushalt'], [0], {'strategy': 'test', 'segments': [], 'uncertain_count': 0}, {}
+        return ['1 Haushalt'], [0], {'strategy': 'test', 'segments': [], 'uncertain_count': 0, 'llm': {'processing_complete': True, 'review_complete': True}}, {}
     def summary(*args, **kwargs):
         calls['summary'] += 1
-        return SummarizationResult(summary='Fertiges Ergebnis', duration_seconds=.1)
+        return SummarizationResult(summary='Fertiges Ergebnis', duration_seconds=.1, llm_usage={'processing_complete': True})
     def interrupted_publication(*args, **kwargs):
         if kwargs.get('summaries') is not None and not interrupted[0]:
             interrupted[0] = True

@@ -1,18 +1,13 @@
-# Research Scripts
+# Research adapters
 
-This directory contains non-production prototypes that were useful while exploring transcript segmentation and protocol generation. They are kept separate from the runtime scripts because several of them contain local sample paths, depend on ad-hoc input files, or target external research services.
+`model_workflow.py` uses the production PDF, agenda and source-verified summary workflows. The former segmentation/minutes/archive commands delegate to it; their old heuristic classes and command-line formats are retired. Existing research output files are untouched. The application APIs are unchanged.
 
-## Layout
+Use the backend Python environment:
 
-- `segment_transcript.py` uses semantic embeddings to segment a transcript by agenda topics.
-- `extract_moderator_transcript.py` extracts moderator utterances from a transcript.
-- `moderator_segmentation.py` and `moderator_segmentation_70B.py` test moderator-based segmentation via LLMs.
-- `minutes_generator.py` generates draft minutes from precomputed boundaries.
-- `llama-70b/` contains an experimental Kubernetes deployment for a 70B model.
-- `archive/` contains older protocol-generation experiments kept only for reference.
+```sh
+python scripts/research/model_workflow.py --transcript /private/transcript.json --pdf /private/agenda.pdf --output /private/new-result.json
+```
 
-## Notes
+The transcript is a complete JSON array of `{speaker, text, start?, end?}`. `--tops` accepts original agenda labels as a JSON array. `--model` is optional; provider, thinking, context and timeouts come from central configuration. Never pass moderator-only excerpts as a complete meeting. `extract_moderator_transcript.py` is a separate format conversion utility, not an inference input selector.
 
-These scripts are not wired into the FastAPI/React application, Docker Compose setup, or Kubernetes manifests. Before running one, replace hard-coded local sample paths in its `main()` block with local inputs or refactor it to accept CLI arguments.
-
-Generated transcripts, boundaries, protocol drafts, and local data should stay untracked; the repository root `.gitignore` contains patterns for the common outputs.
+Model runs require an isolated endpoint and resources. Nothing here is automatically run or deployed. `llama-70b/` remains a separate, explicitly selected deployment experiment. For offline evaluation use `../verify_llm_snapshot.py`; see `../../docs/quality-verification.md`.

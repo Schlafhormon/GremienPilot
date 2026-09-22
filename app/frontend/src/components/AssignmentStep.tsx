@@ -168,9 +168,15 @@ export default function AssignmentStep({
   };
 
   const isReviewedSegment = (segment: AssignmentSuggestionSegment) => {
-    const decisions = agendaDetection?.llm?.line_results;
-    return !decisions?.length || decisions.filter(line => line.index >= segment.start_index && line.index <= segment.end_index)
-      .every(line => ['agreed', 'resolved'].includes(line.review_status));
+    const usage = agendaDetection?.llm;
+    if (!usage?.processing_complete || !usage.review_complete) return false;
+    const decisions = usage.line_results ?? [];
+    for (let index = segment.start_index; index <= segment.end_index; index++) {
+      const rows = decisions.filter(line => line.index === index);
+      if (rows.length !== 1 || rows[0]?.status !== 'assigned' ||
+          !['agreed', 'resolved'].includes(rows[0]?.review_status ?? '')) return false;
+    }
+    return true;
   };
 
   const applyAllSafeSuggestions = () => {
@@ -180,7 +186,7 @@ export default function AssignmentStep({
 
     const newAssignments = [...assignments];
     agendaDetection.segments
-      .filter((segment) => !segment.uncertain && segment.confidence >= 0.7 && isReviewedSegment(segment))
+      .filter((segment) => !segment.uncertain && isReviewedSegment(segment))
       .forEach((segment) => {
         for (let i = segment.start_index; i <= segment.end_index; i++) {
           if (i >= 0 && i < newAssignments.length) {
@@ -524,7 +530,7 @@ export default function AssignmentStep({
           agendaDetection.llm?.provenance?.identities?.some(top => top.top_id === id && top.top_index === index))))
     : [];
   const safeSuggestionCount =
-    agendaDetection?.segments.filter((segment) => !segment.uncertain && segment.confidence >= 0.7 && isReviewedSegment(segment))
+    agendaDetection?.segments.filter((segment) => !segment.uncertain && isReviewedSegment(segment))
       .length ?? 0;
   const speakerIds = Array.from(new Set(transcript.map((line) => line.speaker).filter(Boolean)));
   const openSpeakerCount = speakerIds.filter((speakerId) => {
@@ -641,7 +647,7 @@ export default function AssignmentStep({
               <div className="mt-2 space-y-2">
                 <p>TOP auswählen, dann eine Transkriptzeile anklicken oder mit Enter bzw. Leertaste zuordnen. Erneutes Aktivieren hebt die Zuordnung auf. Mit Umschalt wird der Bereich seit der letzten Zeile zugeordnet.</p>
                 <p>Segmentaktionen gelten für zusammenhängende Zeilen desselben TOPs. Zeilenumbrüche beim Bearbeiten teilen eine Zeile auf.</p>
-                <p>Automatische Vorschläge anhand des Transkripts prüfen: Auch innerhalb eines Segments können Themenwechsel vorkommen. Der Evidenzwert ist eine Einschätzung.</p>
+                <p>Automatische Vorschläge anhand des Transkripts prüfen: Auch innerhalb eines Segments können Themenwechsel vorkommen. Die Sammelübernahme setzt abgeschlossene Modellprüfungen voraus.</p>
               </div>
             </details>
             {tops.length === 0 ? (
@@ -1044,8 +1050,7 @@ export default function AssignmentStep({
                           </span>
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
-                          Zeilen {segment.start_index + 1}-{segment.end_index + 1} · Modellbewertung{' '}
-                          {Math.round(segment.confidence * 100)}/100
+                          Zeilen {segment.start_index + 1}-{segment.end_index + 1} · {isReviewedSegment(segment) ? 'Modellprüfung abgeschlossen' : 'Modellprüfung offen'}
                         </div>
                         {segment.uncertain && (
                           <div className="mt-1 inline-flex items-center px-2 py-0.5 rounded bg-yellow-200 text-yellow-900 text-xs font-medium">

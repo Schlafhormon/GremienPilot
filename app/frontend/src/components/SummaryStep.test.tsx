@@ -232,7 +232,7 @@ describe('SummaryStep', () => {
     expect(screen.getByText('Beschluss')).toBeInTheDocument();
     expect(screen.getByText('Der Ausschuss beschloss die Vorlage.')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /beleg 0:00/i }));
+    await user.click(screen.getByRole('button', { name: /beleg 1 0:00/i }));
 
     const transcriptLine = screen.getByText('Willkommen').closest('div');
     expect(transcriptLine?.className).toContain('ring-2');
@@ -371,4 +371,20 @@ describe('SummaryStep', () => {
     await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
     expect(onRegenerateSummary).toHaveBeenCalledWith(0);
   });
+});
+
+it('shows every open question and navigates joint TOP source lines', async () => {
+  const user = userEvent.setup();
+  renderSummaryStep({ summaryReviews: {0: {
+    source_links: [],
+    llm_usage: { processing_complete: true, original_line_indices: [0, 1] },
+    review_warnings: Array.from({length: 4}, (_, index) => ({
+      kind: 'unclear', message: `Konkrete Prüffrage ${index + 1}?`, severity: 'warning',
+      line_indices: [1], excerpt: 'Haushalt wird beraten',
+    })),
+  }} });
+  expect(screen.getByText(/Automatische Quellen- und Vollständigkeitsprüfung abgeschlossen/)).toBeInTheDocument();
+  expect(screen.getByText('Haushalt wird beraten')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', {name: 'Konkrete Prüffrage 4?'}));
+  expect(screen.getByText('Haushalt wird beraten').closest('div')?.className).toContain('ring-2');
 });

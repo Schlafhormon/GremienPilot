@@ -7,7 +7,7 @@ Kubernetes manifests for deploying GremienPilot on the HPI cluster with GPU-acce
 - `kubectl` configured with access to the HPI Kubernetes cluster
 - A node with an NVIDIA A30 GPU (label: `accelerator: a30`)
 - NVIDIA runtime class configured (`runtimeClassName: nvidia`)
-- An API key for the [AISC LLM API](https://api.aisc.hpi.de)
+- Sufficient cluster RAM/storage for the configured Ollama model; an external OpenAI-compatible endpoint remains optional.
 
 ## Architecture
 
@@ -18,7 +18,7 @@ Internet → LoadBalancer Service (tops-frontend)
               ↓ proxy_pass /api/ & /health
          Backend (FastAPI:8010) — WhisperX transcription + summarization
               ↓ OpenAI SDK
-         AISC LLM API (api.aisc.hpi.de) — LLM inference
+         Ollama service — model inference (external endpoint optional)
 ```
 
 - **Frontend**: nginx serving the React SPA, proxies API requests to the backend
@@ -50,6 +50,8 @@ k8s/
 
 ## Configuration
 
+The base includes a CPU Ollama StatefulSet with persistent model storage. Set cluster resource requests/limits for the chosen model after measurement; no GPU is requested for Ollama by default. For an existing external installation, retain its endpoint, model and secret, set `LLM_PROVIDER=openai-compatible`, and omit `ollama/deployment.yaml` in your overlay. No provider fallback occurs. Backend GPU scheduling remains independently configurable.
+
 ### Backend ConfigMap (`backend/configmap.yaml`)
 
 | Variable | Default | Description |
@@ -58,14 +60,13 @@ k8s/
 | `WHISPER_DEVICE` | `cuda` | Compute device (cuda for GPU) |
 | `WHISPER_BATCH_SIZE` | `16` | Transcription batch size |
 | `WHISPER_LANGUAGE` | `de` | Audio language |
-| `LLM_BASE_URL` | `https://api.aisc.hpi.de` | AISC LLM API endpoint |
-| `LLM_MODEL` | `llama-3-3-70b` | Model name for summarization |
-| `LLM_PROVIDER` | `openai-compatible` | Provider contract; model IDs must exist on that server |
+| `LLM_BASE_URL` | `http://ollama:11434/v1` | Internal Ollama endpoint |
+| `LLM_MODEL` | `gemma4:31b-it-q4_K_M` | Model name for summarization |
+| `LLM_PROVIDER` | `ollama` | Provider contract; model IDs must exist on that server |
 | `LLM_TIMEOUT_SECONDS` | `120` | Summary/diagnostics request timeout (not transcript agenda detection) |
 | `LLM_MAX_RETRIES` | `2` | Retries for transient LLM errors |
 | `LLM_RETRY_BACKOFF_SECONDS` | `0.5` | Backoff between retries |
 | `LLM_CHUNK_CHARS` | `12000` | Target chunk size for long TOP transcripts |
-| `LLM_STRUCTURED_FALLBACK` | `true` | Use plain-text fallback if structured output parsing fails |
 | `PERSISTENCE_DB_PATH` | `/app/data/sessions.sqlite3` | SQLite session database path |
 | `JOB_MAX_AGE_SECONDS` | `7200` | Max age for in-memory job cache cleanup |
 | `JOB_MAX_COUNT` | `100` | Max jobs retained in memory |
@@ -172,7 +173,7 @@ kubectl rollout status deployment/tops-frontend -n tops
 ### LLM summarization fails
 - Test connectivity from the backend pod:
   ```bash
-  kubectl exec -n tops deploy/tops-backend -- curl -s https://api.aisc.hpi.de/health
+  kubectl exec -n tops deploy/tops-backend -- curl -s http://ollama:11434/api/tags
   ```
 - Check the API key is set: `kubectl get secret tops-secret -n tops -o yaml`
 
@@ -187,7 +188,7 @@ kubectl rollout status deployment/tops-frontend -n tops
 
 | Concern | Docker Compose | Kubernetes |
 |---------|---------------|------------|
-| LLM inference | Local Ollama container | AISC LLM API (api.aisc.hpi.de) |
+| LLM inference | Local Ollama container | Configurable Ollama service or explicit external endpoint |
 | GPU access | Docker `--gpus` / compose `deploy.resources` | `runtimeClassName: nvidia` + `nodeSelector` |
 | Backend image | `backend:cpu-latest` or `backend:gpu-latest` | Commit-pinned `sha-...-gpu` image (always GPU) |
 | Networking | Docker network (service names) | K8s Services + DNS |

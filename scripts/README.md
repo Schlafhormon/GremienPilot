@@ -3,6 +3,7 @@
 This directory is intentionally small.
 
 - `ollama-entrypoint.sh` is used by `docker-compose.yml` for the local Ollama service.
-- `research/` contains exploratory transcript segmentation, moderator extraction, minutes-generation prototypes, and a 70B Kubernetes experiment. Those files are not part of the production runtime path.
+- `verify_llm_snapshot.py` inventories local originals or evaluates immutable results against approved human references without model calls.
+- `research/` delegates historical inference commands to the verified production workflows and retains a separate explicit Kubernetes experiment.
 
 Do not add one-off analysis scripts to this directory root. Put them under `scripts/research/` and document required local data, credentials, and expected outputs there.

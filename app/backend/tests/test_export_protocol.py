@@ -208,3 +208,18 @@ def test_export_preserves_original_numbers_sections_and_unnumbered_legacy_titles
     response = client.post('/api/export', json={**payload, 'format': 'docx'})
     paragraphs = [paragraph.text for paragraph in Document(BytesIO(response.content)).paragraphs]
     assert all(top in paragraphs for top in tops)
+
+
+def test_uncertainties_and_concrete_review_questions_survive_all_exports():
+    from export_protocol import build_protocol_document, ProtocolMetadata, render_protocol
+    import pdfplumber
+    document = build_protocol_document(metadata=ProtocolMetadata(), tops=['Beratung'],
+        summaries={0: 'Diskussion:\nBeratung.\nUnsicherheiten:\nIst die Frist bestätigt?'},
+        summary_reviews={0: dict(review_warnings=[dict(message='Wurde der Vorschlag angenommen?')])})
+    txt = render_protocol(document, 'txt').decode()
+    docx = '\n'.join(p.text for p in Document(BytesIO(render_protocol(document, 'docx'))).paragraphs)
+    with pdfplumber.open(BytesIO(render_protocol(document, 'pdf'))) as pdf:
+        text = '\n'.join(page.extract_text() for page in pdf.pages)
+    for rendered in [txt, docx, text]:
+        assert 'Ist die Frist bestätigt?' in rendered
+        assert 'Wurde der Vorschlag angenommen?' in rendered
