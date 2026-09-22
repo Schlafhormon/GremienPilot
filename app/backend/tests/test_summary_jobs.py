@@ -8,6 +8,22 @@ import persistence
 from summarize import SummarizationResult
 
 
+def test_repeated_regeneration_keeps_qwen_when_separate_top_model_enabled(session, monkeypatch, fake_openai_module):
+    import agenda_model
+    monkeypatch.setenv('LLM_MODEL', 'qwen3.5:9b')
+    agenda_model.save_settings(agenda_model.AgendaModelSettings(enabled=True, context_tokens=65536, cpu_threads=2))
+    fake_openai_module.models_response = ['qwen3.5:9b']
+    fake_openai_module.content = '{"discussion":["A wurde beraten."],"decisions":[],"votes":[],"action_items":[],"open_points":[],"uncertainties":[]}'
+    for _ in range(2):
+        current = persistence.load_session('meeting')
+        job_id = start(current, ['a'])
+        main.run_summary_job(job_id)
+        assert persistence.load_summary_job(job_id)['status'] == 'completed'
+    calls = [call for instance in fake_openai_module.instances for call in instance.calls]
+    assert len(calls) >= 2
+    assert all(c['model'] == 'qwen3.5:9b' for c in calls)
+
+
 @pytest.fixture
 def session(tmp_path, monkeypatch):
     monkeypatch.setenv("PERSISTENCE_DB_PATH", str(tmp_path / "jobs.sqlite3"))

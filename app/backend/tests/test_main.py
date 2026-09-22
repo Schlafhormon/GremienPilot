@@ -1559,11 +1559,15 @@ def test_pipeline_persists_incomplete_source_check_without_losing_draft(tmp_path
     assert session['summary_reviews']['0']['llm_usage']['grounding_incomplete'] is grounding_incomplete
 
 
-def test_pipeline_fails_clearly_when_transcription_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize("detail,expected", [
+    ("Audioqualität zu schlecht; PRIVATE_CONTENT", "Transkription fehlgeschlagen."),
+    ("CERTIFICATE_VERIFY_FAILED; PRIVATE_CONTENT", "HTTPS-Zertifikatsprüfung fehlgeschlagen."),
+])
+def test_pipeline_fails_clearly_when_transcription_fails(tmp_path, monkeypatch, detail, expected):
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
 
     def fail_transcription(file_path, models, progress_callback=None):
-        raise RuntimeError("Audioqualität zu schlecht")
+        raise RuntimeError(detail)
 
     monkeypatch.setattr(main, "transcribe_audio", fail_transcription)
 
@@ -1581,7 +1585,8 @@ def test_pipeline_fails_clearly_when_transcription_fails(tmp_path, monkeypatch):
         status = client.get(f"/api/pipeline/{pipeline_id}").json()
 
     assert status["stage"] == "transcribe"
-    assert status["error"] == "RuntimeError"
+    assert expected in status["error"]
+    assert "PRIVATE_CONTENT" not in status["error"]
     transcription_job_id = status["transcription_job_id"]
     assert persistence.load_job(transcription_job_id)["status"] == "failed"
 

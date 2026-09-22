@@ -11,7 +11,7 @@ from dataclasses import replace
 from assignment_suggestions import AssignmentSegment, transition_kind, assignments_from_segments
 from agenda_labels import reference_targets, parse_agenda_label
 from agenda_context import model_agenda, EvidenceContext, closing_act
-from llm_transport import complete, fits, input_bound, structured_output_budget, cache_key, cache_read, cache_write, model_fingerprint
+from llm_transport import complete, fits, input_bound, structured_output_budget, cache_key, cache_read, cache_write, model_fingerprint, context_tokens, token_count_method
 from summarize import get_llm_config
 
 PROMPT = """Ordne JEDE Zielzeile eines deutschen Sitzungstranskripts ihrer aktuell behandelten Agenda zu.
@@ -92,8 +92,32 @@ def response_schema(start, end, identities):
 
 
 def classify(transcript, tops, usage, model=None, system_prompt=None, progress_callback=None, *, cache_namespace=''):
+    from agenda_model import resolve_config, model_session, require_model, report_error, load_settings
+    settings = load_settings()
+    if not settings.enabled:
+        config = resolve_config(model, settings)
+        return _classify(transcript, tops, usage, config, system_prompt, progress_callback, cache_namespace=cache_namespace)
+    config = replace(get_llm_config(), model=settings.model, task='agenda')
+    usage.provenance = {'task': 'agenda', 'model': settings.model, 'context_tokens': settings.context_tokens}
+    try:
+        config = resolve_config(model, settings)
+        usage.timeout_seconds = config.timeout_seconds
+        fingerprint = require_model(config)
+        with model_session(config, usage):
+            return _classify(transcript, tops, usage, config, system_prompt, progress_callback,
+                             cache_namespace=cache_namespace, fingerprint=fingerprint)
+    except Exception as exc:
+        usage.status = 'failed'
+        usage.failure_reasons.append(report_error(config, exc))
+        usage.gaps = [{'start_index': 0, 'end_index': len(transcript)-1,
+                       'kind': 'technical', 'reason': usage.failure_reasons[-1]}]
+        usage.processed_lines = []
+        usage.chunks.append({'phase': 'agenda_model', 'status': 'failed', 'reason': usage.failure_reasons[-1]})
+        return []
+
+
+def _classify(transcript, tops, usage, config, system_prompt=None, progress_callback=None, *, cache_namespace='', fingerprint=None):
     from openai import OpenAI
-    config = get_llm_config(model)
     client = OpenAI(base_url=config.base_url, api_key=config.api_key,
                     timeout=usage.timeout_seconds, max_retries=0)
     segments = []
@@ -106,20 +130,30 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
     evidence_context = EvidenceContext(transcript, tops, agenda)
     limit = max(1, int(os.environ.get('AGENDA_DETECTION_CHUNK_LINES', '160')))
     char_limit = max(256, int(os.environ.get('LLM_CHUNK_CHARS', '7000')))
-    output = 2048
+    output = config.output_budget
     output_reserve = structured_output_budget(config, output)
     try:
-        fingerprint = model_fingerprint(config)
+        fingerprint = fingerprint or model_fingerprint(config)
     except Exception as exc:
         fingerprint = {'model': config.model, 'digest': None, 'error': type(exc).__name__}
     provenance = {**fingerprint, 'prompt_version': 'known-agenda-evidence-v5', 'schema_version': 5,
-                  'temperature': 0.1, 'max_tokens': output, 'reasoning_effort': config.reasoning_effort,
-                  'seed': None, 'truncate': False, 'shift': False,
-                  'num_thread': int(os.environ.get('LLM_CPU_THREADS', '16')),
+                  'temperature': config.temperature, 'max_tokens': output, 'reasoning_effort': config.reasoning_effort,
+                  'seed': config.seed, 'truncate': False, 'shift': False,
+                  'num_thread': config.cpu_threads or int(os.environ.get('LLM_CPU_THREADS', '16')),
                   'cache_namespace': cache_namespace, 'context_before': before, 'context_after': after}
     if not fingerprint.get('digest') and fingerprint.get('provider') != 'openai-compatible':
         provenance['unresolved_model_run'] = str(uuid.uuid4())
     usage.provenance = {**provenance, 'identities': [dict(t, top_index=i) for i, t in enumerate(agenda)]}
+    timeline = None
+    if config.task == 'agenda':
+        from agenda_timeline import analyze
+        provenance.update(task='agenda', context_tokens=context_tokens(config),
+                          token_count_method=token_count_method(config), tokenizer_sha256=config.tokenizer_sha256,
+                          timeout_seconds=config.timeout_seconds)
+        usage.provenance.update(provenance)
+        timeline = analyze(client, config, transcript, agenda, usage, provenance, progress_callback)
+        provenance['timeline_identity'] = timeline['identity']
+        usage.provenance.update(provenance, timeline=timeline)
     repairs = max(0, min(3, int(os.environ.get('LLM_REPAIR_SPLIT_DEPTH', '1'))))
     system = PROMPT + ('\nZusätzliche fachliche Vorgaben (Schema bleibt verbindlich):\n' + system_prompt if system_prompt else '')
 
@@ -150,6 +184,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                 'context_before': rows(max(0, start-before), start),
                 'target_lines': rows(start, end+1),
                 'context_after': rows(end+1, min(len(transcript), end+after+1))}
+        if timeline is not None:
+            from agenda_timeline import packet
+            user['topic_timeline'] = packet(timeline, transcript, start, end)
         if previous and previous.get('evidence_index') is not None:
             origin = previous['evidence_index']
             user['predicted_topic_origin'] = {
@@ -212,7 +249,8 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         # room for a same-window repair. Remove only optional neighbor context.
         user['context_budget'] = {'before_requested': before, 'after_requested': after,
                                   'omitted_indices': [], 'repair_reserve': 768}
-        while not fits(encode(), output_reserve + 768):
+        while not fits(encode(), output_reserve + 768, config,
+                       window_schema(start, end) if config.task == 'agenda' else None):
             if user['context_after']:
                 removed = user['context_after'].pop()
             elif user['context_before']:
@@ -325,6 +363,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
     def obtain(request, start, end, detail, purpose):
         key = cache_key(config, request, purpose, provenance)
         detail.update(cache_key=hashlib.sha256(key.encode()).hexdigest(),
+                      task='agenda', phase=detail.get('phase', 'line_assignment'),
+                      model=config.model, digest=fingerprint.get('digest'),
+                      context_tokens=context_tokens(config), timeline_identity=provenance.get('timeline_identity'),
                       evidence_context=json.loads(request[1]['content'])['evidence_context'],
                       context_budget=json.loads(request[1]['content'])['context_budget'])
         cached = cache_read(key)
@@ -339,8 +380,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                 if data is None:
                     usage.attempted_calls += 1
                     response = complete(client, config, model=config.model, messages=request,
-                                        temperature=0.1, max_tokens=output, timeout=usage.timeout_seconds,
+                                        temperature=config.temperature, max_tokens=output, timeout=usage.timeout_seconds,
                                         response_format=window_schema(start, end), **config.reasoning_options)
+                    detail.setdefault('provider_responses', []).append(getattr(response, 'provider_usage', {}))
                     data = parse_response(response.choices[0].message.content)
                 rows = validate(decode(data, start, end), start, end)
                 detail['repair_history'] = history
@@ -367,7 +409,8 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                         'Keine assignments neu erzeugen. Alle null-Zeilen sind erforderlich.')
                 body['repair'] = repair
                 repaired_request = [request[0], {'role': 'user', 'content': json.dumps(body, ensure_ascii=False)}]
-                if not fits(repaired_request, output_reserve):
+                if not fits(repaired_request, output_reserve, config,
+                            window_schema(start, end) if config.task == 'agenda' else None):
                     raise
                 usage.attempted_calls += 1
                 schema = window_schema(start, end)
@@ -379,8 +422,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                             'required': gap_ids, 'additionalProperties': False}},
                         'required': ['gap_reasons'], 'additionalProperties': False}
                 response = complete(client, config, model=config.model, messages=repaired_request,
-                                    temperature=0.1, max_tokens=output, timeout=usage.timeout_seconds,
+                                    temperature=config.temperature, max_tokens=output, timeout=usage.timeout_seconds,
                                     response_format=schema, **config.reasoning_options)
+                detail.setdefault('provider_responses', []).append(getattr(response, 'provider_usage', {}))
                 data = parse_response(response.choices[0].message.content)
                 if repair.get('fixed_assignments'):
                     reasons = data.get('gap_reasons')
@@ -397,7 +441,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         began = time.monotonic()
         detail = {'start_index': start, 'end_index': end, 'depth': depth,
                   'parent_cache_key': parent,
-                  'input_token_bound': input_bound(request), 'max_output_tokens': output,
+                  'input_token_bound': input_bound(request, window_schema(start, end) if config.task == 'agenda' else None, config), 'max_output_tokens': output,
                   'reserved_output_tokens': output_reserve}
         rows = None
         try:
@@ -428,6 +472,11 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
             if reason not in usage.failure_reasons:
                 usage.failure_reasons.append(reason)
             detail.update(status='failed', reason=reason)
+            if config.task == 'agenda' and not isinstance(exc, (AgendaValidationError, ValueError)):
+                from agenda_model import report_error
+                detail['message'] = report_error(config, exc)
+                if detail['message'] not in usage.failure_reasons:
+                    usage.failure_reasons.append(detail['message'])
             if depth < repairs and start < end:
                 middle = (start + end) // 2
                 left = run(start, middle, depth+1, detail['cache_key'])
@@ -456,7 +505,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         size = len(transcript[start].text)
         while end+1 < min(len(transcript), start+limit):
             candidate = end+1
-            if size + len(transcript[candidate].text) > char_limit or not fits(messages(start, candidate), output_reserve):
+            if (size + len(transcript[candidate].text) > char_limit
+                    or not fits(messages(start, candidate), output_reserve, config,
+                                window_schema(start, candidate) if config.task == 'agenda' else None)):
                 break
             size += len(transcript[candidate].text)
             end = candidate
@@ -543,13 +594,13 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                             'Sachfragen nichtöffentlich. Eine tatsächliche Rückkehr ist möglich; bloße '
                             'Rückblicke, Zitate oder Vorschauen sind kein Abschnittswechsel.'}
                 request[1]['content'] = json.dumps(body, ensure_ascii=False)
-                if fits(request, output_reserve) or end == start:
+                if fits(request, output_reserve, config, window_schema(start, end) if config.task == 'agenda' else None) or end == start:
                     break
                 end -= 1
             if end < original_end:
                 runs.insert(0, [end+1, original_end])
             detail = {'start_index': start, 'end_index': end, 'phase': phase,
-                      'input_token_bound': input_bound(request), 'max_output_tokens': output,
+                      'input_token_bound': input_bound(request, window_schema(start, end) if config.task == 'agenda' else None, config), 'max_output_tokens': output,
                       'reserved_output_tokens': output_reserve}
             began = time.monotonic()
             try:
@@ -603,6 +654,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
                 if reason not in usage.failure_reasons:
                     usage.failure_reasons.append(reason)
                 detail.update(status='failed', reason=reason)
+                if config.task == 'agenda' and not isinstance(exc, (AgendaValidationError, ValueError)):
+                    from agenda_model import report_error
+                    detail['message'] = report_error(config, exc)
                 # Retain the first opinion, but expose the unresolved disagreement.
                 segments[:] = [replace(s, uncertain=True, confidence=min(s.confidence, 0.5),
                     reason='Nachprüfung fehlgeschlagen; Grenze offen. ' + s.reason)

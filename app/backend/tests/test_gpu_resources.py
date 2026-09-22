@@ -198,6 +198,22 @@ def test_models_reload_for_each_job_and_release_before_llm(real_transcribe, monk
     assert events == ["unload-ollama", "load", "infer", "release", "llm"] * 2
 
 
+def test_transcription_reclaims_both_local_services_when_top_option_enabled(real_transcribe, monkeypatch):
+    from dataclasses import replace
+    import agenda_model
+    events, endpoints = [], []
+    install_loader(real_transcribe, monkeypatch, events)
+    monkeypatch.setattr(agenda_model, 'load_settings', lambda: SimpleNamespace(enabled=True))
+    monkeypatch.setattr(agenda_model, 'resolve_config', lambda: replace(get_llm_config(),
+        base_url='http://ollama-agenda:11434/v1', task='agenda'))
+    monkeypatch.setattr(real_transcribe, 'unload_local_ollama', lambda c, *a: endpoints.append(c.base_url))
+    holder = real_transcribe.load_models()
+    with real_transcribe.transcription_model_session(holder):
+        assert holder.whisper_model is not None
+    assert endpoints == ['http://ollama:11434/v1', 'http://ollama-agenda:11434/v1']
+    assert holder.whisper_model is None
+
+
 def test_transcription_cannot_unload_ollama_during_active_llm(real_transcribe, monkeypatch):
     module = real_transcribe
     events = []

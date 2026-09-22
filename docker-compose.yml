@@ -32,6 +32,10 @@ services:
       - MKL_NUM_THREADS=${MKL_NUM_THREADS:-}
       - HF_TOKEN=${HF_TOKEN:-}
       - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN:-}
+      # Optional trusted CA bundle for local HTTPS inspection (never disable TLS).
+      - REQUESTS_CA_BUNDLE=${REQUESTS_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
+      - SSL_CERT_FILE=${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}
+      - PYANNOTE_CACHE=/app/.cache/torch/pyannote
       - TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=${TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD:-1}
       - SPEAKER_EMBEDDING_ENABLED=${SPEAKER_EMBEDDING_ENABLED:-true}
       - SPEAKER_EMBEDDING_MODEL=${SPEAKER_EMBEDDING_MODEL:-pyannote/embedding}
@@ -47,6 +51,7 @@ services:
       - APP_RUNTIME=docker
       - LLM_BASE_URL=${LLM_BASE_URL:-http://ollama:11434/v1}
       - LLM_MODEL=${LLM_MODEL:-qwen3:8b}
+      - AGENDA_LLM_BASE_URL=${AGENDA_LLM_BASE_URL:-http://ollama-agenda:11434/v1}
       - LLM_OLLAMA_NATIVE=${LLM_OLLAMA_NATIVE:-true}
       - LLM_CONTEXT_TOKENS=${LLM_CONTEXT_TOKENS:-16384}
       - LLM_CPU_THREADS=${LLM_CPU_THREADS:-16}
@@ -117,6 +122,29 @@ services:
       timeout: 5s
       retries: 60
       start_period: 300s # 5 min grace period for model download
+    restart: unless-stopped
+
+  # Separate runner settings prevent large TOP models from changing Qwen's
+  # prompt-cache behavior. No model is pulled or loaded at service startup.
+  ollama-agenda:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    ports:
+      - "127.0.0.1:11435:11434"
+    volumes:
+      - ollama_data:/root/.ollama:ro
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+      - OLLAMA_KEEP_ALIVE=5m
+      - LLAMA_ARG_CTX_CHECKPOINTS=2
+      - LLAMA_ARG_CACHE_RAM=0
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
     restart: unless-stopped
 
 volumes:

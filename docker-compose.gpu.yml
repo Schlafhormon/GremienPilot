@@ -28,3 +28,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  ollama-agenda:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

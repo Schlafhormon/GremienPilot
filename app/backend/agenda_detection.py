@@ -129,6 +129,9 @@ class AgendaLLMUsage:
     @property
     def warnings(self) -> list[str]:
         warnings = []
+        if self.provenance.get('task') == 'agenda' and self.failure_reasons:
+            warnings.append('Separates TOP-Modell: ' + '; '.join(self.failure_reasons)
+                            + '. Kein anderes Modell als Ersatz verwendet.')
         if self.chunks:
             technical = sum(g['end_index'] - g['start_index'] + 1 for g in self.gaps if g['kind'] == 'technical')
             semantic = sum(g['end_index'] - g['start_index'] + 1 for g in self.gaps if g['kind'] == 'semantic')
@@ -155,6 +158,9 @@ class AgendaLLMUsage:
 
 def _llm_usage(use_llm: bool | None) -> AgendaLLMUsage:
     enabled = _should_use_llm(use_llm)
+    if use_llm is None:
+        from agenda_model import load_settings
+        enabled = enabled or load_settings().enabled
     return AgendaLLMUsage(
         enabled=enabled,
         source="server_default" if use_llm is None else "request",
@@ -203,11 +209,17 @@ def detect_agenda_from_transcript(
     system_prompt: str | None = None,
     *,
     use_llm: bool | None = None,
+    cache_namespace: str = '',
 ) -> AgendaDetectionResult:
     """Detect TOP titles and line boundaries without a known agenda list."""
     usage = _llm_usage(use_llm)
     if not transcript:
         return AgendaDetectionResult([], [], [], 0, "heuristic_transcript_empty", usage)
+
+    from agenda_model import load_settings
+    settings = load_settings()
+    if usage.enabled and settings.enabled:
+        return _detect_separate_agenda(transcript, model, usage, system_prompt, cache_namespace, settings=settings)
 
     heuristic_segments = _heuristic_detect_unknown_agenda(transcript)
     llm_segments = _maybe_detect_with_llm(
@@ -238,6 +250,101 @@ def detect_agenda_from_transcript(
     segments = [replace(segment, top_index=detected_tops.index(segment.top_title)) for segment in segments]
     segments = _guard_number_evidence(transcript, detected_tops, segments)
     return _result_from_segments(len(transcript), segments, strategy, tops=detected_tops, usage=usage)
+
+
+def _detect_separate_agenda(transcript, model, usage, system_prompt, cache_namespace='', *, settings=None):
+    """Discover titles with the selected model, then use the complete known-agenda path."""
+    from agenda_model import model_session, require_model, report_error, resolve_config, load_settings
+    from llm_transport import (fits, structured_output_budget, complete, cache_key, cache_read, cache_write,
+                               input_bound, token_count_method, context_tokens)
+    from agenda_llm import _classify
+    import hashlib
+    import time
+    settings = settings or load_settings()
+    config = replace(get_llm_config(), model=settings.model, task='agenda')
+    usage.provenance = {'task': 'agenda', 'model': config.model}
+    try:
+        config = resolve_config(model, settings)
+        usage.timeout_seconds = config.timeout_seconds
+        fingerprint = require_model(config)
+        provenance = {**fingerprint, 'task': 'agenda', 'step': 'agenda_discovery',
+                      'prompt_version': 'agenda-discovery-v1', 'schema_version': 1,
+                      'context_tokens': context_tokens(config), 'max_tokens': config.output_budget,
+                      'reasoning_effort': config.reasoning_effort, 'temperature': config.temperature,
+                      'seed': config.seed, 'num_thread': config.cpu_threads,
+                      'timeout_seconds': config.timeout_seconds, 'cache_namespace': cache_namespace,
+                      'token_count_method': token_count_method(config), 'tokenizer_sha256': config.tokenizer_sha256}
+        usage.provenance.update(provenance)
+        titles = []
+        discovery = []
+        with model_session(config, usage):
+            start = 0
+            while start < len(transcript):
+                end = start
+                while end+1 < len(transcript):
+                    messages = [
+                        {'role': 'system', 'content': build_agenda_detection_system_prompt(system_prompt)},
+                        {'role': 'user', 'content': _build_llm_user_prompt(transcript[start:end+2], None, [])}]
+                    if (end-start >= 63 or not fits(messages, structured_output_budget(config, config.output_budget),
+                                                   config, {'type': 'json_object'})):
+                        break
+                    end += 1
+                messages = [
+                    {'role': 'system', 'content': build_agenda_detection_system_prompt(system_prompt)},
+                    {'role': 'user', 'content': _build_llm_user_prompt(transcript[start:end+1], None, [])}]
+                key = cache_key(config, messages, 'agenda-discovery-v1', provenance)
+                detail = {**provenance, 'phase': 'agenda_discovery', 'start_index': start, 'end_index': end,
+                          'cache_key': hashlib.sha256(key.encode()).hexdigest(),
+                          'input_identity': hashlib.sha256(json.dumps(messages, ensure_ascii=False).encode()).hexdigest(),
+                          'input_token_bound': input_bound(messages, config=config), 'parent_cache_key': None}
+                began = time.monotonic()
+                try:
+                    cached = cache_read(key)
+                    if cached is None:
+                        usage.attempted_calls += 1
+                        response = complete(None, config, model=config.model, messages=messages,
+                                            max_tokens=config.output_budget, temperature=config.temperature,
+                                            timeout=config.timeout_seconds, response_format={'type': 'json_object'},
+                                            **config.reasoning_options)
+                        content = _llm_message_text(response.choices[0].message)
+                        detail['provider_usage'] = getattr(response, 'provider_usage', {})
+                    else:
+                        content = cached['content']
+                    segments, _ = _validate_unknown_segments(
+                        transcript[start:end+1], _parse_llm_segments(content),
+                        fallback_segments=[], issues=usage.validation_reasons)
+                    segments = [s for s in segments if s.evidence_text]
+                    if not segments:
+                        raise _EmptyLLMResponse()
+                    detail['hypotheses'] = [{'top_title': s.top_title, 'evidence_index': start+s.evidence_index,
+                                              'evidence_text': s.evidence_text, 'uncertain': s.uncertain}
+                                             for s in segments]
+                    detail['status'] = 'success' if cached is None else 'cached'
+                    if cached is None:
+                        cache_write(key, {'content': content, 'provenance': provenance})
+                except Exception as exc:
+                    detail.update(status='failed', reason=type(exc).__name__)
+                    usage.failed_calls += 1
+                    raise
+                finally:
+                    detail['duration_seconds'] = round(time.monotonic()-began, 3)
+                    usage.chunks.append(detail)
+                    discovery.append(detail)
+                titles.extend(s.top_title for s in segments if s.top_title not in titles)
+                if end == len(transcript)-1:
+                    break
+                start = max(start+1, end-7)
+            segments = _classify(transcript, titles, usage, config, system_prompt,
+                                 fingerprint=fingerprint, cache_namespace=cache_namespace)
+            usage.provenance['agenda_discovery'] = discovery
+        return _result_from_segments(len(transcript), segments, 'separate_model_discovered_agenda', tops=titles, usage=usage)
+    except Exception as exc:
+        usage.status = 'failed'
+        usage.failure_reasons.append(report_error(config, exc))
+        usage.gaps = [{'start_index': 0, 'end_index': len(transcript)-1, 'kind': 'technical',
+                       'reason': usage.failure_reasons[-1]}]
+        usage.chunks.append({'phase': 'agenda_discovery', 'status': 'failed'})
+        return AgendaDetectionResult([], [None]*len(transcript), [], 0, 'separate_model_failed', usage)
 
 
 def segment_known_agenda(
@@ -493,19 +600,20 @@ def _detect_with_llm(
     heuristic_segments: list[AssignmentSegment],
     model: str | None,
     system_prompt: str | None,
+    config=None,
 ) -> list[_RawSegment]:
     try:
         from openai import OpenAI
     except ImportError as exc:
         raise RuntimeError("OpenAI client nicht installiert") from exc
 
-    config = get_llm_config(model)
+    config = config or get_llm_config(model)
     actual_model = config.model
     actual_system_prompt = build_agenda_detection_system_prompt(system_prompt)
     client = OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
-        timeout=AGENDA_DETECTION_TIMEOUT_SECONDS,
+        timeout=config.timeout_seconds if config.task == 'agenda' else AGENDA_DETECTION_TIMEOUT_SECONDS,
         max_retries=0,
     )
 
@@ -516,8 +624,8 @@ def _detect_with_llm(
             {"role": "system", "content": actual_system_prompt},
             {"role": "user", "content": _build_llm_user_prompt(transcript, tops, heuristic_segments)},
         ],
-        temperature=0.1,
-        max_tokens=2048,
+        temperature=config.temperature,
+        max_tokens=config.output_budget,
         **config.reasoning_options,
     )
     try:

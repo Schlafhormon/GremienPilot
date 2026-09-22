@@ -65,7 +65,7 @@ def llm_gpu_slot(config):
         yield
 
 
-def unload_local_ollama(config, check_cancel=None):
+def unload_local_ollama(config, check_cancel=None, *, only_model=None, except_model=None):
     """Unload all runners on our local Ollama service and verify completion.
 
 Call only while holding gpu_slot. Refuse to load Whisper if Ollama cannot
@@ -96,6 +96,14 @@ confirm the handover, including after a timed-out inference request.
             entries = payload.get("models") if isinstance(payload, dict) else None
             if not isinstance(entries, list):
                 raise GPUResourceError("Ollama liefert keinen gueltigen Modellstatus.")
+            if any(not isinstance(entry, dict) or not isinstance(entry.get('model') or entry.get('name'), str)
+                   or not (entry.get('model') or entry.get('name')) for entry in entries):
+                raise GPUResourceError("Ollama liefert einen ungueltigen Modellnamen.")
+            normalize = lambda name: name if ':' in name else name + ':latest'
+            if only_model:
+                entries = [e for e in entries if normalize(e.get('model') or e.get('name', '')) == normalize(only_model)]
+            if except_model:
+                entries = [e for e in entries if normalize(e.get('model') or e.get('name', '')) != normalize(except_model)]
             if not entries:
                 return
             for entry in entries:
@@ -116,3 +124,8 @@ confirm the handover, including after a timed-out inference request.
             "Ollama-Speicherfreigabe konnte nicht bestaetigt werden; "
             "Transkriptionsmodelle wurden nicht geladen."
         ) from exc
+
+
+def unload_ollama_model(config):
+    """Release only this task's runner, including after a failed/late request."""
+    unload_local_ollama(config, only_model=config.model)

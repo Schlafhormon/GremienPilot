@@ -54,6 +54,7 @@ from summarize import (
 from extract_tops import extract_agenda_data_from_pdf
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
+from agenda_model import AgendaModelSettings, diagnostics as agenda_model_diagnostics, save_settings as save_agenda_model_settings
 from export_protocol import (
     ProtocolAppendix,
     ProtocolMetadata,
@@ -606,6 +607,20 @@ def append_pipeline_warning(pipeline_id: str, message: str) -> None:
 def safe_exception_label(exc: Exception) -> str:
     """Return a non-content-bearing exception label for logs and review warnings."""
     return exc.__class__.__name__
+
+
+class PipelineTranscriptionError(RuntimeError):
+    """Public message derived from known failure categories, never raw content."""
+
+    def __init__(self, detail: str | None):
+        message = "Transkription fehlgeschlagen. Details stehen im Backend-Protokoll."
+        if "CERTIFICATE_VERIFY_FAILED" in (detail or ""):
+            message = (
+                "Transkriptionsmodell konnte nicht geladen werden: "
+                "HTTPS-Zertifikatsprüfung fehlgeschlagen. "
+                "Vertrauenswürdige Zertifikate im Backend prüfen."
+            )
+        super().__init__(message)
 
 
 def is_pipeline_cancelled(pipeline_id: str) -> bool:
@@ -2235,6 +2250,14 @@ def transcript_utterances(transcript: list[dict[str, Any]]) -> list[TranscriptUt
     ]
 
 
+def attach_agenda_input_references(usage, transcript):
+    if usage and usage.provenance.get('task') == 'agenda':
+        usage.provenance['input_references'] = [
+            {'index': i, 'line_id': line.get('line_id'), 'start': line.get('start'), 'end': line.get('end'),
+             'segments': (line.get('timing') or {}).get('segments', [])}
+            for i, line in enumerate(transcript)]
+
+
 def _normalized_summary_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
@@ -2925,12 +2948,18 @@ def detect_pipeline_agenda(
                 model=model,
                 system_prompt=system_prompt,
                 use_llm=options.get("agenda_use_llm"),
+                cache_namespace=options.get('agenda_cache_namespace', ''),
             )
         usage = result.llm
+        attach_agenda_input_references(usage, transcript)
         warnings = usage.warnings if usage else []
         detection_details = {"llm": asdict(usage) if usage else None, "warnings": warnings}
         for warning in warnings:
             append_pipeline_warning(pipeline_id, warning)
+        if usage and usage.provenance.get('task') == 'agenda' and usage.status == 'failed':
+            return result.tops, [None] * len(transcript), {
+                **detection_details, 'strategy': 'separate_model_failed', 'segments': [], 'uncertain_count': 0,
+            }, pdf_metadata
         if result.tops and result.assignments:
             return result.tops, result.assignments, {
                 **detection_details,
@@ -3171,7 +3200,7 @@ def run_pipeline_job(
                 if transcription_job
                 else "Transkriptionsjob nicht gefunden"
             )
-            raise RuntimeError(error or "Transkription fehlgeschlagen")
+            raise PipelineTranscriptionError(error)
 
         transcript = [
             line_to_dict(line) for line in (transcription_job.get("transcript") or [])
@@ -3316,7 +3345,7 @@ def run_pipeline_job(
         save_pipeline_state(
             pipeline_id,
             status=PIPELINE_STATUS_FAILED,
-            error=safe_exception_label(exc),
+            error=str(exc) if isinstance(exc, PipelineTranscriptionError) else safe_exception_label(exc),
         )
     finally:
         if pdf_path:
@@ -3396,6 +3425,17 @@ async def speaker_embedding_diagnostics_endpoint(session_id: Optional[str] = Non
     if session_id is not None and load_session(session_id) is None:
         raise HTTPException(status_code=404, detail="Session nicht gefunden")
     return speaker_embedding_diagnostics(session_id=session_id)
+
+
+@app.get('/api/settings/agenda-model')
+def get_agenda_model_settings():
+    return agenda_model_diagnostics()
+
+
+@app.put('/api/settings/agenda-model')
+def put_agenda_model_settings(settings: AgendaModelSettings):
+    save_agenda_model_settings(settings)
+    return agenda_model_diagnostics()
 
 
 @app.get("/api/llm/diagnostics", response_model=LLMDiagnosticsResponse)
@@ -4700,11 +4740,13 @@ def agenda_detection_endpoint(request: AgendaDetectionRequest):
             model=request.model,
             system_prompt=request.system_prompt,
             use_llm=request.use_llm,
+            cache_namespace=str(uuid.uuid4()) if request.fresh else request.cache_namespace,
         )
 
     if result.llm and request.top_ids:
         for identity in result.llm.provenance.get('identities', []):
             identity['top_uid'] = request.top_ids[identity['top_index']]
+    attach_agenda_input_references(result.llm, split_transcript)
     return AgendaDetectionResponse(
         llm=asdict(result.llm) if result.llm else None,
         warnings=result.llm.warnings if result.llm else [],

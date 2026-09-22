@@ -159,6 +159,11 @@ def transcription_model_session(models, progress_callback=None):
     with gpu_slot(check_cancel):
         from summarize import get_llm_config
         unload_local_ollama(get_llm_config(), check_cancel)
+        from agenda_model import load_settings, resolve_config
+        if load_settings().enabled:
+            top_config = resolve_config()
+            if top_config.base_url != get_llm_config().base_url:
+                unload_local_ollama(top_config, check_cancel)
         try:
             # The holder stays stable for queued jobs and diagnostic endpoints.
             # Do not retain a second container with references to the GPU models.

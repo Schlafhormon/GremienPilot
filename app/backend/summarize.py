@@ -29,7 +29,7 @@ from llm_transport import complete, fits, structured_output_budget, ContextBudge
 LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DOCKER_OLLAMA_BASE_URL = "http://ollama:11434/v1"
 LOCAL_LLM_HOSTS = {"localhost", "127.0.0.1", "::1"}
-INTERNAL_LLM_HOSTS = {"ollama"}
+INTERNAL_LLM_HOSTS = {"ollama", "ollama-agenda"}
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
@@ -111,6 +111,17 @@ class LLMConfig:
     timeout_seconds: float
     base_url_source: str
     reasoning_effort: str | None = None
+    # Immutable request-local overrides. Summary/PDF defaults remain unchanged.
+    context_budget: int | None = None
+    cpu_threads: int | None = None
+    output_budget: int = 2048
+    timeline_output_budget: int = 4096
+    temperature: float = 0.1
+    seed: int | None = None
+    task: str | None = None
+    tokenizer_json: str | None = None
+    tokenizer_sha256: str | None = None
+    tokenizer_model_digest: str | None = None
 
     @property
     def reasoning_options(self) -> dict[str, str]:

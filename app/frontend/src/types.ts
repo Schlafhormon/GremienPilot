@@ -348,7 +348,8 @@ export interface AgendaDetectionRequest {
 }
 
 export interface AgendaLLMUsage {
-  provenance?: { model?: string; digest?: string; cache_namespace?: string; prompt_version?: string };
+  provenance?: { model?: string; digest?: string; cache_namespace?: string; prompt_version?: string;
+    context_tokens?: number; timeline_identity?: string };
   enabled: boolean;
   source: "server_default" | "request";
   timeout_seconds: number;
@@ -506,4 +507,26 @@ export interface TopColor {
   border: string;
   text: string;
   dot: string;
+}
+export interface AgendaModelSettings {
+  enabled: boolean;
+  model: string;
+  context_tokens: number;
+  output_tokens: number;
+  timeline_output_tokens: number;
+  timeout_seconds: number;
+  cpu_threads: number;
+  temperature: number;
+  seed: number | null;
+  thinking: boolean;
+}
+
+export interface AgendaModelDiagnostics {
+  settings: AgendaModelSettings;
+  effective_model: string;
+  summary_model: string;
+  available: boolean | null;
+  digest: string | null;
+  message: string;
+  last_error: { model: string; message: string } | null;
 }

@@ -949,6 +949,13 @@ export default function AssignmentStep({
             {' '}Die fachliche Zuordnung bleibt prüfpflichtig.
           </p>
         )}
+        {agendaDetection?.llm?.provenance?.model && (
+          <p className="text-sm text-gray-600">
+            Modell dieses Ergebnisses: {agendaDetection.llm.provenance.model}
+            {agendaDetection.llm.provenance.context_tokens && ` · Kontextbudget: ${agendaDetection.llm.provenance.context_tokens} Tokens`}
+            {agendaDetection.llm.provenance.timeline_identity && ' · Mit belegtem Themenverlauf (unbestätigte Modellhypothesen)'}
+          </p>
+        )}
         {!agendaDetectionStale && Boolean(agendaDetection?.llm?.gaps?.length) && (
           <details className="mb-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
             <summary>Gründe für unzugeordnete Zeilen</summary>

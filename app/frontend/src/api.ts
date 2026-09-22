@@ -3,6 +3,8 @@
  */
 
 import type {
+  AgendaModelSettings,
+  AgendaModelDiagnostics,
   AgendaDetectionRequest,
   AgendaDetectionResponse,
   AssignmentSuggestionsResponse,
@@ -38,6 +40,20 @@ export class SessionConflictError extends Error {
 }
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
+
+export async function getAgendaModelSettings(): Promise<AgendaModelDiagnostics> {
+  const response = await fetch(`${API_BASE}/api/settings/agenda-model`);
+  if (!response.ok) throw await readApiError(response, 'TOP-Modellstatus konnte nicht geladen werden.');
+  return response.json();
+}
+
+export async function saveAgendaModelSettings(settings: AgendaModelSettings): Promise<AgendaModelDiagnostics> {
+  const response = await fetch(`${API_BASE}/api/settings/agenda-model`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
+  });
+  if (!response.ok) throw await readApiError(response, 'TOP-Einstellungen ungültig oder nicht gespeichert.');
+  return response.json();
+}
 const configuredClientLlmTextChars = Number(
   import.meta.env.VITE_MAX_CLIENT_LLM_TEXT_CHARS
 );

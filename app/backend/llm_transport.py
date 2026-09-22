@@ -5,6 +5,7 @@ import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from functools import lru_cache
 from gpu_resources import llm_gpu_slot
 
 
@@ -12,21 +13,42 @@ class ContextBudgetError(ValueError):
     pass
 
 
-def context_tokens():
-    value = int(os.environ.get('LLM_CONTEXT_TOKENS', '16384'))
+def context_tokens(config=None):
+    value = getattr(config, 'context_budget', None) or int(os.environ.get('LLM_CONTEXT_TOKENS', '16384'))
     if value < 4096:
         raise ValueError('LLM_CONTEXT_TOKENS must be at least 4096')
     return value
 
 
-def input_bound(messages):
+@lru_cache(maxsize=2)
+def _tokenizer(path, digest):
+    from tokenizers import Tokenizer
+    if hashlib.sha256(Path(path).read_bytes()).hexdigest() != digest:
+        raise ContextBudgetError('Tokenizer checksum changed')
+    return Tokenizer.from_file(path)
+
+
+def content_tokens(messages, config):
+    tokenizer = _tokenizer(config.tokenizer_json, config.tokenizer_sha256)
+    return sum(len(tokenizer.encode(m['content'], add_special_tokens=False).ids) for m in messages)
+
+
+def token_count_method(config):
+    return 'local_model_tokenizer_with_reserve' if getattr(config, 'tokenizer_json', None) else 'conservative_utf8_bytes'
+
+
+def input_bound(messages, response_format=None, config=None):
     # Byte-level tokenizer upper bound, plus chat template/special-token reserve.
     # Deliberately conservative; no characters/token average for German text.
-    return 512 + sum(len(m['content'].encode('utf-8')) + 32 for m in messages)
+    if getattr(config, 'tokenizer_json', None):
+        schema_reserve = content_tokens([{'content': json.dumps(response_format, ensure_ascii=False)}], config) if response_format else 0
+        return 512 + content_tokens(messages, config) + 32 * len(messages) + schema_reserve
+    schema_reserve = len(json.dumps(response_format, ensure_ascii=False).encode('utf-8')) if response_format else 0
+    return 512 + sum(len(m['content'].encode('utf-8')) + 32 for m in messages) + schema_reserve
 
 
-def fits(messages, output_tokens):
-    return input_bound(messages) + output_tokens <= context_tokens()
+def fits(messages, output_tokens, config=None, response_format=None):
+    return input_bound(messages, response_format, config) + output_tokens <= context_tokens(config)
 
 
 def structured_output_budget(config, maximum, think_override=None):
@@ -35,12 +57,19 @@ def structured_output_budget(config, maximum, think_override=None):
     return maximum * (2 if native and thinking else 1)
 
 
-_INFERENCE_LOCK = threading.Lock()
+_INFERENCE_LOCK = threading.RLock()
 
 
 def complete(client, config, **kwargs):
     # One backend process: PDF, agenda, and summary workers share the same slot.
     with _INFERENCE_LOCK, llm_gpu_slot(config):
+        if getattr(config, 'task', None) == 'agenda':
+            from gpu_resources import unload_local_ollama
+            from summarize import get_llm_config
+            primary = get_llm_config()
+            if primary.base_url != config.base_url:
+                unload_local_ollama(primary)
+            unload_local_ollama(config, except_model=config.model)
         return _complete(client, config, **kwargs)
 
 
@@ -55,7 +84,7 @@ def _verify_native_context(config, model):
     if not loaded or not isinstance(loaded[0].get('context_length'), int):
         raise ContextBudgetError('Cannot verify effective Ollama context')
     actual = loaded[0]['context_length']
-    if actual < context_tokens():
+    if actual < context_tokens(config):
         raise ContextBudgetError('Ollama context smaller than requested')
     return actual
 
@@ -66,7 +95,8 @@ def _complete(client, config, **kwargs):
         raise ValueError('ollama_think must be a boolean')
     messages = kwargs['messages']
     maximum = kwargs['max_tokens']
-    if not fits(messages, maximum):
+    schema_budget = kwargs.get('response_format') if getattr(config, 'task', None) == 'agenda' else None
+    if not fits(messages, maximum, config, schema_budget):
         raise ContextBudgetError('Input plus output exceeds configured context budget')
     native = os.environ.get('LLM_OLLAMA_NATIVE', 'true' if config.uses_ollama else 'false').lower() == 'true'
     if not native:
@@ -78,13 +108,17 @@ def _complete(client, config, **kwargs):
     payload = {
         'model': kwargs['model'], 'messages': messages, 'stream': False,
         'truncate': False, 'shift': False,
-        'options': {'num_ctx': context_tokens(), 'num_predict': maximum,
-                    'num_thread': int(os.environ.get('LLM_CPU_THREADS', '16')),
+        'options': {'num_ctx': context_tokens(config), 'num_predict': maximum,
+                    'num_thread': getattr(config, 'cpu_threads', None) or int(os.environ.get('LLM_CPU_THREADS', '16')),
                     'temperature': kwargs.get('temperature', 0.1)},
     }
+    if getattr(config, 'seed', None) is not None:
+        payload['options']['seed'] = config.seed
     effort = kwargs.get('reasoning_effort')
     if effort is not None:
         payload['think'] = False if effort == 'none' else effort
+    if getattr(config, 'task', None) == 'agenda':
+        payload['think'] = config.reasoning_effort != 'none'
     if think_override is not None:
         payload['think'] = think_override
     response_format = kwargs.get('response_format', {})
@@ -96,7 +130,7 @@ def _complete(client, config, **kwargs):
     # thinking. num_predict bounds each phase, not their combined generation.
     passes = 2 if payload.get('format') and payload.get('think', True) is not False else 1
     reserved_output = maximum * passes
-    if not fits(messages, reserved_output):
+    if not fits(messages, reserved_output, config, schema_budget):
         raise ContextBudgetError('Input plus all provider generation phases exceeds context budget')
     response = httpx.post(config.base_url.removesuffix('/v1') + '/api/chat',
                           json=payload, timeout=kwargs.get('timeout', config.timeout_seconds),
@@ -110,9 +144,10 @@ def _complete(client, config, **kwargs):
         import time
         path = Path(audit_dir)
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        record = {'request': payload, 'response': data, 'input_token_bound': input_bound(messages),
+        record = {'request': payload, 'response': data, 'input_token_bound': input_bound(messages, schema_budget, config),
                   'reserved_output_tokens': reserved_output, 'max_generation_passes': passes,
-                  'verified_context_tokens': actual_context}
+                  'verified_context_tokens': actual_context, 'task': getattr(config, 'task', None),
+                  'token_count_method': token_count_method(config), 'tokenizer_sha256': getattr(config, 'tokenizer_sha256', None)}
         target = path / (str(time.time_ns()) + '.json')
         with target.open('x', encoding='utf-8') as handle:
             os.chmod(target, 0o600)
@@ -121,10 +156,14 @@ def _complete(client, config, **kwargs):
         raise ContextBudgetError('LLM output incomplete')
     count = data.get('prompt_eval_count')
     generated = data.get('eval_count', 0)
-    if (not isinstance(count, int) or count > input_bound(messages) or count + reserved_output > context_tokens()
+    if (not isinstance(count, int) or count > input_bound(messages, schema_budget, config) or count + reserved_output > context_tokens(config)
             or not isinstance(generated, int) or generated > reserved_output):
         raise ContextBudgetError('Unexpected provider context usage')
-    return SimpleNamespace(choices=[SimpleNamespace(
+    if getattr(config, 'tokenizer_json', None) and count < content_tokens(messages, config) - 64:
+        raise ContextBudgetError('Provider token count below original input; possible truncation/tokenizer mismatch')
+    return SimpleNamespace(provider_usage={k: data.get(k) for k in (
+        'model', 'prompt_eval_count', 'eval_count', 'load_duration', 'total_duration',
+        'prompt_eval_duration', 'eval_duration', 'done_reason')}, choices=[SimpleNamespace(
         message=SimpleNamespace(content=data['message'].get('content', '')), finish_reason='stop')])
 
 
@@ -174,5 +213,5 @@ def model_fingerprint(config):
 
 def cache_key(config, messages, purpose, provenance=None):
     return json.dumps([purpose, config.base_url, config.model, config.reasoning_effort,
-                       context_tokens(), messages] + ([provenance] if provenance is not None else []),
+                       context_tokens(config), messages] + ([provenance] if provenance is not None else []),
                       ensure_ascii=False, sort_keys=True)

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import SpeakerProfileManager from './SpeakerProfileManager';
+import AgendaModelPanel from './AgendaModelPanel';
 
 export interface LLMSettings {
   model: string;
@@ -106,6 +107,7 @@ export default function LLMSettingsPanel({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <AgendaModelPanel />
           {/* System Prompt */}
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -141,7 +143,7 @@ export default function LLMSettingsPanel({
         {/* Footer */}
         <div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
           <p className="text-xs text-gray-500 text-center">
-            Einstellungen werden automatisch gespeichert
+            Der Zusammenfassungs-Prompt wird automatisch gespeichert. TOP-Einstellungen bitte separat speichern.
           </p>
         </div>
       </div>
