@@ -80,6 +80,8 @@ def version_snapshot():
     files = ("summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_detection.py",
              "extract_tops.py", "llm_transport.py", "main.py")
     policy_keys = (
+        "PDF_RENDER_DPI", "PDF_MAX_PAGE_PIXELS", "PDF_MAX_PAGES", "PDF_OUTPUT_TOKENS",
+        "PDF_MODEL_ATTEMPTS", "PDF_REVIEW_ROUNDS",
         "LLM_CHUNK_CHARS", "LLM_STRUCTURED_FALLBACK", "LLM_REPAIR_SPLIT_DEPTH",
         "LLM_SUMMARY_FACT_REVIEW_MAX_CALLS", "LLM_SUMMARY_FACT_REVIEW_MAX_TOKENS",
         "LLM_SUMMARY_FACT_REVIEW_THINK", "LLM_SUMMARY_GROUNDING_MAX_CALLS", "LLM_SUMMARY_GROUNDING_THINK",
@@ -169,6 +171,13 @@ def progress(value):
         with persistence.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             fence(db)
+            if 'elapsed_seconds' in value:
+                row = db.execute('SELECT progress FROM durable_jobs WHERE job_id=?', (ctx.job_id,)).fetchone()
+                previous = json.loads(row[0]) if row and row[0] else {}
+                phase = previous.get('pdf_phase', previous.get('phase', ''))
+                if phase.startswith('pdf_') and phase != 'pdf_verified':
+                    value = {**{k: previous[k] for k in ('page', 'total_pages', 'round') if k in previous},
+                             **value, 'pdf_phase': phase}
             db.execute("UPDATE durable_jobs SET progress=?,updated_at=? WHERE job_id=?",
                        (json.dumps(value), time.time(), ctx.job_id))
 
@@ -318,7 +327,7 @@ class Manager:
             while cause.__cause__ or cause.__context__:
                 cause = cause.__cause__ or cause.__context__
             state = "retry_wait" if retryable(cause) and job['attempt'] < self.max_attempts else "failed"
-            error = type(exc).__name__  # Never persist provider bodies/secrets.
+            error = getattr(exc, "public_message", type(exc).__name__)  # Never persist provider bodies/secrets.
         finally:
             done.set()
             heart.join()

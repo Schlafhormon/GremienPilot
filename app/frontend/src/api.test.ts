@@ -166,6 +166,7 @@ describe('api session client', () => {
       json: () =>
         Promise.resolve({
           tops: ['Begruessung', 'Haushalt'],
+          processing_complete: true, review_required: false,
           metadata: {
             committee: 'Hauptausschuss',
             date: '2026-06-30',
@@ -205,6 +206,7 @@ describe('api session client', () => {
         json: () =>
           Promise.resolve({
             tops: ['Begruessung'],
+            processing_complete: true, review_required: false,
             metadata: { committee: 'Hauptausschuss' },
           }),
       })
@@ -791,4 +793,20 @@ describe('durable model jobs', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ state: 'failed', result: { tops: ['partial'] } }) }));
     await expect(pollModelJob('j')).rejects.toThrow('failed');
   });
+});
+
+it('rejects enabled PDF detection without uploading or creating a job', async () => {
+  const fetchMock = vi.fn();
+  vi.stubGlobal('fetch', fetchMock);
+  await expect(startPipeline(new File(['audio'], 'meeting.mp3'), { autoDetectTopsFromPdf: true }))
+    .rejects.toThrow(/keine Einladung/);
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('does not accept an unverified PDF result', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+    tops: ['Rat'], metadata: {}, processing_complete: false, review_required: true,
+  }) }));
+  await expect(extractAgendaDataFromPDF(new File(['pdf'], 'agenda.pdf')))
+    .rejects.toThrow(/nicht vollständig geprüft/);
 });

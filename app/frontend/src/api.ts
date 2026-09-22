@@ -37,7 +37,7 @@ export class SessionConflictError extends Error {
   }
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+export const API_BASE = import.meta.env.VITE_API_URL || "";
 const configuredClientLlmTextChars = Number(
   import.meta.env.VITE_MAX_CLIENT_LLM_TEXT_CHARS
 );
@@ -140,6 +140,10 @@ export async function startPipeline(
 ): Promise<PipelineJob> {
   const formData = new FormData();
   formData.append("audio", audioFile);
+  if (options.autoDetectTopsFromPdf && !options.pdfFile && !options.tops?.length && !options.skipAgendaDetection) {
+    throw new Error('PDF-Erkennung ist aktiviert, aber keine Einladung hochgeladen. PDF auswählen oder PDF-Erkennung ausschalten.');
+  }
+  if (options.pdfSourceJobId) formData.append('pdf_source_job_id', options.pdfSourceJobId);
   if (options.pdfFile) {
     formData.append("pdf", options.pdfFile);
   }
@@ -598,9 +602,10 @@ export interface ModelJob {
   job_id: string;
   kind: string;
   state: 'queued' | 'running' | 'retry_wait' | 'review_required' | 'failed' | 'completed' | 'cancelled' | 'superseded';
-  progress?: { phase?: string; last_delta_at?: number | null; silence_seconds?: number };
+  progress?: { phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number };
   error?: string | null;
   result?: unknown;
+  documents?: { sha256: string; deleted_at?: number | null }[];
 }
 
 class ModelJobStatusError extends Error {
@@ -1008,13 +1013,14 @@ export async function extractAgendaDataFromPDF(
   }
 
   const started = await response.json();
+  if (started.job_id) localStorage.setItem('gremienpilot-pdf-job', started.job_id);
   const data = started.job_id
     ? await pollModelJob<PdfAgendaExtractionResult>(started.job_id, options?.signal, options?.onStatus)
     : started;
-  return {
-    tops: data.tops ?? [],
-    metadata: data.metadata ?? {},
-  };
+  if (data.processing_complete !== true || data.review_required) {
+    throw new Error('PDF-Auswertung ist nicht vollständig geprüft. Ergebnis wurde nicht übernommen.');
+  }
+  return { ...data, tops: data.tops ?? [], metadata: data.metadata ?? {} };
 }
 
 /**

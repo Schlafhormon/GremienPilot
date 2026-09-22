@@ -124,6 +124,7 @@ export interface PipelineStartOptions {
   sessionId?: string | null;
   tops?: string[];
   pdfFile?: File | null;
+  pdfSourceJobId?: string;
   autoDetectTopsFromPdf?: boolean;
   model?: string;
   /** Legacy alias for summarySystemPrompt; used only for summaries. */
@@ -380,7 +381,7 @@ export interface AgendaDetectionResponse {
 // Positional results are usable only against this exact, identity-bound input.
 export interface AgendaProposals {
   version: 1;
-  source: { tops: string[]; top_ids: string[]; transcript: TranscriptLine[] } | null;
+  source: { tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; pdf_extraction?: PdfAgendaExtractionResult | null } | null;
   result: AgendaDetectionResponse;
 }
 
@@ -398,6 +399,7 @@ export interface ExportMetadata {
 }
 
 export interface PdfAgendaMetadata {
+  time?: string;
   committee?: string;
   date?: string;
   location?: string;
@@ -407,6 +409,13 @@ export interface PdfAgendaMetadata {
 export interface PdfAgendaExtractionResult {
   tops: string[];
   metadata: PdfAgendaMetadata;
+  processing_complete?: boolean;
+  review_required?: boolean;
+  document?: { sha256: string; page_count: number; url?: string; job_id?: string };
+  items?: { id: string; number: string | null; title: string; kind: 'agenda' | 'heading';
+    section: string | null; parent_id: string | null; sources: { page: number; quote: string | null }[] }[];
+  pages?: { page: number; status: string; text_error?: string | null }[];
+  metadata_sources?: Record<string, { page: number; quote: string | null }[]>;
 }
 
 export type ExportFormat = 'txt' | 'docx' | 'pdf';
@@ -435,6 +444,7 @@ export interface UploadStepProps {
   setAudioFile: (file: File | null) => void;
   pdfFile: File | null;
   setPdfFile: (file: File | null) => void;
+  onPdfExtracted?: (result: PdfAgendaExtractionResult) => void;
   tops: string[];
   setTops: (tops: string[]) => void;
   llmSettings?: LLMSettings;

@@ -403,14 +403,8 @@ def test_cancel_pipeline_keeps_pdf_for_review(tmp_path, monkeypatch):
 
 def test_malformed_pdf_model_result_is_not_complete(monkeypatch):
     from extract_tops import parse_agenda_data_response
-    result = parse_agenda_data_response('not json', fallback_text='Tagesordnung\n1. Haushalt\n2. Anfragen')
-    assert result.processing_complete is False
-    assert result.review_required is True
-    monkeypatch.setattr(main, 'extract_agenda_data_from_pdf', lambda *args, **kwargs: result)
-    job = jobs.submit('pdf', {'path': 'simulated'})
-    with claimed(job) as (current, _):
-        _, state = main.run_durable_job(current)
-    assert state == 'failed'
+    with pytest.raises(ValueError):
+        parse_agenda_data_response('not json', fallback_text='Tagesordnung\n1. Haushalt\n2. Anfragen')
 
 
 def test_shared_document_reference_prevents_cleanup(tmp_path, monkeypatch):

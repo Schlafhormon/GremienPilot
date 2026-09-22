@@ -1,3 +1,4 @@
+import { API_BASE } from '../api';
 import type { ProcessingStepProps } from '../types';
 
 const PIPELINE_STAGES = [
@@ -127,6 +128,11 @@ export default function ProcessingStep({
         {stageStatus && (
           <div className={`mt-6 p-4 rounded-lg ${statusClass}`}>
             <p className="text-sm">{stageStatus}</p>
+            {pipeline?.execution?.progress?.page && <p className="text-sm">
+              PDF: Seite {pipeline.execution.progress.page}/{pipeline.execution.progress.total_pages} ·
+              {(pipeline.execution.progress.pdf_phase ?? pipeline.execution.progress.phase) === 'pdf_review' ? ' Nachprüfung' : ' Auswertung'}
+              {pipeline.execution.progress.round ? ` (Runde ${pipeline.execution.progress.round})` : ''}
+            </p>}
             {pipeline?.execution?.progress?.phase === 'loading' && <p className="text-sm">Modell lädt oder verarbeitet die Eingabe; noch keine Ausgabe empfangen.</p>}
             {pipeline?.execution?.progress?.last_delta_at != null && <p className="text-sm">Letzte Modellausgabe vor {Math.round(pipeline.execution.progress.silence_seconds ?? 0)} Sekunden.</p>}
           </div>
@@ -143,6 +149,12 @@ export default function ProcessingStep({
           </div>
         )}
 
+        {pipeline?.execution?.documents?.map(document => <p key={document.sha256} className="mt-3 text-sm">
+          <a className="text-blue-700 underline" target="_blank" rel="noreferrer"
+            href={`${API_BASE}/api/model-jobs/${pipeline.execution!.job_id}/documents/${document.sha256}`}>
+            Hochgeladene Originaleinladung prüfen
+          </a>
+        </p>)}
         {/* Tip */}
         <div className="mt-8 text-center text-sm text-gray-500">
           Sie können die Sitzung später fortsetzen.

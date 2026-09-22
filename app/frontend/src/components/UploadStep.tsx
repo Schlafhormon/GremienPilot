@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, type DragEvent, type ChangeEvent } from 'react';
-import type { UploadStepProps } from '../types';
-import { extractAgendaDataFromPDF } from '../api';
+import type { UploadStepProps, PdfAgendaExtractionResult } from '../types';
+import { extractAgendaDataFromPDF, pollModelJob, API_BASE, type ModelJob } from '../api';
+import PdfSources from './PdfSources';
 
 export default function UploadStep({
   onNext,
@@ -8,6 +9,7 @@ export default function UploadStep({
   setAudioFile,
   pdfFile,
   setPdfFile,
+  onPdfExtracted,
   tops,
   setTops,
   llmSettings,
@@ -23,8 +25,15 @@ export default function UploadStep({
   const currentInput = useRef('');
   currentInput.current = JSON.stringify({ tops, exportMetadata });
   const extractionAbort = useRef<AbortController | null>(null);
-  useEffect(() => () => extractionAbort.current?.abort(), []);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; }; // navigation must not cancel durable work
+  }, []);
   const [jobPhase, setJobPhase] = useState('');
+  const [pdfJob, setPdfJob] = useState<ModelJob | null>(null);
+  const [recovered, setRecovered] = useState<PdfAgendaExtractionResult | null>(null);
+  const [savedJobId] = useState(() => localStorage.getItem('gremienpilot-pdf-job'));
   const audioInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -125,13 +134,14 @@ export default function UploadStep({
       const extracted = await extractAgendaDataFromPDF(file, {
         model: llmSettings?.model,
         signal: controller.signal,
-        onStatus: job => setJobPhase(job.state === 'queued' ? 'Wartet auf Verarbeitung' : job.state === 'retry_wait' ? 'Vorübergehend gestört; erneuter Versuch folgt' : job.progress?.phase === 'loading' ? 'Modell lädt / wartet auf erste Ausgabe' : 'PDF wird verarbeitet'),
+        onStatus: job => { setPdfJob(job); setJobPhase(job.progress?.page ? `PDF: Seite ${job.progress.page}/${job.progress.total_pages} – ${(job.progress.pdf_phase ?? job.progress.phase) === 'pdf_review' ? 'Nachprüfung' : 'Auswertung'}` : job.state === 'queued' ? 'Wartet auf Verarbeitung' : job.state === 'retry_wait' ? 'Vorübergehend gestört; erneuter Versuch folgt' : job.progress?.phase === 'loading' ? 'Modell lädt / wartet auf erste Ausgabe' : 'PDF wird verarbeitet'); },
       });
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || !mounted.current) return;
       if (snapshot !== currentInput.current) {
         setExtractionError('Eingaben wurden geändert. PDF-Ergebnis wurde nicht übernommen.');
         return;
       }
+      onPdfExtracted?.(extracted);
       const extractedTops = extracted.tops.map((top) => top.trim()).filter(Boolean);
       applyDetectedMetadata(extracted.metadata ?? {});
 
@@ -237,7 +247,8 @@ export default function UploadStep({
     }
   };
 
-  const canProceed = !!audioFile;
+  const missingPdf = autoDetectTopsFromPdf && !pdfFile && !skipAgendaDetection && !tops.some(top => top.trim());
+  const canProceed = !!audioFile && !missingPdf && !isExtractingTops;
   const validTopCount = tops.filter((top) => top.trim() !== '').length;
   const hasMetadata =
     Boolean(exportMetadata.committee.trim()) ||
@@ -248,9 +259,9 @@ export default function UploadStep({
     ? 'Gesamtes Gespräch ohne TOP-Zuordnung'
     : validTopCount > 0
       ? `${validTopCount} manuell vorbereitete TOPs`
-      : pdfFile && autoDetectTopsFromPdf
+      : pdfFile
         ? 'TOPs aus PDF in der Pipeline erkennen'
-        : 'TOPs automatisch aus dem Transkript erkennen';
+        : missingPdf ? 'PDF-Erkennung aktiviert: Einladung fehlt' : 'TOPs automatisch aus dem Transkript erkennen';
   const shouldShowManualTops =
     showManualTops ||
     validTopCount > 0 ||
@@ -259,6 +270,30 @@ export default function UploadStep({
 
   return (
     <div className="space-y-6">
+      {missingPdf && <p role="status">Bitte Einladung hochladen oder „TOPs automatisch aus PDF erkennen“ ausschalten, um das Transkript zu verwenden.</p>}
+      {savedJobId && <button type="button" onClick={async () => {
+        const controller = new AbortController();
+        extractionAbort.current = controller;
+        setIsExtractingTops(true);
+        setExtractionError(null);
+        try {
+          const result = await pollModelJob<PdfAgendaExtractionResult>(savedJobId, controller.signal,
+            job => { setPdfJob(job); setJobPhase(`Gespeicherter PDF-Job: ${job.state}`); });
+          if (!result.processing_complete || result.review_required) throw new Error('PDF-Ergebnis benötigt weitere Prüfung.');
+          if (mounted.current) setRecovered(result);
+        } catch (error) { setExtractionError(error instanceof Error ? error.message : 'PDF-Job nicht verfügbar'); }
+        finally { setIsExtractingTops(false); }
+      }}>Gespeicherte PDF-Auswertung wieder öffnen</button>}
+      {pdfJob?.documents?.map(document => <p key={document.sha256}>
+        <a href={`${API_BASE}/api/model-jobs/${pdfJob.job_id}/documents/${document.sha256}`}
+          target="_blank" rel="noreferrer" className="text-blue-700 underline">Hochgeladene Originaleinladung prüfen</a>
+      </p>)}
+      <PdfSources result={recovered} />
+      {recovered && <button type="button" onClick={() => {
+        setTops(recovered.tops); applyDetectedMetadata(recovered.metadata);
+        setAutoDetectTopsFromPdf(false); setSkipAgendaDetection(false);
+        onPdfExtracted?.(recovered); setRecovered(null);
+      }}>Geprüfte PDF-TOPs übernehmen</button>}
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>

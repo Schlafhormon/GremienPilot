@@ -132,6 +132,7 @@ async function uploadAndStart(user = userEvent.setup()) {
   const { container } = render(<App />);
   const input = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
   await user.upload(input!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+  await user.click(screen.getByRole('checkbox', { name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i }));
   await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
   return { container };
 }

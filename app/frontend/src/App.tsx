@@ -2,6 +2,7 @@ import { mergeSummarySession } from './summarySync';
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import Layout from "./components/Layout";
 import StepIndicator from "./components/StepIndicator";
+import PdfSources from "./components/PdfSources";
 import UploadStep from "./components/UploadStep";
 import ProcessingStep from "./components/ProcessingStep";
 import AssignmentStep from "./components/AssignmentStep";
@@ -28,6 +29,7 @@ import {
   SessionConflictError,
 } from "./api";
 import type {
+  PdfAgendaExtractionResult,
   AgendaDetectionResponse,
   AgendaProposals,
   ExportMetadata,
@@ -373,6 +375,7 @@ export default function App() {
   // Data state
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfExtraction, setPdfExtraction] = useState<PdfAgendaExtractionResult | null>(null);
   const [tops, setTops] = useState<string[]>(EMPTY_TOPS);
   const [topIds, setTopIds] = useState<string[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
@@ -610,6 +613,7 @@ export default function App() {
     setAudioUrl(withApiBase(session.audio_url));
     setAudioFile(null);
     setPdfFile(null);
+    setPdfExtraction(null);
     setAutoDetectTopsFromPdf(false);
     setPipelineId((session as SessionDraft).pipeline_id ?? null);
     setPipelineJob(null);
@@ -707,6 +711,7 @@ export default function App() {
     setCurrentStep(1);
     setAudioFile(null);
     setPdfFile(null);
+    setPdfExtraction(null);
     setTops(EMPTY_TOPS);
     setTopIds([]);
     setTranscript([]);
@@ -1164,7 +1169,10 @@ export default function App() {
         ? []
         : tops.map((top) => top.trim()).filter(Boolean);
       const shouldAutoDetectTopsFromPdf =
-        autoDetectTopsFromPdf && submittedTops.length === 0;
+        (autoDetectTopsFromPdf || Boolean(pdfFile)) && submittedTops.length === 0;
+      if (shouldAutoDetectTopsFromPdf && !skipAgendaDetection && !pdfFile) {
+        throw new Error('PDF-Erkennung ist aktiviert. Bitte Einladung hochladen oder PDF-Erkennung ausschalten.');
+      }
       const preparedSession = await saveSession(
         buildSessionPayload({
           current_step: 1,
@@ -1189,6 +1197,7 @@ export default function App() {
         sessionId: activeSessionId,
         tops: submittedTops,
         pdfFile,
+        pdfSourceJobId: pdfExtraction?.document?.job_id,
         autoDetectTopsFromPdf: shouldAutoDetectTopsFromPdf,
         model: llmSettings.model,
         summarySystemPrompt: llmSettings.systemPrompt,
@@ -1400,7 +1409,7 @@ export default function App() {
         setAgendaDetectionError("TOPs oder Transkript wurden während der Erkennung geändert. Bitte erneut berechnen");
         return;
       }
-      const proposals: AgendaProposals = { version: 1, source, result };
+      const proposals: AgendaProposals = { version: 1, source: { ...source, pdf_extraction: agendaProposals?.source?.pdf_extraction ?? pdfExtraction }, result };
       if (!proposalsAreValid(proposals, tops, topIds, transcript)) {
         throw new Error("Das Ergebnis passt nicht zum aktuellen Transkript oder zur Tagesordnung");
       }
@@ -1582,6 +1591,8 @@ export default function App() {
         </div>
       )}
 
+      {!isProcessing && <PdfSources result={agendaProposals?.source?.pdf_extraction ?? pdfExtraction} />}
+
       {!isProcessing && <StepIndicator currentStep={currentStep} />}
 
       {!isProcessing && pipelineNotice && (
@@ -1629,7 +1640,8 @@ export default function App() {
           audioFile={audioFile}
           setAudioFile={setAudioFile}
           pdfFile={pdfFile}
-          setPdfFile={setPdfFile}
+          setPdfFile={(file) => { setPdfFile(file); setPdfExtraction(null); }}
+          onPdfExtracted={setPdfExtraction}
           tops={tops}
           setTops={setTops}
           llmSettings={llmSettings}

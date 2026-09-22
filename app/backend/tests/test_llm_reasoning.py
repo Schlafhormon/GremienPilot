@@ -6,6 +6,7 @@ import pytest
 
 import agenda_detection
 import extract_tops
+from pdf_fixtures import agenda
 import summarize
 from assignment_suggestions import TranscriptUtterance
 
@@ -29,7 +30,7 @@ def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, ef
         fake_openai_module.content = SUMMARY
         summarize.summarize_segment("Haushalt", "MOD: Der Haushalt wurde beraten.")
     elif task.startswith("pdf"):
-        fake_openai_module.content = '{"tops": ["1. Haushalt"], "metadata": {}}' if task == "pdf_metadata" else "1. Haushalt"
+        fake_openai_module.content = json.dumps(agenda())
         extract = extract_tops.extract_agenda_data_from_text if task == "pdf_metadata" else extract_tops.extract_tops_from_text
         extract("Einladung: 1. Haushalt", system_prompt="/no_think\nFachlicher Kontext")
     else:
@@ -87,7 +88,7 @@ def test_reasoning_applies_to_summary_chunks_reduce_and_fallback(monkeypatch, fa
 def test_pdf_calls_honor_timeout_and_retry_configuration(monkeypatch, fake_openai_module, extract):
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "1800")
     monkeypatch.setattr(extract_tops, "LLM_MAX_RETRIES", 0)
-    fake_openai_module.content = '{"tops": ["1. Haushalt"], "metadata": {}}'
+    fake_openai_module.content = json.dumps(agenda())
     extract("1. Haushalt")
     client_options = fake_openai_module.instances[0].kwargs
     assert client_options["timeout"].read == 1800

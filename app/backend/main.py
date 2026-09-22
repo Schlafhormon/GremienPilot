@@ -31,7 +31,7 @@ from fastapi import (
     Request,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, StrictBool, model_serializer
 
@@ -915,6 +915,13 @@ class LLMDiagnosticsResponse(BaseModel):
 class ExtractTOPsResponse(BaseModel):
     tops: List[str]
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    processing_complete: bool = False
+    review_required: bool = True
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata_sources: Dict[str, Any] = Field(default_factory=dict)
+    document: Dict[str, Any] = Field(default_factory=dict)
+    pages: List[Dict[str, Any]] = Field(default_factory=list)
+    audits: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class AssignmentSuggestionsRequest(BaseModel):
@@ -2582,35 +2589,25 @@ def detect_pipeline_agenda(
             "uncertain_count": 0,
         }, pdf_metadata
 
-    if not agenda_tops and pdf_path and options.get("auto_detect_tops_from_pdf"):
-        try:
-            def extract_pdf():
-                extracted = extract_agenda_data_from_pdf(pdf_path, model=model,
-                    system_prompt=options.get("pdf_system_prompt"))
-                return {"tops": extracted.tops, "metadata": extracted.metadata.to_dict(),
-                    "processing_complete": getattr(extracted, "processing_complete", True),
-                    "review_required": getattr(extracted, "review_required", False)}
-            extracted = durable.checkpoint("pipeline:pdf", extract_pdf)
-            extracted_tops = extracted["tops"]
-            pdf_metadata = extracted["metadata"]
-            pdf_incomplete = not extracted["processing_complete"]
-            if extracted.get("review_required"):
-                append_pipeline_warning(pipeline_id, "PDF-Erkennung benötigt Nachprüfung; Original bleibt gespeichert.")
-            if extracted_tops:
-                agenda_tops = [top.strip() for top in extracted_tops if top.strip()]
-        except LLMCancelledError:
-            raise
-        except Exception as exc:
-            durable.raise_if_transient(exc)
-            if durable.CURRENT.get():
-                raise
-            append_pipeline_warning(
-                pipeline_id,
-                "TOP-Erkennung aus PDF fehlgeschlagen, nutze Fallback "
-                f"({safe_exception_label(exc)}).",
-            )
+    pdf_extraction = options.get("pdf_source_extraction")
+    if pdf_extraction:
+        pdf_metadata = pdf_extraction["metadata"]
+        if not agenda_tops:
+            agenda_tops = pdf_extraction["tops"]
+    if not agenda_tops and (pdf_path or options.get("auto_detect_tops_from_pdf")):
+        if not pdf_path or not Path(pdf_path).is_file():
+            raise ValueError("Vorgesehenes PDF fehlt; keine Ersatzagenda aus dem Transkript")
+        extracted = durable.checkpoint("pipeline:pdf:v2", lambda:
+            extract_agenda_data_from_pdf(pdf_path, model=model,
+                system_prompt=options.get("pdf_system_prompt")).to_dict())
+        if not extracted["processing_complete"] or extracted["review_required"] or not extracted["tops"]:
+            raise ValueError("PDF-Auswertung unvollständig; keine Ersatzagenda aus dem Transkript")
+        agenda_tops = extracted["tops"]
+        pdf_metadata = extracted["metadata"]
+        pdf_extraction = extracted
+        save_pipeline_state(pipeline_id, result_refs={"pdf_extraction": extracted})
 
-    detection_details: dict[str, Any] = {"pdf_incomplete": pdf_incomplete}
+    detection_details: dict[str, Any] = {"pdf_incomplete": pdf_incomplete, "pdf_extraction": pdf_extraction}
     try:
         utterances = transcript_utterances(transcript)
         if agenda_tops:
@@ -2633,7 +2630,7 @@ def detect_pipeline_agenda(
             )
         usage = result.llm
         warnings = usage.warnings if usage else []
-        detection_details = {"pdf_incomplete": pdf_incomplete, "llm": asdict(usage) if usage else None, "warnings": warnings}
+        detection_details = {"pdf_incomplete": pdf_incomplete, "pdf_extraction": pdf_extraction, "llm": asdict(usage) if usage else None, "warnings": warnings}
         for warning in warnings:
             append_pipeline_warning(pipeline_id, warning)
         if result.tops and result.assignments:
@@ -2656,6 +2653,7 @@ def detect_pipeline_agenda(
         if agenda_tops:
             return agenda_tops, [None] * len(transcript), {
                 "strategy": "known_agenda_failed", "segments": [], "uncertain_count": 0,
+                "pdf_extraction": pdf_extraction,
                 "warnings": [message], "llm": {
                     "enabled": True, "source": "pipeline", "status": "failed",
                     "timeout_seconds": 0, "attempted_calls": 0, "failed_calls": 0,
@@ -2936,13 +2934,18 @@ def _run_pipeline_job(
         transcript = split_transcript_for_agenda_detection(transcript)
         tops, assignments, agenda_info, pdf_metadata = durable.checkpoint("pipeline:agenda", lambda: detect_pipeline_agenda(
             pipeline_id, transcript, known_tops=known_tops, pdf_path=pdf_path, options=options))
-        top_ids = durable.checkpoint("pipeline:top_ids", lambda: [str(uuid.uuid4()) for _ in tops])
+        pdf_extraction = agenda_info.get("pdf_extraction")
+        exact_pdf_agenda = bool(pdf_extraction and tops == pdf_extraction["tops"])
+        pdf_ids = [item["id"] for item in (pdf_extraction or {}).get("items", []) if item["kind"] == "agenda"] if exact_pdf_agenda else []
+        if options.get("auto_detect_tops_from_pdf") and not known_tops and pdf_extraction and not exact_pdf_agenda:
+            raise ValueError("Transkriptzuordnung hat die geprüfte PDF-Agenda verändert")
+        top_ids = durable.checkpoint("pipeline:top_ids", lambda: pdf_ids or [str(uuid.uuid4()) for _ in tops])
         for identity in ((agenda_info.get('llm') or {}).get('provenance') or {}).get('identities', []):
             identity['top_uid'] = top_ids[identity['top_index']]
         # Freeze the exact detector input and result before manual editing begins.
         agenda_proposals = {
             "version": 1,
-            "source": {"tops": tops, "top_ids": top_ids, "transcript": transcript},
+            "source": {"tops": tops, "top_ids": top_ids, "transcript": transcript, **({"pdf_extraction": pdf_extraction} if pdf_extraction else {})},
             "result": {
                 **agenda_info, "tops": tops, "transcript": transcript,
                 "assignments": assignments,
@@ -3131,6 +3134,7 @@ async def start_pipeline(
     request: Request,
     audio: UploadFile = File(...),
     pdf: Optional[UploadFile] = File(None),
+    pdf_source_job_id: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
     tops: Optional[str] = Form(None),
     options: Optional[str] = Form(None),
@@ -3163,10 +3167,28 @@ async def start_pipeline(
         if not is_allowed_pdf_file(pdf.filename, pdf.content_type):
             raise HTTPException(status_code=400, detail="Nur PDF-Dateien sind erlaubt")
 
+    source_extraction = None
+    if pdf_source_job_id:
+        source_job = durable.load(pdf_source_job_id)
+        if not source_job or source_job['kind'] != 'pdf' or source_job['state'] != 'completed':
+            raise HTTPException(422, 'PDF-Quelljob ist nicht vollständig abgeschlossen')
+        source_extraction = source_job.get('result')
+        if not source_extraction or not source_extraction.get('processing_complete') or source_extraction.get('review_required'):
+            raise HTTPException(422, 'PDF-Quelljob ist nicht vollständig geprüft')
+        source_hash = (source_extraction.get('document') or {}).get('sha256')
+        if not source_hash or not source_extraction.get('items') or not source_extraction.get('audits') or not any(
+            doc['sha256'] == source_hash for doc in source_job.get('documents') or []
+        ):
+            raise HTTPException(422, 'PDF-Quelljob hat keine vollständige visuelle Quellenprüfung; neue Auswertung erforderlich')
+        for document in source_job.get('documents') or []:
+            if not Path(document['path']).is_file() or durable.document(document['path'])['sha256'] != document['sha256']:
+                raise HTTPException(409, 'PDF-Quelle fehlt oder wurde verändert')
+
     pipeline_id = str(uuid.uuid4())
     transcription_job_id = str(uuid.uuid4())
     effective_session_id = session_id or str(uuid.uuid4())
     parsed_options = parse_pipeline_options(options)
+    parsed_options.pop("pdf_source_extraction", None)  # only verified server-owned provenance
     if agenda_fresh:
         parsed_options['agenda_cache_namespace'] = str(uuid.uuid4())
     if agenda_use_llm is not None:
@@ -3187,13 +3209,22 @@ async def start_pipeline(
             # FastAPI normalizes empty optional form strings to None. Preserve
             # explicit resets so neither JSON options nor the legacy alias win.
             parsed_options[key] = ""
+    if source_extraction:
+        parsed_options["pdf_source_extraction"] = source_extraction
     parsed_options["skip_agenda_detection"] = skip_agenda_detection
     parsed_options["auto_detect_tops_from_pdf"] = auto_detect_tops_from_pdf
     known_tops = parse_pipeline_tops(tops)
+    if source_extraction and not known_tops:
+        known_tops = source_extraction['tops']
+    if pdf is not None and pdf.filename and not known_tops:
+        parsed_options["auto_detect_tops_from_pdf"] = True
     if skip_agenda_detection:
         known_tops = []
         pdf = None
         parsed_options["auto_detect_tops_from_pdf"] = False
+
+    if parsed_options["auto_detect_tops_from_pdf"] and not known_tops and not (pdf and pdf.filename):
+        raise HTTPException(422, "Automatische PDF-Erkennung benötigt eine hochgeladene Einladung")
 
     safe_audio_filename = normalize_upload_filename(
         audio.filename,
@@ -3215,6 +3246,8 @@ async def start_pipeline(
         pdf_destination = UPLOAD_DIR / f"{pipeline_id}-{safe_pdf_filename}"
         await save_upload_with_size_limit(pdf, pdf_destination)
         pdf_path = str(pdf_destination)
+        if source_extraction and durable.document(pdf_path)['sha256'] != source_extraction['document']['sha256']:
+            raise HTTPException(409, 'Hochgeladenes PDF stimmt nicht mit dem Quelljob überein')
 
     now = time.time()
     with JOB_LOCK:
@@ -4330,7 +4363,7 @@ async def extract_tops_endpoint(
             exc_info=True,
         )
         raise HTTPException(
-            status_code=500, detail=f"Fehler bei der TOP-Extraktion: {str(e)}"
+            status_code=500, detail="PDF-Auswertung fehlgeschlagen; Job und Quellen bleiben zur Prüfung gespeichert"
         )
 
 
@@ -4599,9 +4632,15 @@ def submit_legacy_job(kind, job_id):
     session = load_session(old.get("session_id")) if old.get("session_id") else None
     refs = _pipeline_refs(old) if kind == "pipeline" else old.get("refs") or {}
     pdf = refs.get("pdf_path")
+    documents = [durable.document(pdf)] if pdf and Path(pdf).exists() else []
+    source_id = (((refs.get('options') or {}).get('pdf_source_extraction') or {}).get('document') or {}).get('job_id')
+    if source_id:
+        source_job = durable.load(source_id)
+        if source_job:
+            documents.extend(doc for doc in source_job['documents'] if doc['path'] not in {d['path'] for d in documents})
     durable.submit(kind, {"legacy_snapshot": old, "session_snapshot": session,
         "session_revision": session.get("revision") if session else None}, job_id,
-        documents=[durable.document(pdf)] if pdf and Path(pdf).exists() else [])
+        documents=documents)
 
 
 def recover_legacy_jobs():
@@ -4654,10 +4693,8 @@ def run_durable_job(job):
         def extract():
             value = extract_agenda_data_from_pdf(payload['path'], model=payload.get('model'),
                                                 system_prompt=payload.get('system_prompt'))
-            return {"tops": value.tops, "metadata": value.metadata.to_dict(),
-                "processing_complete": getattr(value, "processing_complete", True),
-                "review_required": getattr(value, "review_required", False)}
-        result = durable.checkpoint('pdf:validated', extract)
+            return value.to_dict()
+        result = durable.checkpoint('pdf:validated:v2', extract)
         state = 'review_required' if result['review_required'] or not result['tops'] else 'completed'
         return result, state if result['processing_complete'] else 'failed'
     if job['kind'] == 'agenda':
@@ -4742,3 +4779,20 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8010)
+
+
+@app.get('/api/model-jobs/{job_id}/documents/{sha256}')
+async def model_job_document(job_id: str, sha256: str):
+    job = durable.load(job_id)
+    if job is None:
+        raise HTTPException(404, 'Job nicht gefunden')
+    document = next((doc for doc in job.get('documents') or [] if doc['sha256'] == sha256), None)
+    if document is None:
+        raise HTTPException(404, 'Dokument nicht gefunden')
+    path = Path(document['path'])
+    if document.get('deleted_at') or not path.is_file():
+        raise HTTPException(410, 'Quelldokument nicht mehr vorhanden')
+    if durable.document(path)['sha256'] != sha256:
+        raise HTTPException(409, 'Quelldokument wurde verändert')
+    return FileResponse(path, media_type='application/pdf', headers={
+        'Content-Disposition': 'inline; filename="Einladung.pdf"', 'Cache-Control': 'private, no-store'})

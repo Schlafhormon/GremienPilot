@@ -2,7 +2,6 @@ import pytest
 
 from agenda_labels import parse_agenda_label, reference_targets
 from assignment_suggestions import extract_agenda_number, references_top_number, suggest_assignments, TranscriptUtterance
-from extract_tops import parse_agenda_data_response, parse_tops_response, extract_tops_heuristically_from_text
 
 
 @pytest.mark.parametrize('prefix,number', [
@@ -12,11 +11,9 @@ from extract_tops import parse_agenda_data_response, parse_tops_response, extrac
 ])
 def test_lossless_standard_list_formats(prefix, number):
     text = f'{prefix} Schulbau'
-    assert parse_tops_response(text) == [text]
     parsed = parse_agenda_label(text)
     assert parsed.original_number == number
     assert parsed.title == 'Schulbau'
-    assert extract_tops_heuristically_from_text('Tagesordnung\n' + text) == [text]
 
 
 @pytest.mark.parametrize('text,key', [
@@ -57,30 +54,6 @@ def test_duplicate_number_requires_unambiguous_section():
     assert reference_targets('TOP 2 öffentlich', ['[Öffentlich] 2 A', '2 B']) == (True, {0, 1})
 
 
-def test_gaps_subpoints_and_short_legacy_json_items():
-    result = parse_agenda_data_response('''{"tops": ["2 Haushalt", "2.1 Bau", "2.2 Kita", "7 Anfragen", "Rat"]}''')
-    assert result.tops == ['2 Haushalt', '2.1 Bau', '2.2 Kita', '7 Anfragen', 'Rat']
-    assert [extract_agenda_number(top, i + 1) for i, top in enumerate(result.tops)] == ['2', '2.1', '2.2', '7', None]
-
-
-def test_structured_pdf_and_plain_fallback_keep_sections_and_hierarchy():
-    result = parse_agenda_data_response('''{"tops": [
-        {"number":"02.1", "title":"Schulbau", "section":"public"},
-        {"number":"02.1", "title":"Vergabe", "section":"nonpublic"},
-        {"number":null, "title":"Rat"}
-    ]}''')
-    assert result.tops == ['[Öffentlich] 02.1. Schulbau', '[Nichtöffentlich] 02.1. Vergabe', 'Rat']
-    pdf = 'Tagesordnung\nTOP I. Öffentlicher Teil\n2 Haushalt\n3.1 Schulbau\nFortsetzung\nTOP II. Nichtöffentlicher Teil\n2 Vergabe'
-    expected = ['[Öffentlich] 2 Haushalt', '[Öffentlich] 3.1 Schulbau Fortsetzung', '[Nichtöffentlich] 2 Vergabe']
-    assert parse_agenda_data_response('', fallback_text=pdf).tops == expected
-
-
-def test_pdf_title_recovery_never_uses_position_or_duplicate_title():
-    pdf = 'Tagesordnung\n2 Haushalt\n7 Anfragen\n9 Anfragen'
-    result = parse_agenda_data_response('{"tops":["Haushalt", "Anfragen", "Unbekannt"]}', pdf)
-    assert result.tops == ['2 Haushalt', 'Anfragen', 'Unbekannt']
-
-
 def test_only_exact_known_numbers_are_certain_even_with_keyword_overlap():
     transcript = [TranscriptUtterance('MOD', t) for t in [
         'Beginn', 'TOP 2.2 Schulbau', 'Diskussion', 'TOP sieben Anfragen', 'Ende',
@@ -99,41 +72,14 @@ def test_only_exact_known_numbers_are_certain_even_with_keyword_overlap():
 @pytest.mark.parametrize('text', ['2a Schulbau', '2/1 Schulbau', '2,1 Schulbau', '2 . 1 Schulbau', '2.1a Schulbau'])
 def test_unsupported_labels_are_preserved_without_a_partial_number(text):
     assert parse_agenda_label(text).original_number is None
-    assert parse_tops_response(text) == [text]
 
 
 @pytest.mark.parametrize('text', ['1.Titel', '2)Titel', '3.1.Titel', 'IV.Titel', 'a)Titel'])
 def test_legacy_lists_without_space_after_delimiter(text):
-    assert parse_tops_response(text) == [text]
     assert parse_agenda_label(text).title == 'Titel'
-
-
-def test_legacy_json_section_headings_are_propagated():
-    result = parse_agenda_data_response('''{"tops":["Öffentlicher Teil","2 Haushalt","Nichtöffentlicher Teil","2 Vergabe"]}''')
-    assert result.tops == ['[Öffentlich] 2 Haushalt', '[Nichtöffentlich] 2 Vergabe']
-
-
-def test_plain_model_response_recovers_missing_number_from_unique_pdf_title():
-    result = parse_agenda_data_response('Schulbau', 'Tagesordnung\n3.1 Schulbau')
-    assert result.tops == ['3.1 Schulbau']
-
-
-def test_structured_number_is_not_overridden_by_numeric_title():
-    result = parse_agenda_data_response('{"tops":[{"number":"7", "title":"2026 Haushalt"}]}')
-    assert result.tops == ['7. 2026 Haushalt']
-    assert parse_agenda_label(result.tops[0]).title == '2026 Haushalt'
-
-
-def test_pdf_title_recovery_does_not_overwrite_explicit_number_or_section():
-    result = parse_agenda_data_response('''{"tops":[
-        {"number":"2","title":"Anfragen","section":"public"},
-        {"number":"3","title":"Anfragen","section":"nonpublic"}
-    ]}''', 'Tagesordnung\nÖffentlicher Teil\n2 Anfragen')
-    assert result.tops == ['[Öffentlich] 2 Anfragen', '[Nichtöffentlich] 3. Anfragen']
 
 
 @pytest.mark.parametrize('spelling', ['nichtöffentlich', 'nicht öffentlich', 'nicht-öffentlich', 'nicht oeffentlich'])
 def test_negative_scope_is_not_mistaken_for_public_scope(spelling):
     tops = ['[Öffentlich] 2 Haushalt', '[Nichtöffentlich] 2 Vergabe']
     assert reference_targets(f'TOP 2 {spelling}', tops) == (True, {1})
-    assert parse_tops_response(f'{spelling}er Teil\n2 Vergabe') == [tops[1]]

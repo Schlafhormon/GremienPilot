@@ -12,6 +12,7 @@ import summarize
 import pytest
 import agenda_detection
 import extract_tops
+from pdf_fixtures import agenda, item, audit, pdf_bytes
 from conftest import FakeTranscriptionResult
 from speaker_recognition import LocalSpeakerEmbedding
 
@@ -57,7 +58,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
     ))
     # Only PDF decoding, transcription and the model transport are doubles.
     # Routing, prompt builders, parsing and persistence run as in production.
-    monkeypatch.setattr(extract_tops, "extract_text_from_pdf", lambda path: "Einladung zur Sitzung: Haushalt")
+    monkeypatch.setenv("LLM_IMAGE_TOKENS", "1024")
     data = {"model": "test-model", "system_prompt": frontend_summary_prompt, "agenda_use_llm": "true"}
     scoped = {
         "summary_system_prompt": "SUMMARY_ONLY: Sachliche Niederschrift.",
@@ -81,8 +82,8 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         data["tops"] = json.dumps(["Haushalt"])
     if agenda_source == "pdf":
         data["auto_detect_tops_from_pdf"] = "true"
-        files["pdf"] = ("agenda.pdf", b"%PDF-1.4", "application/pdf")
-        fake_openai_module.responses.append('{"tops": ["Haushalt"], "metadata": {}}')
+        files["pdf"] = ("agenda.pdf", pdf_bytes(), "application/pdf")
+        fake_openai_module.responses.extend(json.dumps(v) for v in [agenda(), agenda(), audit()])
     fake_openai_module.responses.extend([
         json.dumps({"tops": [{
             **({"top_id": "unspecified:unnumbered"} if agenda_source != "transcript" else {}),
@@ -100,13 +101,13 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
     calls = [call for instance in fake_openai_module.instances for call in instance.calls]
-    assert len(calls) == (3 if agenda_source == "pdf" else 2)
+    assert len(calls) == (5 if agenda_source == "pdf" else 2)
     from agenda_llm import PROMPT
     contracts = [agenda_detection.DEFAULT_AGENDA_DETECTION_PROMPT if agenda_source == "transcript" else PROMPT, summarize.DEFAULT_SYSTEM_PROMPT]
     prompt_keys = ["agenda_system_prompt", "summary_system_prompt"]
     if agenda_source == "pdf":
-        contracts.insert(0, extract_tops.DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT)
-        prompt_keys.insert(0, "pdf_system_prompt")
+        contracts[:0] = [extract_tops.DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT] * 2 + [extract_tops.AUDIT_PROMPT]
+        prompt_keys[:0] = ["pdf_system_prompt"] * 2 + ["audit"]
     for call, contract, key in zip(calls, contracts, prompt_keys):
         assert call["model"] == "test-model"
         assert [message["role"] for message in call["messages"]] == ["system", "user"]
@@ -122,7 +123,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
     assert result["session"]["tops"] == [expected_top]
     assert result["session"]["assignments"] == [0]
     proposals = result["session"]["agenda_proposals"]
-    assert proposals["source"] == {
+    assert {key: proposals["source"][key] for key in ("tops", "top_ids", "transcript")} == {
         key: result["session"][key] for key in ("tops", "top_ids", "transcript")
     }
     assert proposals["result"]["assignments"] == [0]
@@ -541,7 +542,7 @@ def test_extract_tops_endpoint_returns_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(
         main,
         "extract_agenda_data_from_pdf",
-        lambda pdf_path, model=None, system_prompt=None: SimpleNamespace(
+        lambda pdf_path, model=None, system_prompt=None: fake_pdf_result(
             tops=["Eröffnung", "Haushalt"],
             metadata=SimpleNamespace(
                 to_dict=lambda: {
@@ -1142,7 +1143,7 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
                 "system_prompt": system_prompt,
             }
         )
-        return SimpleNamespace(
+        return fake_pdf_result(
             tops=["TOP 1 Haushalt", "TOP 2 Schulbau"],
             metadata=SimpleNamespace(
                 to_dict=lambda: {
@@ -1229,7 +1230,7 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
 
     def fake_extract_agenda_data_from_pdf(pdf_path, model=None, system_prompt=None):
         extracted_calls.append(pdf_path)
-        return SimpleNamespace(
+        return fake_pdf_result(
             tops=["TOP I. Öffentlicher Teil", "01 Eröffnung", "02 Haushalt"],
             metadata=SimpleNamespace(to_dict=lambda: {"committee": "Nicht genutzt"}),
         )
@@ -1794,12 +1795,12 @@ def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path,
     for i, line in enumerate(['Tagesordnung', 'Öffentlicher Teil', '2 Haushalt', '2.1 Schulbau', '7 Anfragen', 'Nichtöffentlicher Teil', '2 Vergabe']):
         canvas.drawString(50, 750 - i * 25, line)
     canvas.save()
-    fake_openai_module.content = '''{"tops":[
-        {"number":"2","title":"Haushalt","section":"public"},
-        {"number":"2.1","title":"Schulbau","section":"public"},
-        {"number":"7","title":"Anfragen","section":"public"},
-        {"number":"2","title":"Vergabe","section":"nonpublic"}
-    ]}'''
+    monkeypatch.setenv('LLM_IMAGE_TOKENS', '1024')
+    value = agenda(items=[item('a', number='2', section='public'),
+        item('b', number='2.1', title='Schulbau', section='public', parent_id='a'),
+        item('c', number='7', title='Anfragen', section='public'),
+        item('d', number='2', title='Vergabe', section='nonpublic')])
+    fake_openai_module.responses = [json.dumps(v) for v in [value, value, audit()]]
     with TestClient(main.app) as client:
         response = client.post('/api/extract-tops', files={'pdf': ('agenda.pdf', pdf.getvalue(), 'application/pdf')})
         assert response.status_code == 200
@@ -1878,3 +1879,31 @@ def test_known_agenda_total_failure_is_persisted_as_incomplete(tmp_path, monkeyp
     assert result['warnings']
     assert 'SECRET' not in str(result)
     assert len(fake_openai_module.instances) == 1  # No summary over heuristic replacement text.
+
+
+def fake_pdf_result(tops, metadata, **kwargs):
+    return extract_tops.PdfAgendaExtractionResult(tops=tops,
+        metadata=extract_tops.PdfSessionMetadata(**metadata.to_dict()),
+        processing_complete=True, review_required=False, **kwargs)
+
+
+def test_reuse_verified_pdf_keeps_source_and_ids_without_browser_file(tmp_path, monkeypatch, fake_openai_module):
+    configure_test_app(tmp_path, monkeypatch)
+    monkeypatch.setenv('LLM_IMAGE_TOKENS', '1024')
+    fake_openai_module.responses = [json.dumps(v) for v in [agenda(), agenda(), audit()]]
+    monkeypatch.setattr(main, 'transcribe_audio', lambda *a, **kw: FakeTranscriptionResult(
+        transcript=[{'speaker': 'MOD', 'text': 'Allgemeine Beratung', 'start': 0, 'end': 1}], audio_duration_seconds=1))
+    monkeypatch.setattr(main, 'summarize_segment', lambda *a, **kw: summarize.SummarizationResult(summary='Beratung', duration_seconds=0))
+    with TestClient(main.app) as client:
+        extracted = client.post('/api/extract-tops', files={'pdf': ('source.pdf', pdf_bytes(), 'application/pdf')}).json()
+        response = client.post('/api/pipeline/start', files={'audio': ('a.mp3', b'audio', 'audio/mpeg')},
+            data={'pdf_source_job_id': extracted['document']['job_id'], 'agenda_use_llm': 'false'})
+        assert response.status_code == 200, response.text
+        pipeline_id = response.json()['pipeline_id']
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['stage'] == 'ready_for_review')
+        session = client.get(f'/api/pipeline/{pipeline_id}/result').json()['session']
+        assert session['tops'] == extracted['tops']
+        assert session['top_ids'] == [i['id'] for i in extracted['items'] if i['kind'] == 'agenda']
+        assert session['agenda_proposals']['source']['pdf_extraction'] == extracted
+        assert client.get(extracted['document']['url']).status_code == 200
+        assert main.durable.load(pipeline_id)['documents']

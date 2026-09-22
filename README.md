@@ -366,6 +366,22 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `MODEL_JOB_LEASE_SECONDS` / `MODEL_JOB_MAX_ATTEMPTS` | Übernahme-Lease mit Heartbeat / begrenzte Jobversuche einschließlich Neustarts | `60` / `3` |
 | `LLM_LOAD_TIMEOUT_SECONDS` | Modellladen/erste Ausgabe; danach zählt nur echte Ausgabe gegen das Lese-Inaktivitätslimit | `1800` |
 | `MODEL_DOCUMENT_RETENTION_DAYS` | PDF-Aufbewahrung nach Abschluss/Abbruch; `0` unbegrenzt, Bereinigung nur explizit | `0` |
+| `PDF_RENDER_DPI` | Auflösung jeder Originalseite; bei kleinen Schriften erhöhen | `180` |
+| `PDF_MAX_PAGE_PIXELS` / `PDF_MAX_PAGES` | Harte Bild-/Dokumentgrenzen; Überschreitung schlägt sichtbar fehl, keine Seitenkürzung | `16000000` / `100` |
+| `PDF_OUTPUT_TOKENS` | Gewünschtes Ausgabebudget je Extraktions-, Zusammenführungs- und Prüfaufruf; `LLM_OUTPUT_TOKENS` hat gegebenenfalls Vorrang | `8192` |
+| `PDF_MODEL_ATTEMPTS` / `PDF_REVIEW_ROUNDS` | Schema-/Leerantwort-Reparaturversuche je Schritt / vollständige unabhängige Seitenprüfrunden | `3` / `3` |
+
+PDF-Auswertung benötigt ein bildfähiges Modell und eine passende, explizit gesetzte
+`LLM_IMAGE_TOKENS`-Reserve (`0` verweigert Bilder). Auch das Zusammenführen aller
+Seiteninventare und die Prüfung des Gesamtergebnisses müssen in `LLM_CONTEXT_TOKENS`
+passen; überschrittene Budgets führen zu einem sichtbaren Fehler. Es gibt keine
+Text-Heuristik und keine Ersatzagenda aus dem Transkript bei vorgesehenem PDF.
+Ohne PDF kann die PDF-Erkennung ausgeschaltet und das Transkript verwendet werden.
+Original-PDF, SHA-256, Seitenbilder, unveränderter Textlayer, Modellversuche und
+Prüfungen bleiben im privaten Upload-/Job-Speicher. Ergebnisse enthalten zusätzlich
+strukturierte Einträge mit IDs, Unterordnung und Seitenquellen; die bisherige
+`tops`-Liste und manuelle Bearbeitung bleiben erhalten. Quellen sind in der Sitzung
+verlinkt. Details und Grenzen: [PDF-Auswertung](docs/pdf-extraction.md).
 
 Weitere Optionen stehen in `.env.example`. In Docker Compose sollte
 `LLM_BASE_URL` normalerweise nicht gesetzt werden; der Backend-Container nutzt
