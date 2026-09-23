@@ -4,6 +4,11 @@
 
 set -e
 
+# Trust an optional local CA before downloading models over HTTPS.
+if [ -s /usr/local/share/ca-certificates/gremienpilot/custom-ca.crt ]; then
+    update-ca-certificates
+fi
+
 # Default model to pull (can be overridden via environment variable)
 MODEL="${OLLAMA_MODEL:-gemma4:31b-it-q4_K_M}"
 

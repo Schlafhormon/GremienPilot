@@ -78,6 +78,7 @@ services:
       - AGENDA_DETECTION_CHUNK_LINES=${AGENDA_DETECTION_CHUNK_LINES:-0}
       - AGENDA_OUTPUT_TOKENS=${AGENDA_OUTPUT_TOKENS:-4096}
       - AGENDA_OUTPUT_TOKENS_PER_LINE=${AGENDA_OUTPUT_TOKENS_PER_LINE:-256}
+      - AGENDA_COMPACT_ASSIGNMENTS=${AGENDA_COMPACT_ASSIGNMENTS:-false}
       - AGENDA_MODEL_ATTEMPTS=${AGENDA_MODEL_ATTEMPTS:-2}
       - AGENDA_REPAIR_SPLIT_DEPTH=${AGENDA_REPAIR_SPLIT_DEPTH:-3}
       - AGENDA_SOURCE_REQUEST_ROUNDS=${AGENDA_SOURCE_REQUEST_ROUNDS:-2}
@@ -132,6 +133,7 @@ services:
     volumes:
       - ollama_data:/root/.ollama
       - ./scripts/ollama-entrypoint.sh:/ollama-entrypoint.sh:ro
+      - ./.certs:/usr/local/share/ca-certificates/gremienpilot:ro
     environment:
       - OLLAMA_MODEL=${LLM_MODEL:-gemma4:31b-it-q4_K_M}
       - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}

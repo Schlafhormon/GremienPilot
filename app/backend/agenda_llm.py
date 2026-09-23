@@ -84,6 +84,7 @@ class Workflow:
         self.output = self.config.output_budget(_positive('AGENDA_OUTPUT_TOKENS', 4096))
         self.reserve = structured_output_budget(self.config, self.output)
         self.per_line = _positive('AGENDA_OUTPUT_TOKENS_PER_LINE', 256)
+        self.compact = os.environ.get('AGENDA_COMPACT_ASSIGNMENTS', 'false').lower() == 'true'
         self.depth = _positive('AGENDA_REPAIR_SPLIT_DEPTH', 3, 0)
         self.retrieval_rounds = _positive('AGENDA_SOURCE_REQUEST_ROUNDS', 2, 0)
         self.attempts = _positive('AGENDA_MODEL_ATTEMPTS', 2)
@@ -92,7 +93,7 @@ class Workflow:
         usage.provenance = {**fingerprint, 'prompt_version': VERSION,
             'source_sha256': hashlib.sha256(json.dumps(self.rows, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
             'configuration': self.config.public_snapshot(), 'cache_namespace': namespace,
-            'planner': {'output': self.output, 'per_line': self.per_line, 'split_depth': self.depth,
+            'planner': {'output': self.output, 'per_line': self.per_line, 'compact': self.compact, 'split_depth': self.depth,
                         'source_request_rounds': self.retrieval_rounds, 'attempts': self.attempts},
             'context_archive': []}
         self.provenance = {k: v for k, v in usage.provenance.items() if k != 'context_archive'}
@@ -329,6 +330,8 @@ class Workflow:
             {'agenda': agenda, 'context': context, 'opinions': opinions}, schema, validate)
 
     def details(self, role, context, agenda, reconstruction, start, end, opinions=None):
+        if self.compact:
+            return self.compact_details(role, context, agenda, reconstruction, start, end, opinions)
         identities = [t['top_id'] for t in agenda]
         top_schema = {'enum': identities} if identities else TEXT
         schema = obj({'source_ranges': RANGES, 'lines': array(obj({'line_id': TEXT,
@@ -376,6 +379,75 @@ class Workflow:
             if not data['source_ranges']:
                 return data['lines']
             additional = {i for r in data['source_ranges'] for i in range(r['start'], r['end']+1)}
+            if additional <= requested or round_index == self.retrieval_rounds:
+                raise ContextBudgetError('source_request_limit')
+            requested |= additional
+            body['requested_originals'] = [self.rows[i] for i in sorted(requested)]
+        raise AssertionError('unreachable')
+
+    def compact_details(self, role, context, agenda, reconstruction, start, end, opinions=None):
+        identities = [t['top_id'] for t in agenda]
+        schema = obj({'source_ranges': RANGES, 'spans': array(obj({
+            'start': {'type': 'integer', 'minimum': start, 'maximum': end},
+            'end': {'type': 'integer', 'minimum': start, 'maximum': end},
+            'top_ids': array({'enum': identities} if identities else TEXT),
+            'reason': TEXT, 'evidence': EVIDENCE, 'uncertain': {'type': 'boolean'},
+            'confidence': {'type': 'number', 'minimum': 0, 'maximum': 1}}))})
+        instruction = (
+            'Ordne ALLE target_lines anhand des gesamten Verlaufs zu. Antworte kompakt mit spans: '
+            'start/end sind inklusive Originalindizes, aufsteigend, lückenlos und ohne Überlappung. '
+            'Fasse nur unmittelbar aufeinanderfolgende Zeilen mit gleicher fachlicher Zuordnung und '
+            'Unsicherheit zusammen. Trenne bei jedem Themenwechsel, auch innerhalb eines Zielblocks. '
+            'top_ids enthält alle gemeinsam beratenen TOPs; leere Liste nur bei begründeter Nichtzuordnung. '
+            'Je Abschnitt eine kurze gemeinsame Begründung und wenige exakte Originalbelege; keine '
+            'Wiederholung derselben Begründung pro Zeile. Jeder Abschnitt muss durch seinen Beleg und '
+            'den Verlauf gestützt sein. Technische Probleme sind keine fachliche Unsicherheit. '
+            'Bei fehlenden Originalen source_ranges anfordern und spans leer lassen, sonst umgekehrt. '
+            'Prüfe opinions, sofern vorhanden, unabhängig gegen die Quellen; unauflösbare fachliche '
+            'Abweichungen als uncertain=true begründen.')
+        body = {'agenda': agenda, 'context': context, 'reconstruction': reconstruction,
+                'target_start': start, 'target_end': end, 'target_lines': self.rows[start:end+1],
+                'opinions': opinions, 'source_count': len(self.rows)}
+
+        def validate(data):
+            requests, spans = data['source_ranges'], data['spans']
+            if not isinstance(requests, list) or not isinstance(spans, list):
+                raise AgendaValidationError('invalid_compact_response')
+            if requests:
+                if spans:
+                    raise AgendaValidationError('mixed_source_request')
+                for r in requests:
+                    if type(r['start']) is not int or type(r['end']) is not int or not 0 <= r['start'] <= r['end'] < len(self.rows):
+                        raise AgendaValidationError('invalid_source_range')
+                return
+            cursor = start
+            for span in spans:
+                if (type(span['start']) is not int or type(span['end']) is not int
+                        or span['start'] != cursor or not cursor <= span['end'] <= end):
+                    raise AgendaValidationError('incomplete_source_coverage')
+                cursor = span['end'] + 1
+                if (not isinstance(span['top_ids'], list) or any(t not in identities for t in span['top_ids'])
+                        or len(set(span['top_ids'])) != len(span['top_ids'])):
+                    raise AgendaValidationError('invalid_top_identity')
+                if type(span['uncertain']) is not bool:
+                    raise AgendaValidationError('invalid_uncertainty')
+                if (type(span['confidence']) not in (int, float) or not math.isfinite(span['confidence'])
+                        or not 0 <= span['confidence'] <= 1):
+                    raise AgendaValidationError('invalid_confidence')
+                self.text(span['reason'])
+                self.evidence(span['evidence'])
+            if cursor != end + 1:
+                raise AgendaValidationError('incomplete_source_coverage')
+
+        requested = set()
+        for round_index in range(self.retrieval_rounds + 1):
+            data = self.call(role, instruction, body, schema, validate)
+            if not data['source_ranges']:
+                # Preserve the existing per-line API and independent adjudication.
+                return [dict(line_id=self.rows[i]['line_id'],
+                             **{k: v for k, v in span.items() if k not in {'start', 'end'}})
+                        for span in data['spans'] for i in range(span['start'], span['end'] + 1)]
+            additional = {i for r in data['source_ranges'] for i in range(r['start'], r['end'] + 1)}
             if additional <= requested or round_index == self.retrieval_rounds:
                 raise ContextBudgetError('source_request_limit')
             requested |= additional

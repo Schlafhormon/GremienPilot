@@ -613,6 +613,15 @@ Windows:
 
 Die folgenden Docker-Befehle sind nur für manuelle Spezialfälle gedacht.
 
+Bei Zertifikatsfehlern hinter Norton oder einem Firmenproxy siehe
+[Docker-Zertifikate](docs/docker-zertifikate.md).
+
+Beim ersten Start können die Modelldownloads deutlich länger als zehn Minuten
+dauern. Das Windows-Setup zeigt den Fortschritt und wartet bis zu einer Stunde.
+Die Downloads laufen auch nach Ablauf der Warteanzeige weiter. Mit
+`docker compose logs -f --tail=5 ollama backend` lässt sich der Fortschritt
+verfolgen; `.\setup.ps1 start` prüft die vorhandenen Dienste erneut.
+
 CPU:
 
 ```bash

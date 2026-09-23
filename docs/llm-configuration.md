@@ -101,6 +101,31 @@ Anfrage, Endergebnis und Provenienz, keinen separaten Denktext.
 
 ## Laufzeiten und Ressourcen
 
+Für kompaktere Zuordnungen kann `AGENDA_COMPACT_ASSIGNMENTS=true` gesetzt werden.
+Das Modell gibt zusammenhängende Abschnitte mit gemeinsamer Zuordnung, kurzer
+Begründung und Originalbelegen aus. Der Server prüft lückenlose, überlappungsfreie
+Abdeckung und bildet jeden Abschnitt wieder auf die einzelnen Zeilen ab.
+Die unabhängige Gegenprüfung und die Klärung von Abweichungen bleiben bestehen.
+`AGENDA_OUTPUT_TOKENS_PER_LINE=40` und `AGENDA_DETECTION_CHUNK_LINES=80` sind ein
+möglicher Ausgangspunkt; zu große oder ungültige Antworten werden weiter geteilt.
+Diese Planungswerte garantieren weder eine bestimmte Qualität noch Laufzeit.
+`LLM_THINKING=false` zusammen mit `LLM_THINKING_TOKENS=0` deaktiviert den Denkmodus
+und seine zusätzliche Budgetreservierung für alle neuen Modellaufrufe.
+
+Ein bereits gespeicherter Transkript-Checkpoint verhindert bei Wiederanläufen
+eine erneute Audioverarbeitung. Normale Jobs verweigern weiterhin geänderte
+Modell-/Codekonfigurationen. Für die eng begrenzte Umstellung eines unterbrochenen
+Auftrags in der Phase `agenda_detect` gibt es die Offline-Wartung
+`python resume_pipeline.py JOB_ID`: zunächst nur Prüfung, mit `--apply` nach
+Datenbanksicherung anwenden. Der Backendserver muss gestoppt sein. Sie erlaubt
+nur die beschriebenen Denk-/Zuordnungsparameter sowie die zugehörigen Codeänderungen,
+behält bereits abgeschlossene PDF-Schritte samt ursprünglicher Provenienz und
+protokolliert die alte und neue Konfiguration. Modellwechsel, geänderte PDF-Logik
+oder bereits abgeschlossene Zuordnungen werden abgewiesen. `--fork-session`
+führt den Auftrag in einer neuen Sitzung fort und erhält zwischenzeitliche
+Editoränderungen an der bisherigen Sitzung. Die Modellidentität wird beim
+Wiederanlauf weiterhin kontrolliert.
+
 - `LLM_CONNECT_TIMEOUT_SECONDS`: Verbindungsaufbau (Standard 10 s).
 - `LLM_READ_TIMEOUT_SECONDS`: Inaktivität beim Lesen; leer übernimmt
   `LLM_TIMEOUT_SECONDS` (Standard 120 s). Gilt einheitlich für alle Aufgaben.

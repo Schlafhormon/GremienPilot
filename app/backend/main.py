@@ -2928,21 +2928,19 @@ def _run_pipeline_job(
             progress=15,
             error=None,
         )
-        if (load_job(transcription_job_id) or {}).get("status") != JOB_STATUS_COMPLETED:
-            run_transcription(transcription_job_id, audio_path, models)
-        ensure_pipeline_not_cancelled(pipeline_id)
+        def obtain_transcript():
+            if (load_job(transcription_job_id) or {}).get("status") != JOB_STATUS_COMPLETED:
+                run_transcription(transcription_job_id, audio_path, models)
+            ensure_pipeline_not_cancelled(pipeline_id)
+            transcription_job = load_job(transcription_job_id)
+            if transcription_job is None or transcription_job.get("status") != JOB_STATUS_COMPLETED:
+                error = transcription_job.get("error") if transcription_job else "Transkriptionsjob nicht gefunden"
+                raise RuntimeError(error or "Transkription fehlgeschlagen")
+            return [line_to_dict(line) for line in (transcription_job.get("transcript") or [])]
 
-        transcription_job = load_job(transcription_job_id)
-        if transcription_job is None or transcription_job.get("status") != JOB_STATUS_COMPLETED:
-            error = (
-                transcription_job.get("error")
-                if transcription_job
-                else "Transkriptionsjob nicht gefunden"
-            )
-            raise RuntimeError(error or "Transkription fehlgeschlagen")
-
-        transcript = durable.checkpoint("pipeline:transcript", lambda: [
-            line_to_dict(line) for line in (transcription_job.get("transcript") or [])])
+        # A committed transcript is sufficient to resume, even if the transient
+        # transcription job has since been cleaned up. Never reload Whisper here.
+        transcript = durable.checkpoint("pipeline:transcript", obtain_transcript)
         save_pipeline_session(
             session_id,
             job_id=transcription_job_id,

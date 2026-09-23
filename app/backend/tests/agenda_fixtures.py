@@ -29,6 +29,18 @@ class AgendaModel:
             data = value(body) if callable(value) else value
         else:
             data = self.answer(body)
+        schema = kwargs['response_format']['json_schema']['schema']
+        if 'spans' in schema['properties'] and 'lines' in data:
+            spans = []
+            indices = {r['line_id']: r['index'] for r in body['target_lines']}
+            for row in data.pop('lines'):
+                index = indices[row['line_id']]
+                if (spans and spans[-1]['end'] + 1 == index
+                        and all(spans[-1][k] == row[k] for k in ('top_ids', 'uncertain', 'reason', 'confidence'))):
+                    spans[-1]['end'] = index
+                else:
+                    spans.append(dict(start=index, end=index, **{k: v for k, v in row.items() if k != 'line_id'}))
+            data['spans'] = spans
         if phase.endswith(':discover') or phase.endswith(':reconstruct') or phase == 'resolve:states':
             data.setdefault('source_ranges', [])
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(data)))])

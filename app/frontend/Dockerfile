@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Build stage
 FROM node:22-alpine AS builder
 
@@ -7,7 +8,11 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 
 # Install dependencies
-RUN npm ci --no-audit --no-fund
+RUN --mount=type=secret,id=custom_ca,required=false \
+    if [ -s /run/secrets/custom_ca ]; then \
+      export NODE_EXTRA_CA_CERTS=/run/secrets/custom_ca; \
+    fi; \
+    npm ci --no-audit --no-fund
 
 # Copy source files
 COPY . .

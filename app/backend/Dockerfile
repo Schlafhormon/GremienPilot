@@ -17,6 +17,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Optional local CA for HTTPS inspection (provided by setup.ps1 via BuildKit).
+RUN --mount=type=secret,id=custom_ca,required=false \
+    if [ -s /run/secrets/custom_ca ]; then \
+      cp /run/secrets/custom_ca /usr/local/share/ca-certificates/gremienpilot.crt && \
+      update-ca-certificates; \
+    fi
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+
 # Install uv for package management
 RUN pip install --no-cache-dir uv
 
@@ -26,6 +36,8 @@ COPY *.py ./
 
 # Install dependencies
 ENV UV_NO_CACHE=1
+# Use the container's trusted CA certificates, including installed proxy CAs.
+ENV UV_SYSTEM_CERTS=true
 RUN uv pip install --system -e .
 
 # Create runtime directories after editable install so setuptools package

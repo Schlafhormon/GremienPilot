@@ -33,6 +33,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.10 /usr/bin/python \
     && ln -sf /usr/bin/python3.10 /usr/bin/python3
 
+# Optional local CA for HTTPS inspection (provided by setup.ps1 via BuildKit).
+RUN --mount=type=secret,id=custom_ca,required=false \
+    if [ -s /run/secrets/custom_ca ]; then \
+      cp /run/secrets/custom_ca /usr/local/share/ca-certificates/gremienpilot.crt && \
+      update-ca-certificates; \
+    fi
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+
 # Upgrade pip
 RUN python -m pip install --no-cache-dir --upgrade pip
 
@@ -43,6 +53,8 @@ RUN pip install --no-cache-dir uv
 # Blackwell-enabled build is used instead of the default PyPI (CUDA 12.6) one.
 # Versions must stay within the range pinned in pyproject.toml.
 ENV UV_NO_CACHE=1
+# Use the container's trusted CA certificates, including installed proxy CAs.
+ENV UV_SYSTEM_CERTS=true
 RUN uv pip install --system \
     "torch>=2.7.0,<2.8.0" "torchaudio>=2.7.0,<2.8.0" \
     --index-url https://download.pytorch.org/whl/cu128

@@ -157,7 +157,16 @@ function Set-LocalApplicationImages {
 
 function Get-ProjectVolumeName {
     param([string]$Suffix)
-    return "$(Split-Path -Leaf $ScriptDir)_$Suffix"
+    # Compose normalizes project names and may override them via .env or name:.
+    # Use its resolved volume name rather than the directory's spelling.
+    $configJson = docker compose config --format json 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0) { return $null }
+    try {
+        $config = $configJson | ConvertFrom-Json -ErrorAction Stop
+        return $config.volumes.$Suffix.name
+    } catch {
+        return $null
+    }
 }
 
 function Test-VolumeExists {
@@ -175,7 +184,7 @@ function Remove-ExistingContainersForRebuild {
     Write-Host ""
     Write-Warn "Es sind bereits Container fuer diese Anwendung vorhanden."
     Write-Host ""
-    docker compose ps -a 2>&1
+    docker compose ps -a 2>&1 | Out-Host
     Write-Host ""
     Write-Host "Beim Build werden die vorhandenen Container automatisch entfernt."
     Write-Host "Modell-Volumes bleiben erhalten, solange Sie spaeter nicht ausdruecklich"
@@ -196,6 +205,10 @@ function Confirm-ModelCacheHandling {
         (Get-ProjectVolumeName "backend_hf_cache"),
         (Get-ProjectVolumeName "backend_torch_cache")
     )
+    if (@($volumeNames | Where-Object { -not $_ }).Count -gt 0) {
+        Write-Err "Modell-Volume-Namen konnten nicht aus der Compose-Konfiguration ermittelt werden."
+        return $false
+    }
     $existingVolumes = @($volumeNames | Where-Object { Test-VolumeExists $_ })
 
     if ($existingVolumes.Count -eq 0) {
@@ -236,7 +249,12 @@ function Confirm-ModelCacheHandling {
 function Invoke-BuildLocalImages {
     Write-Info "Baue lokale Docker-Images aus dem geklonten Repository..."
 
-    $buildArgs = @()
+    $buildArgs = @("--progress=plain")
+    $caCert = Join-Path $ScriptDir ".certs\custom-ca.crt"
+    if (Test-Path -LiteralPath $caCert -PathType Leaf) {
+        Write-Info "Verwende lokales CA-Zertifikat: $caCert"
+        $buildArgs += @("--secret", "id=custom_ca,src=$caCert")
+    }
     if (Test-Truthy $PROTOKOLL_BUILD_NO_CACHE) {
         $buildArgs += "--no-cache"
     }
@@ -245,14 +263,16 @@ function Invoke-BuildLocalImages {
     $backendDockerfile = if ($script:USE_GPU) { ".\app\backend\Dockerfile.gpu" } else { ".\app\backend\Dockerfile" }
 
     Write-Info "Baue Backend-Image: $backendTag"
-    docker build @buildArgs --build-arg "PRECACHE_MODELS=$PROTOKOLL_PRECACHE_MODELS" -f $backendDockerfile -t $backendTag ".\app\backend"
+    # Keep Docker output visible but out of this function's Boolean return value.
+    # Otherwise output plus $false becomes a truthy array in the caller.
+    docker build @buildArgs --build-arg "PRECACHE_MODELS=$PROTOKOLL_PRECACHE_MODELS" -f $backendDockerfile -t $backendTag ".\app\backend" 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Backend-Image konnte nicht gebaut werden."
         return $false
     }
 
     Write-Info "Baue Frontend-Image: $FRONTEND_IMAGE"
-    docker build @buildArgs -t $FRONTEND_IMAGE ".\app\frontend"
+    docker build @buildArgs -t $FRONTEND_IMAGE ".\app\frontend" 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Frontend-Image konnte nicht gebaut werden."
         return $false
@@ -732,16 +752,18 @@ function Test-GPU {
 # Wait for services to be ready
 #######################################
 function Wait-ForServices {
+    param([int]$MaxWaitSeconds = 3600)
     Write-Host ""
     Write-Info "Warte auf Dienste..."
-    Write-Host "Das System laedt KI-Modelle. Dies kann einige Minuten dauern."
+    Write-Host "Beim ersten Start werden mehrere GB KI-Modelle geladen. Das kann deutlich laenger als zehn Minuten dauern."
+    Write-Host "Die Downloads laufen auch nach Ende dieser Warteanzeige weiter."
     Write-Host ""
 
-    $maxWait = 600  # 10 minutes
-    $waitCount = 0
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $nextProgress = 0
     $ready = $false
 
-    while ($waitCount -lt $maxWait) {
+    while ($timer.Elapsed.TotalSeconds -lt $MaxWaitSeconds) {
         try {
             $response = Invoke-WebRequest -Uri "http://localhost:$PORT_BACKEND/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
             if ($response.StatusCode -eq 200) {
@@ -753,17 +775,22 @@ function Wait-ForServices {
         }
 
         # Show progress every 15 seconds
-        if ($waitCount % 15 -eq 0) {
-            Write-Host "  Laedt noch... (${waitCount}s vergangen)"
+        if ($timer.Elapsed.TotalSeconds -ge $nextProgress) {
+            $elapsed = [int]$timer.Elapsed.TotalSeconds
+            Write-Host "  Noch nicht bereit (${elapsed}s vergangen):"
+            Show-StartupProgress
+            $nextProgress = $timer.Elapsed.TotalSeconds + 15
         }
 
         Start-Sleep -Seconds 1
-        $waitCount++
     }
 
     if (-not $ready) {
         Write-Host ""
-        Write-Err "Dienste konnten nicht gestartet werden!"
+        Write-Warn "Wartezeit erreicht; die Anwendung ist noch nicht bereit."
+        Write-Host "Die Warteanzeige beendet weder Container noch Downloads. Ein Timeout allein bedeutet keinen Startfehler."
+        Write-Host "Fortschritt: docker compose logs -f --tail=5 ollama backend"
+        Write-Host "Spaeter erneut pruefen: .\setup.ps1 start"
         Write-Host ""
         Show-FailureDiagnostics
         return $false
@@ -776,6 +803,25 @@ function Wait-ForServices {
     return $true
 }
 
+function Show-StartupProgress {
+    foreach ($service in @("backend", "ollama")) {
+        $lines = @(docker compose logs --no-color --tail=10 $service 2>&1)
+        if ($LASTEXITCODE -ne 0) { continue }
+        # Ollama uses terminal escape sequences even in captured logs.
+        $clean = @($lines | ForEach-Object {
+            $_.ToString() -replace '\x1B\[[0-?]*[ -/]*[@-~]', ''
+        } | Where-Object { $_ -match '\S' })
+        $progress = @($clean | Where-Object {
+            $_ -match 'pulling|Downloading|Loading|loaded successfully|ready|Error|ERROR|failed'
+        })
+        if ($progress.Count -gt 0) {
+            Write-Host "  $($progress[-1])"
+        } elseif ($clean.Count -gt 0) {
+            Write-Host "  $($clean[-1])"
+        }
+    }
+}
+
 #######################################
 # Show failure diagnostics
 #######################################
@@ -783,10 +829,10 @@ function Show-FailureDiagnostics {
     Write-Host "========== Fehlerdiagnose ==========" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Container-Status:"
-    docker compose ps 2>&1
+    docker compose ps 2>&1 | Out-Host
     Write-Host ""
     Write-Host "Letzte Log-Eintraege:"
-    docker compose logs --tail=20 2>&1
+    docker compose logs --tail=20 2>&1 | Out-Host
     Write-Host ""
     Write-Host "========== Moegliche Ursachen ==========" -ForegroundColor Yellow
     Write-Host ""
@@ -804,7 +850,7 @@ function Show-FailureDiagnostics {
     Write-Host ""
     Write-Host "Naechste Schritte:"
     Write-Host "  1. .\setup.ps1 logs      # Detaillierte Logs anzeigen"
-    Write-Host "  2. .\setup.ps1 cleanup   # Alles loeschen und neu starten"
+    Write-Host "  2. .\setup.ps1 start     # Bereits laufende Dienste erneut pruefen"
     Write-Host ""
 }
 
@@ -905,6 +951,11 @@ function Invoke-Build {
     } else {
         Write-Info "Starte im CPU-Modus..."
         docker compose up -d --force-recreate
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Container konnten nicht gestartet werden."
+        exit 1
     }
 
     $success = Wait-ForServices

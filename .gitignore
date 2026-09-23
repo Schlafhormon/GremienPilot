@@ -12,6 +12,8 @@ Thumbs.db
 !app/**/.env.example
 
 # Logs and local diagnostics
+.certs/*
+!.certs/.gitkeep
 logs/
 *.log
 npm-debug.log*

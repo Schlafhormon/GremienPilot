@@ -433,7 +433,8 @@ def test_expired_lease_is_retryable_interruption_not_user_cancel():
     assert result['error'] == 'LeaseLost'
 
 
-def test_pipeline_restart_reuses_transcription_agenda_and_summaries(monkeypatch):
+@pytest.mark.parametrize('transcription_metadata_missing', [False, True])
+def test_pipeline_restart_reuses_transcription_agenda_and_summaries(monkeypatch, transcription_metadata_missing):
     from conftest import FakeTranscriptionResult
     from summarize import SummarizationResult
     calls = {'transcription': 0, 'agenda': 0, 'summary': 0}
@@ -463,6 +464,9 @@ def test_pipeline_restart_reuses_transcription_agenda_and_summaries(monkeypatch)
         started = client.post('/api/pipeline/start', files={'audio': ('a.mp3', b'audio', 'audio/mpeg')}).json()
         job_id = started['pipeline_id']
         wait(lambda: interrupted[0] and jobs.load(job_id)['state'] == 'queued')
+    if transcription_metadata_missing:
+        original_load = main.load_job
+        monkeypatch.setattr(main, 'load_job', lambda key: None if key == started['transcription_job_id'] else original_load(key))
     with TestClient(main.app):
         wait(lambda: jobs.load(job_id)['state'] in {'completed', 'review_required'})
     assert calls == {'transcription': 1, 'agenda': 1, 'summary': 1}
