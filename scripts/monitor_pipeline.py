@@ -52,9 +52,13 @@ def snapshot(db_path, job_id):
             agenda_review_complete=agenda.get('review_complete') is True,
             agenda_processed_lines=len(agenda.get('processed_lines') or []),
             agenda_gaps=len(agenda.get('gaps') or []),
+            agenda_evidence_questions=sum(len((r.get('grounding') or {}).get('questions',[])) for r in agenda.get('line_results',[])),
+            agenda_exactly_supported=sum((r.get('grounding') or {}).get('evidence_status') == 'exact' for r in agenda.get('line_results',[])),
             summary_results=len(summaries),
             summary_verified=sum((r.get('llm_usage') or {}).get('processing_complete') is True for r in summaries.values()),
             summary_questions=sum(len((r.get('structured') or {}).get('review_questions') or []) for r in summaries.values()),
+            summary_evidence_questions=sum((r.get('llm_usage') or {}).get('open_evidence_questions',0) for r in summaries.values()),
+            summary_repair_rounds=sum((r.get('llm_usage') or {}).get('reconciliation_rounds',0) for r in summaries.values()),
             summary_errors=sum(bool(r.get('error')) for r in summaries.values()),
         )
         phases = {}

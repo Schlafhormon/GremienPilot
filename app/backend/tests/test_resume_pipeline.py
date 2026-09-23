@@ -122,3 +122,80 @@ def test_pdf_migration_binds_audio_preserves_edits_and_keeps_old_audits_as_histo
         history = json.loads(db.execute("SELECT value FROM durable_steps WHERE step_key LIKE 'operator:pdf-contract-resume:%'").fetchone()[0])
         assert history['checkpoint_hashes']['pipeline:transcript']
         assert 'historical input hash unavailable' in history['audio_binding']
+
+
+@pytest.fixture
+def failed_graded_job(tmp_path, monkeypatch, fake_openai_module):
+    monkeypatch.setenv('LLM_IMAGE_TOKENS','1024')
+    import uuid
+    import llm_transport
+    import extract_tops
+    from pdf_fixtures import pdf_bytes, agenda, audit
+    from test_durable_jobs import claimed
+    job_id = str(uuid.uuid4())
+    pdf_path = tmp_path/'source.pdf'
+    pdf_path.write_bytes(pdf_bytes())
+    audio = tmp_path/'source.wav'
+    audio.write_bytes(b'synthetic')
+    lines = [dict(speaker='A',text='Synthetic source.',start=0,end=1)]
+    persistence.save_job('audio',dict(status='completed',transcript=lines))
+    lines = [dict(line_id='original',**r) for r in persistence.load_job('audio')['transcript']]
+    session = persistence.save_session('old',dict(transcript=lines))
+    pipeline = persistence.save_pipeline_job(job_id,dict(session_id='old',transcription_job_id='audio',
+        status='failed',stage='ready_for_review',progress=100,result_refs=dict(audio_path=str(audio),pdf_path=str(pdf_path))))
+    job = jobs.submit('pipeline',dict(legacy_snapshot=pipeline,session_snapshot=session,session_revision=session['revision']),
+                      job_id,documents=[jobs.document(audio),jobs.document(pdf_path)])
+    identity = {'model':'qwen3:8b','digest':'test-revision','provider':'openai'}
+    monkeypatch.setattr(llm_transport,'model_fingerprint',lambda config: identity)
+    fake_openai_module.responses = [json.dumps(v) for v in [agenda(),agenda(),audit(),audit(0)]]
+    monkeypatch.setenv('LLM_IMAGE_TOKENS','1024')
+    with claimed(job):
+        jobs.checkpoint('model-identities',lambda:{'qwen3:8b':identity})
+        jobs.checkpoint('pipeline:transcript',lambda:lines)
+        jobs.checkpoint('pipeline:agenda-transcript:v1',lambda:lines)
+        extract_tops.extract_agenda_data_from_pdf(pdf_path)
+        jobs.checkpoint('pipeline:agenda',lambda:{'old_invalid':True})
+        jobs.checkpoint('pipeline:summaries',lambda:{'empty':True})
+        jobs.checkpoint('pipeline:published',lambda:True)
+    with persistence.connect() as db:
+        db.execute("UPDATE durable_jobs SET state='failed',owner=NULL,lease_until=NULL WHERE job_id=?",(job_id,))
+    return job_id
+
+
+def test_source_resume_forks_without_losing_history_or_repeating_audio(failed_graded_job):
+    job_id=failed_graded_job
+    old_job=jobs.load(job_id)
+    edited=persistence.save_session('old',dict(tops=['Human edit']))
+    dry=resume_pipeline.resume_sources(job_id)
+    assert dry['transcript_lines']==1 and not jobs.load(dry['job_id'])
+    report=resume_pipeline.resume_sources(job_id,apply=True)
+    child=jobs.load(report['job_id'])
+    assert persistence.load_session('old')==edited and jobs.load(job_id)==old_job
+    assert child['state']=='queued' and child['payload']['session_revision']==persistence.load_session(report['session_id'])['revision']
+    assert resume_pipeline.resume_sources(job_id,apply=True)['already_created']
+    with persistence.connect() as db:
+        keys={r[0] for r in db.execute('SELECT step_key FROM durable_steps WHERE job_id=?',(child['job_id'],))}
+        assert {'pipeline:transcript','pipeline:agenda-transcript:v1','pipeline:pdf:page-evidence-v3'}<=keys
+        assert not {'pipeline:agenda','pipeline:summaries','pipeline:published'} & keys
+        assert db.execute("select value from durable_steps where job_id=? and step_key='pipeline:published'",(job_id,)).fetchone()
+
+
+@pytest.mark.parametrize('defect',['integrity','source','version','model'])
+def test_source_resume_refuses_broken_bindings(failed_graded_job,defect,monkeypatch):
+    import llm_transport
+    job_id=failed_graded_job
+    if defect=='source':
+        from pathlib import Path
+        Path(jobs.load(job_id)['documents'][0]['path']).write_bytes(b'changed')
+    elif defect=='model':
+        monkeypatch.setattr(llm_transport,'model_fingerprint',lambda config:{'digest':'different'})
+    else:
+        with persistence.connect() as db:
+            if defect=='integrity':
+                db.execute("UPDATE durable_steps SET value='[]' WHERE job_id=? and step_key='pipeline:transcript'",(job_id,))
+            else:
+                payload=jobs.load(job_id)['payload']
+                payload['versions']['policy']['PDF_RENDER_DPI']='changed'
+                db.execute('UPDATE durable_jobs SET payload=? WHERE job_id=?',(json.dumps(payload),job_id))
+    with pytest.raises(ValueError):
+        resume_pipeline.resume_sources(job_id,apply=True)

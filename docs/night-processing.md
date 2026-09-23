@@ -118,3 +118,72 @@ mehrere TOPs wiederverwendet werden. Primärentwurf, Entwurfsprüfung und beide
 abschließenden Prüfungen bleiben TOP-spezifisch. Teilweise überlappende Quellgruppen
 werden derzeit nicht pauschal zusammengelegt: Kontext, Quellenidentität und
 TOP-spezifische Auslassungen müssen weiterhin vollständig prüfbar bleiben.
+
+## Abgestufter Quellenvertrag
+
+`graded-sources-v1` trennt technische Vollständigkeit, fachlichen Status und
+Veröffentlichung. `processing_complete`/`review_complete` bezeichnen gelesene
+Quellen und ausgeführte Pflichtprüfungen, nicht die Richtigkeit jeder Aussage.
+Eine Veröffentlichung kann `review_draft` sein. `incomplete_draft` bleibt lokal
+prüfbar, erzeugt aber keine erfolgreichen Agenda-/Zusammenfassungscheckpoints
+und keinen regulären Protokollexport. Die Fehlerphase bleibt sichtbar.
+
+- `exact`: unveränderte, eindeutige Originalstelle und abgeschlossene fachliche
+  Modellprüfung ohne offene Befunde für diese Aussage.
+- `source_range`: Originalbereich zugänglich, aber genauer Beleg oder fachliche
+  Stützung offen. Konkrete Prüffragen stehen am Inhalt.
+- `unsupported`: kein belastbarer Beleg; ausschließlich unbestätigter Vorschlag.
+
+`reference_status` ist nur die technische Referenzprüfung. `content_status`
+unterscheidet `unreviewed`, `supported`, `unclear` und `contradicted`. Ein exaktes
+Zitat allein bestätigt keine Aussage. Widerlegte Kandidaten stehen getrennt als
+`rejected_candidates` und erscheinen ausschließlich mit „VERWORFEN“ unter den
+Unsicherheiten. Beschlüsse, Stimmenzahlen und Aufträge erhalten dieselben direkten
+Kennzeichnungen. Speichern und Umformulieren erteilen keine Bestätigung; manuell
+geänderte Fassungen verlieren ihren Modellnachweis. Eine menschliche Bestätigung
+ist in diesem Vertrag noch nicht als gesonderte Funktion vorgesehen.
+
+Agenda-Antworten wählen kurze `L1`-Kennungen. Der gespeicherte Quellenkatalog bindet
+jede Kennung an ursprüngliche Zeilen-ID, Originalstellen-Hash und gesamten
+Quellen-Hash. Die Anwendung übernimmt Originaltext. Unbekannte IDs werden nicht
+erraten. Alte freie Zitate werden nur bei eindeutigen reinen Leerraumabweichungen
+auf Originalstellen zurückgeführt; sonst bleibt die Frage offen. Unlesbare
+Antworten, fehlende Abdeckung, fehlende Pflichtprüfungen, Modellwechsel und
+Integritätsfehler bleiben technische Fehler.
+
+`durable_artifacts` speichert Rohversuche, Quellenkataloge, strukturierte Diagnosen
+und unvollständige Entwürfe ausschließlich in der lokalen Datenbank. Diese
+Artefakte sind keine wiederverwendbaren Erfolgsmarker. Wiederholte fehlerhafte
+Antworten und wirkungslose Reparaturen begrenzen teure Wiederholungen. Offene
+Entwürfe durchlaufen die abschließenden Originalquellenprüfungen ebenfalls.
+
+## Wiederaufnahme nach dem Kontext-Belegfehler
+
+Nach Sicherung und Tests unterstützt `python resume_pipeline.py JOB_ID
+--source-contract` eine trockene Prüfung; mit `--apply` wird eine neue Sitzung
+und ein neuer Auftrag angelegt. Backend dafür stoppen, Ollama erreichbar lassen
+und ausschließlich die Linux-Containerumgebung verwenden. Die Migration lässt
+keine Konfigurations-/Modelländerung zu, prüft alle Original-Hashes, Audioabschluss,
+Transkriptgleichheit, Checkpointintegrität und die an Originalbilder/Kandidat/
+Prüfprompt gebundenen PDF-Seiten- und Zusammenhangsprüfungen. Alte Aufträge,
+Sitzungen, Veröffentlichungen und Checkpoints bleiben unverändert erhalten.
+Nur bestätigte Transkription, deterministische Aufteilung und verifizierte
+PDF-Arbeit werden kopiert. Der Kindauftrag ist bei gleicher Codefassung idempotent.
+
+Die Backup-API schreibt in Schritten von 128 Seiten zunächst ins Linux-Volume.
+Erst nach Schließen und Integritätsprüfung die Sicherung nach `data/backups`
+kopieren. Die alte Hostdatei `data/sessions.sqlite3` bleibt unbenutzt.
+
+`scripts/validate_context_block.py` führt vor einem langen Wiederanlauf genau den
+ersten realen Kontextblock und eine unabhängige Prüfung aller darin enthaltenen
+Originalquellen aus. Es läuft im Linux-Backend mit separater Datenbank unter
+`/app/state/validations/`, verweigert entfernte Modellendpunkte und prüft die
+unveränderte Modellidentität/Konfiguration. Ausgabe: nur Kennzahlen. Rohantworten
+bleiben lokal. Dieser Versuch ist keine End-to-End-Abnahme und wird nicht als
+bestandener Verarbeitungsschritt in den eigentlichen Auftrag übernommen.
+
+`setup.ps1 build` entfernt vorhandene Container, baut Images und zieht außerdem
+das Ollama-Image neu. Für eine kontrollierte Fehlerbehebung können stattdessen
+die gleichen lokalen Backend-/Frontend-Builds ausgeführt und anschließend nur
+diese beiden Dienste mit Compose neu erstellt werden. So bleiben Ollama-Image,
+Modell und Volumes unverändert. `setup.ps1 start` baut geänderten Code nicht neu.

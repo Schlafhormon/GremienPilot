@@ -10,10 +10,139 @@ import json
 import sqlite3
 import time
 import uuid
+from copy import deepcopy
 from pathlib import Path
 
 import durable_jobs as durable
 import persistence
+
+
+def resume_sources(job_id, *, apply=False):
+    """Fork a failed graded-source continuation; the historical job stays intact.
+
+    Run under the same Linux volume with the backend stopped. Every reusable
+    source, model, PDF audit and integrity binding is checked before enqueueing.
+    The deterministic child ID makes operator retries idempotent.
+    """
+    from llm_config import get_llm_config
+    from llm_transport import model_fingerprint
+    import extract_tops as pdf
+    with durable.ProcessLock():
+        persistence.init_db()
+        job = durable.load(job_id)
+        pipeline = persistence.load_pipeline_job(job_id)
+        if not job or not pipeline or job['kind'] != 'pipeline' or job['state'] != 'failed':
+            raise ValueError('Expected failed pipeline')
+        versions = durable.version_snapshot(job['payload'])
+        previous = job['payload']['versions']
+        for section in set(previous) | set(versions):
+            if section != 'code' and previous.get(section) != versions.get(section):
+                raise ValueError('Source migration does not permit configuration changes: ' + section)
+        allowed = {'agenda_llm.py', 'summary_grounding.py', 'summarize.py', 'main.py', 'durable_jobs.py', 'source_contract.py'}
+        changed = {name for name in set(previous['code']) | set(versions['code'])
+                   if previous['code'].get(name) != versions['code'].get(name)}
+        if changed - allowed:
+            raise ValueError('Unrelated code changed: ' + ','.join(sorted(changed - allowed)))
+        child_id = str(uuid.uuid5(uuid.UUID(job_id), 'graded-sources-v1:' + durable.hash_value(json.dumps(versions,sort_keys=True))))
+        existing = durable.load(child_id)
+        if existing:
+            return dict(job_id=child_id, session_id=existing['payload']['legacy_snapshot']['session_id'], already_created=True)
+        for doc in job['documents']:
+            if durable.document(doc['path'])['sha256'] != doc['sha256']:
+                raise ValueError('Original source changed')
+        with persistence.connect() as db:
+            if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise ValueError('Database integrity check failed')
+            if db.execute("select 1 from durable_jobs where state in ('queued','running','retry_wait')").fetchone():
+                raise ValueError('Other work remains active')
+            records = db.execute('''SELECT s.step_key,s.value,i.sha256,s.completed_at FROM durable_steps s
+                LEFT JOIN durable_step_integrity i ON i.job_id=s.job_id AND i.step_key=s.step_key WHERE s.job_id=?''', (job_id,)).fetchall()
+        steps = {r[0]: r[1] for r in records}
+        retained = {k: v for k, v in steps.items() if k in {'model-identities', 'pipeline:transcript',
+            'pipeline:agenda-transcript:v1'} or k.startswith(('model:', 'pdf:v2:', 'pdf:page-evidence-v3:'))}
+        completed_at = {r[0]:r[3] for r in records}
+        for key, value, sha, _ in records:
+            if key in retained and (not sha or sha != durable.hash_value(value)):
+                raise ValueError('Checkpoint integrity binding missing or changed')
+        identities = json.loads(steps['model-identities'])
+        for name, identity in identities.items():
+            if not identity.get('digest') or model_fingerprint(get_llm_config(name)) != identity:
+                raise ValueError('Model identity changed')
+        transcript = json.loads(steps['pipeline:transcript'])
+        transcription = persistence.load_job(pipeline['transcription_job_id'])
+        if not transcription or transcription['status'] != 'completed' or transcription['transcript'] != [
+                {k:v for k,v in row.items() if k != 'line_id'} for row in transcript]:
+            raise ValueError('Accepted transcript differs from completed audio checkpoint')
+        audio = pipeline['result_refs'].get('audio_path')
+        if not any(d['path'] == audio for d in job['documents']):
+            raise ValueError('Retained audio lacks input hash binding')
+        pdf_path = pipeline['result_refs'].get('pdf_path')
+        document = durable.document(pdf_path)
+        prefix = 'pdf:v2:' + document['sha256']
+        manifest = json.loads(steps[prefix + ':manifest'])
+        pages = [json.loads(steps[f'{prefix}:page:{i}:render']) for i in range(1, manifest['page_count']+1)]
+        candidate = pdf._validate(json.loads(steps[prefix + ':merged']), list(range(1,len(pages)+1)))
+        for number, originals, projection, prompt in [
+            *[(p['page'], [p], pdf.page_projection(candidate,p['page']), pdf.PAGE_AUDIT_PROMPT) for p in pages],
+            (0,pages,candidate,pdf.RELATION_AUDIT_PROMPT)]:
+            key = 'pdf:page-evidence-v3:' + document['sha256'] + ':audit:' + pdf._digest([
+                number,projection,[p['image_sha256'] for p in originals],prompt])
+            audit = json.loads(steps[key])
+            pdf.validate_audit(audit,projection,[p['page'] for p in originals],number)
+            if audit['issues']:
+                raise ValueError('PDF audit still requires review')
+        result_key = 'pdf:page-evidence-v3:' + document['sha256'] + ':result:' + pdf._digest(candidate)
+        result = json.loads(steps[result_key])
+        if result.get('contract_version') != 'page-evidence-v3' or not result['processing_complete'] or result['review_required']:
+            raise ValueError('PDF verification incomplete')
+        retained['pipeline:pdf:page-evidence-v3'] = steps[result_key]
+        completed_at['pipeline:pdf:page-evidence-v3'] = completed_at[result_key]
+        report = dict(parent_job_id=job_id, job_id=child_id, transcript_lines=len(transcript),
+            agenda_lines=len(json.loads(steps['pipeline:agenda-transcript:v1'])),
+            retained_steps=len(retained), discarded_success_markers=[k for k in steps if k not in retained],
+            changed_code=sorted(changed), applied=apply)
+        if not apply:
+            return report
+        backup = persistence.get_db_path().parent/'backups'/('graded-resume-'+str(uuid.uuid4())+'.sqlite3')
+        backup.parent.mkdir(exist_ok=True)
+        with persistence.connect() as source, sqlite3.connect(backup) as target:
+            source.backup(target,pages=128,sleep=.02)
+            if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                raise ValueError('Backup integrity failed')
+        session_id = str(uuid.uuid5(uuid.UUID(child_id), 'session'))
+        if persistence.load_session(session_id) is not None:
+            # A failed operator transaction may have left a reviewable fork.
+            # Never overwrite it (including edits made after that interruption).
+            session_id = str(uuid.uuid4())
+        snapshot = deepcopy(job['payload'].get('session_snapshot') or {})
+        snapshot.update(transcript=transcript,current_step=1,job_id=pipeline['transcription_job_id'],
+                        tops=[],top_ids=[],assignments=[],summaries={},summary_reviews={},summary_states={},agenda_proposals=None)
+        fork = persistence.save_session(session_id,snapshot)
+        refs = {k:deepcopy(pipeline['result_refs'][k]) for k in ('audio_path','pdf_path','known_tops','options','remember_speakers')
+                if k in pipeline['result_refs']}
+        refs.update(parent_pipeline_id=job_id,processing_complete=False,publication_status='pending')
+        new_pipeline = dict(pipeline, pipeline_job_id=child_id, session_id=session_id, status='pending',
+            stage='agenda_detect',progress=72,error=None,result_refs=refs,created_at=time.time(),updated_at=time.time())
+        payload = dict(job['payload'],versions=versions,session_snapshot=fork,session_revision=fork['revision'],
+                       legacy_snapshot=new_pipeline)
+        history = dict(parent_job_id=job_id,parent_session_id=pipeline['session_id'],source_contract='graded-sources-v1',
+            previous_versions=previous,current_versions=versions,created_at=time.time(),
+            retained_hashes={k:durable.hash_value(v) for k,v in retained.items()},
+            retained_completed_at={k:completed_at[k] for k in retained},
+            archived_in_parent=[k for k in steps if k not in retained],backup=str(backup))
+        # Child queue, pipeline row and copied checkpoints become visible atomically.
+        with persistence.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now=time.time()
+            db.execute('''INSERT INTO pipeline_jobs (pipeline_job_id,session_id,transcription_job_id,status,stage,
+                progress,error,result_refs_json,created_at,updated_at) VALUES (?,?,?,'pending','agenda_detect',72,NULL,?,?,?)''',
+                (child_id,session_id,pipeline['transcription_job_id'],json.dumps(refs),now,now))
+            db.execute("INSERT INTO durable_jobs (job_id,kind,state,payload,documents,created_at,updated_at) VALUES (?,'pipeline','queued',?,?,?,?)",
+                (child_id,json.dumps(payload),json.dumps(job['documents']),now,now))
+            for key,value in {**retained,'operator:source-contract-resume':json.dumps(history)}.items():
+                db.execute('INSERT INTO durable_steps VALUES (?,?,?,?)',(child_id,key,value,completed_at.get(key,now)))
+                db.execute('INSERT INTO durable_step_integrity VALUES (?,?,?)',(child_id,key,durable.hash_value(value)))
+        return {**report,'session_id':session_id,'backup':str(backup)}
 
 
 def validate_versions(old, new, *, pdf_contract=False):
@@ -157,5 +286,8 @@ if __name__ == '__main__':
     parser.add_argument('--apply', action='store_true', help='Apply after backup; default validates only')
     parser.add_argument('--fork-session', action='store_true', help='Continue in a new session, preserving any edits to the old session')
     parser.add_argument('--pdf-contract', action='store_true', help='Migrate unfinished PDF checks to page-evidence-v3; verify local model digest and retained audio')
+    parser.add_argument('--source-contract', action='store_true', help='Fork failed work with graded sources; retain verified PDF and accepted audio')
     args = parser.parse_args()
-    print(json.dumps(resume(args.job_id, apply=args.apply, fork_session=args.fork_session, pdf_contract=args.pdf_contract), ensure_ascii=False, indent=2))
+    result = resume_sources(args.job_id,apply=args.apply) if args.source_contract else resume(
+        args.job_id, apply=args.apply, fork_session=args.fork_session, pdf_contract=args.pdf_contract)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
