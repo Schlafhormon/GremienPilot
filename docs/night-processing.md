@@ -187,3 +187,39 @@ das Ollama-Image neu. Für eine kontrollierte Fehlerbehebung können stattdessen
 die gleichen lokalen Backend-/Frontend-Builds ausgeführt und anschließend nur
 diese beiden Dienste mit Compose neu erstellt werden. So bleiben Ollama-Image,
 Modell und Volumes unverändert. `setup.ps1 start` baut geänderten Code nicht neu.
+
+## Begrenzte Rekonstruktion und sichere Fortsetzung
+
+Die Rekonstruktion erzeugt Verlauf/Episoden und TOP-Statusangaben getrennt.
+Statusgruppen umfassen höchstens sechs TOPs; vollständige Agenda, derselbe
+Sitzungskontext und Originalzugriff bleiben in jeder Gruppe verfügbar. Beide
+Leser arbeiten weiterhin unabhängig. Fehlende oder doppelte Kennungen werden
+gezielt nachgefordert, gültige Teile bleiben unbestätigte Entwürfe. Erst exakt
+vollständige Abdeckung erlaubt die Detailzuordnung. Technische Lücken erhalten
+keinen Ersatzstatus und keinen Erfolgscheckpoint.
+
+Transportabbrüche speichern empfangene Fragmente ausschließlich lokal als
+`transport_failure`. Abschlussereignis, Abschlussgrund, bekannte Tokenzahlen,
+Laufzeit und Fehlerklasse unterscheiden eine gemeldete Ausgabegrenze von einem
+Stream ohne Abschluss oder einer Unterbrechung. Nicht empfangene Verbrauchswerte
+bleiben unbekannt. Diese Diagnostik kann historische Fehler nicht nachträglich
+beweisen.
+
+`python resume_pipeline.py JOB_ID --reconstruction` prüft die dafür freigegebene
+Codebasis, unveränderte Konfiguration und Quellen; `--apply` erstellt nach einer
+Linux-Sicherung einen neuen Auftrag mit neuer Sitzung. Der Elternauftrag bleibt
+erhalten. Zusätzlich zur Audio-/PDF-Arbeit werden unveränderte Kontext- und
+Erkennungscheckpoints übernommen. Ihre vollständigen Anfrage-/Schema-/Modell-/
+Quellenbindungen und aktuellen Validatoren gelten weiterhin. Alte globale
+Rekonstruktionsantworten bleiben im Elternauftrag archiviert.
+
+Bei gestopptem Backend kann `scripts/validate_reconstruction.py CHILD_JOB_ID
+--output /app/state/validations/reconstruction` den neuen Auftrag exklusiv
+beanspruchen. Es verlangt die exakte Wiederverwendung beider Kontextdurchgänge
+und der Erkennung, führt die unabhängige Rekonstruktion mit allen erwarteten TOPs
+aus und prüft zusätzlich deren zitierte Originalausschnitte auf inhaltliche
+Probleme. Es speichert nur einzelne erfolgreiche Modellschritte; keine fertige
+Agenda oder Veröffentlichung. Bei Erfolg wird der Auftrag wieder eingereiht,
+bei Fehler bleibt er gestoppt. Danach den Backenddienst kontrolliert starten.
+Erfolgreiche Prüfschritte werden durch identische Anfragebindungen wiederverwendet.
+Der begrenzte Test ersetzt weder die Detailprüfungen noch eine End-to-End-Abnahme.

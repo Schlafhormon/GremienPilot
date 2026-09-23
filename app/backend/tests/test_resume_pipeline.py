@@ -216,3 +216,56 @@ def test_source_resume_accepts_only_identical_retained_audio_copy(failed_graded_
     report=resume_pipeline.resume_sources(job_id,apply=True)
     child=jobs.load(report['job_id'])
     assert {d['path'] for d in child['documents']} >= {str(original),str(retained)}
+
+
+@pytest.fixture
+def reconstruction_job(failed_graded_job):
+    job_id = failed_graded_job
+    job = jobs.load(job_id)
+    job['payload']['versions']['code'].update({
+        'agenda_llm.py': '0d203fb0373bb825d46993b0bddd3353edc48fcdb7a52e5c381a83dbec109d93',
+        'llm_transport.py': '76d906f5e47d6838ceaf0c94c489662f4c4924e526f83aafee626c13b9418195'})
+    with persistence.connect() as db:
+        db.execute('UPDATE durable_jobs SET payload=? WHERE job_id=?', (json.dumps(job['payload']), job_id))
+        db.execute("UPDATE pipeline_jobs SET stage='agenda_detect' WHERE pipeline_job_id=?", (job_id,))
+        # Remove only synthetic downstream certificates supplied by the older migration fixture.
+        for key in ('pipeline:agenda', 'pipeline:summaries', 'pipeline:published'):
+            db.execute('DELETE FROM durable_steps WHERE job_id=? AND step_key=?', (job_id, key))
+            db.execute('DELETE FROM durable_step_integrity WHERE job_id=? AND step_key=?', (job_id, key))
+        for key, phase in [('agenda:context', 'independent:context'), ('agenda:old', 'primary:reconstruct')]:
+            value = json.dumps({'narrative': 'Synthetic draft', 'evidence': []})
+            db.execute('INSERT INTO durable_steps VALUES (?,?,?,?)', (job_id, key, value, time.time()))
+            db.execute('INSERT INTO durable_step_integrity VALUES (?,?,?)', (job_id, key, jobs.hash_value(value)))
+            attempt = json.dumps({'phase': phase, 'attempt': 0, 'raw': '{}'})
+            db.execute('INSERT INTO durable_artifacts VALUES (?,?,?,?,?,?,?)',
+                       (key, job_id, key, 'model_attempt', attempt, jobs.hash_value(attempt), time.time()))
+    return job_id
+
+
+def test_bounded_reconstruction_fork_retains_only_unchanged_calls_and_edits(reconstruction_job):
+    edited = persistence.save_session('old', {'tops': ['Human edit']})
+    report = resume_pipeline.resume_sources(reconstruction_job, reconstruction=True, apply=True)
+    assert report['reused_agenda_calls'] == 1
+    assert persistence.load_session('old') == edited
+    assert report['parent_session_revision'] == edited['revision']
+    with persistence.connect() as db:
+        keys = {r[0] for r in db.execute('SELECT step_key FROM durable_steps WHERE job_id=?', (report['job_id'],))}
+    assert 'agenda:context' in keys and 'agenda:old' not in keys
+    assert 'pipeline:transcript' in keys and 'pipeline:published' not in keys
+    assert jobs.load(report['job_id'])['payload']['versions'] == jobs.version_snapshot(jobs.load(report['job_id'])['payload'])
+    assert resume_pipeline.resume_sources(reconstruction_job, reconstruction=True, apply=True)['already_created']
+
+
+@pytest.mark.parametrize('defect', ['integrity', 'baseline', 'other_code', 'policy'])
+def test_bounded_resume_rejects_incompatible_or_corrupt_checkpoints(reconstruction_job, defect):
+    job = jobs.load(reconstruction_job)
+    with persistence.connect() as db:
+        if defect == 'integrity':
+            db.execute("UPDATE durable_steps SET value='{}' WHERE job_id=? AND step_key='agenda:context'", (reconstruction_job,))
+        else:
+            section, key = ('policy', 'AGENDA_OUTPUT_TOKENS') if defect == 'policy' else (
+                'code', 'agenda_llm.py' if defect == 'baseline' else 'source_contract.py')
+            job['payload']['versions'][section][key] = 'changed'
+            db.execute('UPDATE durable_jobs SET payload=? WHERE job_id=?', (json.dumps(job['payload']), reconstruction_job))
+    with pytest.raises(ValueError):
+        resume_pipeline.resume_sources(reconstruction_job, reconstruction=True, apply=True)

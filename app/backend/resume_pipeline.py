@@ -17,7 +17,7 @@ import durable_jobs as durable
 import persistence
 
 
-def resume_sources(job_id, *, apply=False):
+def resume_sources(job_id, *, apply=False, reconstruction=False):
     """Fork a failed graded-source continuation; the historical job stays intact.
 
     Run under the same Linux volume with the backend stopped. Every reusable
@@ -35,15 +35,31 @@ def resume_sources(job_id, *, apply=False):
             raise ValueError('Expected failed pipeline')
         versions = durable.version_snapshot(job['payload'])
         previous = job['payload']['versions']
+        session = persistence.load_session(pipeline['session_id'])
+        if reconstruction and (pipeline['stage'] != 'agenda_detect' or not session):
+            raise ValueError('Expected unfinished agenda stage with retained session')
         for section in set(previous) | set(versions):
             if section != 'code' and previous.get(section) != versions.get(section):
                 raise ValueError('Source migration does not permit configuration changes: ' + section)
         allowed = {'agenda_llm.py', 'summary_grounding.py', 'summarize.py', 'main.py', 'durable_jobs.py', 'source_contract.py'}
+        if reconstruction:
+            # Reviewed baseline: only reconstruction requests and transport failure
+            # diagnostics changed. Reused calls still require identical cache keys
+            # (full source/model/configuration/prompt/schema) and current validation.
+            baseline = {
+                'agenda_llm.py': '0d203fb0373bb825d46993b0bddd3353edc48fcdb7a52e5c381a83dbec109d93',
+                'llm_transport.py': '76d906f5e47d6838ceaf0c94c489662f4c4924e526f83aafee626c13b9418195',
+            }
+            allowed = set(baseline)
+            for name, digest in baseline.items():
+                if previous['code'].get(name) != digest:
+                    raise ValueError('Unsupported reconstruction baseline: ' + name)
         changed = {name for name in set(previous['code']) | set(versions['code'])
                    if previous['code'].get(name) != versions['code'].get(name)}
         if changed - allowed:
             raise ValueError('Unrelated code changed: ' + ','.join(sorted(changed - allowed)))
-        child_id = str(uuid.uuid5(uuid.UUID(job_id), 'graded-sources-v1:' + durable.hash_value(json.dumps(versions,sort_keys=True))))
+        contract = 'bounded-reconstruction-v1' if reconstruction else 'graded-sources-v1'
+        child_id = str(uuid.uuid5(uuid.UUID(job_id), contract + ':' + durable.hash_value(json.dumps(versions,sort_keys=True))))
         existing = durable.load(child_id)
         if existing:
             return dict(job_id=child_id, session_id=existing['payload']['legacy_snapshot']['session_id'], already_created=True)
@@ -57,9 +73,27 @@ def resume_sources(job_id, *, apply=False):
                 raise ValueError('Other work remains active')
             records = db.execute('''SELECT s.step_key,s.value,i.sha256,s.completed_at FROM durable_steps s
                 LEFT JOIN durable_step_integrity i ON i.job_id=s.job_id AND i.step_key=s.step_key WHERE s.job_id=?''', (job_id,)).fetchall()
+            attempts = db.execute("SELECT step_key,value,sha256 FROM durable_artifacts WHERE job_id=? AND kind='model_attempt'", (job_id,)).fetchall()
         steps = {r[0]: r[1] for r in records}
         retained = {k: v for k, v in steps.items() if k in {'model-identities', 'pipeline:transcript',
             'pipeline:agenda-transcript:v1'} or k.startswith(('model:', 'pdf:v2:', 'pdf:page-evidence-v3:'))}
+        reused_agenda = set()
+        if reconstruction:
+            if any(k in steps for k in ('pipeline:agenda', 'pipeline:summaries', 'pipeline:published')):
+                raise ValueError('Reconstruction migration cannot reuse completed downstream work')
+            for key, value, sha in attempts:
+                phase = json.loads(value).get('phase', '')
+                if phase in {'primary:context', 'independent:context', 'primary:discover',
+                             'independent:discover', 'resolve:discover'} and key in steps:
+                    if not sha or sha != durable.hash_value(value):
+                        raise ValueError('Agenda attempt integrity mismatch')
+                    reused_agenda.add(key)
+                    retained[key] = steps[key]
+                    cache = 'cache:' + key.removeprefix('agenda:')
+                    if cache in steps:
+                        if json.loads(steps[cache]) != json.loads(steps[key]):
+                            raise ValueError('Agenda cache differs from checkpoint')
+                        retained[cache] = steps[cache]
         completed_at = {r[0]:r[3] for r in records}
         for key, value, sha, _ in records:
             if key in retained and (not sha or sha != durable.hash_value(value)):
@@ -105,6 +139,7 @@ def resume_sources(job_id, *, apply=False):
         report = dict(parent_job_id=job_id, job_id=child_id, transcript_lines=len(transcript),
             agenda_lines=len(json.loads(steps['pipeline:agenda-transcript:v1'])),
             retained_steps=len(retained), discarded_success_markers=[k for k in steps if k not in retained],
+            reused_agenda_calls=len(reused_agenda), parent_session_revision=session.get('revision') if session else None,
             changed_code=sorted(changed), applied=apply)
         if not apply:
             return report
@@ -130,7 +165,7 @@ def resume_sources(job_id, *, apply=False):
             stage='agenda_detect',progress=72,error=None,result_refs=refs,created_at=time.time(),updated_at=time.time())
         payload = dict(job['payload'],versions=versions,session_snapshot=fork,session_revision=fork['revision'],
                        legacy_snapshot=new_pipeline)
-        history = dict(parent_job_id=job_id,parent_session_id=pipeline['session_id'],source_contract='graded-sources-v1',
+        history = dict(parent_job_id=job_id,parent_session_id=pipeline['session_id'],source_contract=contract,
             previous_versions=previous,current_versions=versions,created_at=time.time(),
             retained_hashes={k:durable.hash_value(v) for k,v in retained.items()},
             retained_completed_at={k:completed_at[k] for k in retained},
@@ -140,6 +175,8 @@ def resume_sources(job_id, *, apply=False):
         # Child queue, pipeline row and copied checkpoints become visible atomically.
         with persistence.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if reconstruction and persistence.load_session(pipeline['session_id'])['revision'] != session['revision']:
+                raise ValueError('Parent session changed during migration')
             now=time.time()
             db.execute('''INSERT INTO pipeline_jobs (pipeline_job_id,session_id,transcription_job_id,status,stage,
                 progress,error,result_refs_json,created_at,updated_at) VALUES (?,?,?,'pending','agenda_detect',72,NULL,?,?,?)''',
@@ -294,7 +331,8 @@ if __name__ == '__main__':
     parser.add_argument('--fork-session', action='store_true', help='Continue in a new session, preserving any edits to the old session')
     parser.add_argument('--pdf-contract', action='store_true', help='Migrate unfinished PDF checks to page-evidence-v3; verify local model digest and retained audio')
     parser.add_argument('--source-contract', action='store_true', help='Fork failed work with graded sources; retain verified PDF and accepted audio')
+    parser.add_argument('--reconstruction', action='store_true', help='Fork the verified graded-source baseline; reuse unchanged context/discovery calls')
     args = parser.parse_args()
-    result = resume_sources(args.job_id,apply=args.apply) if args.source_contract else resume(
+    result = resume_sources(args.job_id,apply=args.apply,reconstruction=args.reconstruction) if args.source_contract or args.reconstruction else resume(
         args.job_id, apply=args.apply, fork_session=args.fork_session, pdf_contract=args.pdf_contract)
     print(json.dumps(result, ensure_ascii=False, indent=2))
