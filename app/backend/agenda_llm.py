@@ -40,6 +40,13 @@ class AgendaValidationError(ValueError):
     pass
 
 
+class IncompleteAgendaStates(AgendaValidationError):
+    """Valid entries are drafts; incomplete coverage is never a checkpoint."""
+    def __init__(self, states, missing, invalid):
+        super().__init__('incomplete_agenda_states')
+        self.states, self.missing, self.invalid = states, missing, invalid
+
+
 def parse_response(content):
     def unique(pairs):
         result = {}
@@ -220,6 +227,11 @@ class Workflow:
                         self.usage.validation_reasons.append(code)
                     last = exc
                     durable.artifact(step, 'technical_diagnostic', {'phase': phase, 'attempt': attempt, 'code': code})
+                    if isinstance(exc, IncompleteAgendaStates):
+                        durable.artifact(step, 'incomplete_draft', {'phase': phase,
+                            'agenda_states': exc.states, 'missing_top_ids': exc.missing,
+                            'invalid_entries': exc.invalid, 'processing_complete': False})
+                        raise
                     signature = hashlib.sha256((raw or '').encode()).hexdigest() if raw is not None else None
                     if signature in seen_invalid:
                         break
@@ -347,13 +359,40 @@ class Workflow:
             'Falls opinions vorliegen, kläre ALLE Unterschiede anhand der Quellen, keine automatische Vereinigung.',
             {'context': context, 'opinions': opinions, 'known_agenda': known_agenda or []}, INVENTORY, validate)
 
+    def state_entries(self, states, ids):
+        """Preserve individually valid entries; never choose between duplicate IDs."""
+        if not isinstance(states, list):
+            raise AgendaValidationError('invalid_agenda_states')
+        counts = {}
+        for state in states:
+            identity = state.get('top_id') if isinstance(state, dict) else None
+            if isinstance(identity, str):
+                counts[identity] = counts.get(identity, 0) + 1
+        valid, invalid = {}, []
+        for state in states:
+            try:
+                identity = state['top_id']
+                if identity not in ids or counts.get(identity) != 1:
+                    raise AgendaValidationError('invalid_agenda_identity')
+                if state['status'] not in STATES:
+                    raise AgendaValidationError('invalid_agenda_status')
+                self.text(state['reason'])
+                self.evidence(state['evidence'], required=state['status'] != 'not_evidenced')
+                valid[identity] = state
+            except (AgendaValidationError, KeyError, TypeError) as exc:
+                invalid.append({'entry': state, 'code': str(exc) if isinstance(exc, AgendaValidationError)
+                                else type(exc).__name__})
+        missing = [identity for identity in ids if identity not in valid]
+        if missing or invalid:
+            raise IncompleteAgendaStates(list(valid.values()), missing, invalid)
+        return [valid[identity] for identity in ids]
+
     def reconstruction(self, role, context, agenda, opinions=None):
         ids = [t['top_id'] for t in agenda]
         episode_id = {'enum': ids} if ids else TEXT
         schema = obj({'narrative': TEXT, 'episodes': array(obj({'start_line_id': TEXT, 'end_line_id': TEXT,
             'top_ids': array(episode_id), 'section': {'enum': ['public', 'nonpublic', None]},
-            'reason': TEXT, 'evidence': EVIDENCE})), 'agenda_states': array(obj({'top_id': {'enum': ids},
-            'status': {'enum': STATES}, 'reason': TEXT, 'evidence': EVIDENCE}))})
+            'reason': TEXT, 'evidence': EVIDENCE}))})
         def validate(data):
             self.text(data['narrative'])
             if not isinstance(data['episodes'], list):
@@ -369,23 +408,62 @@ class Workflow:
                     raise AgendaValidationError('invalid_section')
                 self.text(episode['reason'])
                 self.evidence(episode['evidence'])
-            states = data['agenda_states']
-            if not isinstance(states, list) or len(states) != len(ids) or {s['top_id'] for s in states} != set(ids):
-                raise AgendaValidationError('incomplete_agenda_states')
-            for state in states:
-                if state['status'] not in STATES:
-                    raise AgendaValidationError('invalid_agenda_status')
-                self.text(state['reason'])
-                self.evidence(state['evidence'], required=state['status'] != 'not_evidenced')
-        if not ids:
-            schema['properties']['agenda_states']['items']['properties']['top_id'] = TEXT
-        return self.source_call(role, 'Rekonstruiere den gesamten tatsächlichen Sitzungsverlauf VOR der Detailzuordnung. '
+        body = {'agenda': agenda, 'context': context, 'opinions': opinions}
+        trajectory = self.source_call(role + ':trajectory:v1',
+            'Rekonstruiere den gesamten tatsächlichen Sitzungsverlauf VOR der Detailzuordnung. '
             'Rekonstruiere episodes mit Originalgrenzen, TOP-IDs, Sitzungsteil und Originalbelegen. '
             'Erhalte Übergänge, Wiederaufnahmen und gemeinsame Beratungen; Reihenfolge folgt den Quellen. '
-            'Bewerte JEDEN Agenda-Punkt als treated (behandelt), deferred (vertagt), removed (abgesetzt) '
-            'oder not_evidenced (nicht nachweisbar). Fehlende Beratung beweist keine Absetzung. '
-            'Prüfe bei opinions ALLE Abweichungen unabhängig gegen die Quellen.',
-            {'agenda': agenda, 'context': context, 'opinions': opinions}, schema, validate)
+            'Die TOP-Statusprüfung folgt separat. Prüfe bei opinions ALLE Abweichungen gegen die Quellen.',
+            body, schema, validate)
+        states = self.reconstruction_states(role, context, agenda, trajectory, opinions)
+        return dict(trajectory, agenda_states=states)
+
+    def reconstruction_states(self, role, context, agenda, trajectory, opinions=None):
+        ids = [t['top_id'] for t in agenda]
+        retained = {}
+        instruction = ('Bewerte genau die expected_top_ids anhand des GESAMTEN Sitzungsverlaufs als '
+            'treated (behandelt), deferred (vertagt), removed (abgesetzt) oder not_evidenced '
+            '(nicht nachweisbar). Fehlende Beratung beweist keine Absetzung. Eine fehlende Prüfung '
+            'ist KEIN not_evidenced. Jeder Ziel-TOP genau einmal, keine anderen IDs. '
+            'Agenda und Verlauf bleiben vollständig sichtbar: Erhalte gemeinsame Beratungen und '
+            'Wiederaufnahmen über Gruppengrenzen. Modellnotizen und Verlauf sind unbestätigte Entwürfe. '
+            'Fordere bei Bedarf Originalquellen an. Kurze konkrete Begründung und Originalbelege pro TOP. '
+            'Prüfe bei opinions ALLE Abweichungen unabhängig gegen die Originalquellen.')
+        # Six entries keep UUIDs, reasons and evidence comfortably bounded without
+        # changing sampling or output limits. All groups see the same full context.
+        try:
+            for start in range(0, len(ids), 6):
+                pending = ids[start:start+6]
+                for attempt in range(self.attempts):
+                    state_schema = obj({'agenda_states': array(obj({'top_id': {'enum': pending},
+                        'status': {'enum': STATES}, 'reason': TEXT, 'evidence': EVIDENCE}))})
+                    # Source requests may return an empty list; exact coverage is
+                    # enforced in the validator on every final response.
+                    state_schema['properties']['agenda_states']['maxItems'] = len(pending)
+                    body = dict(agenda=agenda, context=context, trajectory=trajectory,
+                                opinions=opinions, expected_top_ids=pending)
+                    if attempt:
+                        body['technical_repair'] = {'code': 'incomplete_agenda_states',
+                            'missing_top_ids': pending, 'instruction': 'Ergänze ausschließlich diese noch fehlenden Prüfungen.'}
+                    try:
+                        data = self.source_call(role + ':states:v1', instruction, body, state_schema,
+                            lambda data: self.state_entries(data['agenda_states'], pending))
+                        accepted = data['agenda_states']
+                    except IncompleteAgendaStates as exc:
+                        accepted = exc.states
+                    retained.update({s['top_id']: s for s in accepted})
+                    pending = [identity for identity in pending if identity not in retained]
+                    if not pending:
+                        break
+                if pending:
+                    raise IncompleteAgendaStates(list(retained.values()), pending, [])
+            return self.state_entries(list(retained.values()), ids)
+        except Exception:
+            durable.artifact(role, 'incomplete_draft', {'trajectory': trajectory,
+                'agenda_states': list(retained.values()),
+                'missing_top_ids': [identity for identity in ids if identity not in retained],
+                'processing_complete': False})
+            raise
 
     def details(self, role, context, agenda, reconstruction, start, end, opinions=None):
         if self.compact:
@@ -604,9 +682,10 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
             if identity in {t['top_id'] for t in agenda}:
                 raise AgendaValidationError('duplicate_discovered_identity')
             agenda.append(dict(item, title=title, top_id=identity))
-        reconstructions = [work.reconstruction(role + ':reconstruct', context, agenda)
-                           for role, context in zip(('primary', 'independent'), contexts)]
+        reconstructions = []
         usage.reconstructions = reconstructions
+        for role, context in zip(('primary', 'independent'), contexts):
+            reconstructions.append(work.reconstruction(role + ':reconstruct', context, agenda))
         primary_states, reviewed_states = [{s['top_id']: s for s in r['agenda_states']} for r in reconstructions]
         usage.agenda_states = [dict(s, review_status='agreed' if s['status'] == reviewed_states[s['top_id']]['status'] else 'unresolved')
                                for s in primary_states.values()]

@@ -65,7 +65,8 @@ def test_bad_context_keeps_both_original_readers_and_detail_checks(agenda_model,
         modified = deepcopy(body)
         modified['context'] = {'original_transcript': body['requested_originals']}
         return agenda_model.answer(modified)
-    agenda_model.overrides['primary:reconstruct'] = reconstruct
+    agenda_model.overrides['primary:reconstruct:trajectory:v1'] = reconstruct
+    agenda_model.overrides['primary:reconstruct:states:v1'] = reconstruct
     result = run(texts)
     assert result.llm.processing_complete and result.llm.review_complete
     notes = result.llm.provenance['context_archive']

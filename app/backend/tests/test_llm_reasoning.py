@@ -42,7 +42,7 @@ def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, ef
             result = agenda_detection.segment_known_agenda(transcript, ["1. Haushalt"], use_llm=True)
         else:
             result = agenda_detection.detect_agenda_from_transcript(transcript, use_llm=True)
-        assert result.llm.attempted_calls == 6
+        assert result.llm.attempted_calls == 8
         assert result.llm.failed_calls == 0
 
     requests = [call for _, call in model.calls] if task.endswith("agenda") else fake_openai_module.instances[0].calls

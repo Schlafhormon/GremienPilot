@@ -180,7 +180,7 @@ def test_status_disagreements_resolved_by_model(agenda_model):
     result = run(['Der Punkt entfällt.'])
     assert result.llm.agenda_states[0]['status'] == 'deferred'  # scripted adjudicator, no keyword override
     assert all(s['review_status'] == 'resolved' for s in result.llm.agenda_states)
-    assert any(b['phase'] == 'resolve:states' for b, _ in agenda_model.calls)
+    assert any(b['phase'] == 'resolve:states:states:v1' for b, _ in agenda_model.calls)
 
 
 def test_discovery_precedes_common_reconstruction_without_invented_numbers(agenda_model):
@@ -197,10 +197,10 @@ def test_reconstruction_can_request_original_sources(agenda_model):
         if 'requested_originals' not in body:
             return {'source_ranges': [{'start': 0, 'end': 0}], 'narrative': 'Originalbeleg benötigt', 'episodes': [], 'agenda_states': []}
         return agenda_model.answer(body)
-    agenda_model.overrides['independent:reconstruct'] = reconstruct
+    agenda_model.overrides['independent:reconstruct:trajectory:v1'] = reconstruct
     result = run(['Beratung.'])
     assert result.llm.review_complete
-    calls = [b for b, _ in agenda_model.calls if b['phase'] == 'independent:reconstruct']
+    calls = [b for b, _ in agenda_model.calls if b['phase'] == 'independent:reconstruct:trajectory:v1']
     assert len(calls) == 2 and calls[1]['requested_originals'][0]['line_id'] == 'L1'
 
 
@@ -218,7 +218,7 @@ def test_source_change_invalidates_cache_even_with_same_model_notes(agenda_model
     agenda_model.calls.clear()
     second = run(['Unverändert.', 'Geänderter Quellenstand.'])
     assert first.llm.provenance['source_sha256'] != second.llm.provenance['source_sha256']
-    assert second.llm.attempted_calls == 6
+    assert second.llm.attempted_calls == 8
 
 
 def test_model_confidence_not_replaced_by_speech_patterns(agenda_model):

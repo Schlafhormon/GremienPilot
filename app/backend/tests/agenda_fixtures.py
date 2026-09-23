@@ -30,6 +30,11 @@ class AgendaModel:
         else:
             data = self.answer(body)
         schema = kwargs['response_format']['json_schema']['schema']
+        if phase.endswith(':trajectory:v1'):
+            data.pop('agenda_states', None)
+        elif phase.endswith(':states:v1'):
+            data.pop('narrative', None)
+            data.pop('episodes', None)
         if 'spans' in schema['properties'] and 'lines' in data:
             spans = []
             indices = {r['line_id']: r['index'] for r in body['target_lines']}
@@ -41,7 +46,7 @@ class AgendaModel:
                 else:
                     spans.append(dict(start=index, end=index, **{k: v for k, v in row.items() if k != 'line_id'}))
             data['spans'] = spans
-        if phase.endswith(':discover') or phase.endswith(':reconstruct') or phase == 'resolve:states':
+        if phase.endswith((':discover', ':trajectory:v1', ':states:v1')):
             data.setdefault('source_ranges', [])
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(data)))])
 
@@ -66,7 +71,7 @@ class AgendaModel:
                 return {'items': [], 'reason': 'Keine zusätzlichen Punkte.'}
             return {'items': self.inventory or [{'title': 'Haushalt', 'number': None, 'section': None,
                 'evidence': self.evidence(self.original(body))}], 'reason': 'Im Transkript erkennbare Beratung.'}
-        if phase.endswith(':reconstruct') or phase == 'resolve:states':
+        if phase.endswith((':trajectory:v1', ':states:v1')):
             return {'narrative': 'Gesamter Sitzungsverlauf mit indirekten Übergängen und Wiederaufnahmen.',
                     'episodes': [{'start_line_id': self.original(body)['line_id'], 'end_line_id': self.original(body)['line_id'],
                         'top_ids': [body['agenda'][0]['top_id']] if body['agenda'] else [], 'section': None,
@@ -74,7 +79,7 @@ class AgendaModel:
                     'agenda_states': [{'top_id': t['top_id'],
                         'status': (self.review_states if phase.startswith('independent') else self.states).get(t['top_id'], 'treated'),
                         'reason': 'Anhand des vollständigen Verlaufs geprüft.',
-                        'evidence': self.evidence(self.original(body))} for t in body['agenda']]}
+                        'evidence': self.evidence(self.original(body))} for t in body['agenda'] if t['top_id'] in body.get('expected_top_ids', [a['top_id'] for a in body['agenda']])]}
         labels = self.review_labels if phase.startswith('independent') else self.resolve_labels if phase.startswith('resolve') else self.labels
         return {'source_ranges': [], 'lines': [{'line_id': row['line_id'],
             'top_ids': [body['agenda'][int(t.split(':')[1])]['top_id'] if t.startswith('detected:') else t

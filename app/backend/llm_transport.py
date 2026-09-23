@@ -308,99 +308,126 @@ async def _generate(client, config, kwargs, progress):
             raise IncompleteResponseError('Provider exceeded response size guard')
         content.append(value)
     finish = None
-    if (config.provider == 'ollama'):
-        payload = {'model': config.model, 'messages': _native_messages(messages), 'stream': True,
-                   'truncate': False, 'shift': False, 'keep_alive': float(config.keep_alive) if re.fullmatch(r'-?\d+(?:\.\d+)?', config.keep_alive) else config.keep_alive,
-                   'options': {'num_ctx': config.context_tokens, 'num_predict': cap, 'temperature': snapshot['temperature']}}
-        for key, value in [('top_p', config.top_p), ('top_k', config.top_k), ('seed', config.seed),
-                           ('num_thread', config.cpu_threads), ('num_gpu', config.gpu_layers)]:
-            if value is not None:
-                payload['options'][key] = value
-        if think is not None:
-            payload['think'] = think
-        if response_format and response_format['type'] != 'text':
-            payload['format'] = 'json' if response_format['type'] == 'json_object' else response_format['json_schema']['schema']
-        async with httpx.AsyncClient(timeout=httpx.Timeout(config.load_seconds, connect=config.connect_seconds), headers=_headers(config)) as http:
-            metadata = await _metadata(http, config)
-            snapshot.update(metadata)
-            import durable_jobs as durable
-            identity = durable.checkpoint('model:' + config.model, lambda: metadata['digest'])
-            if identity != metadata['digest']:
-                raise ModelConfigurationError('Model digest changed since job started')
-            expected = _EXPECTED_DIGEST.get()
-            if expected and expected[0] is config and expected[1] != metadata['digest']:
-                raise ModelConfigurationError('Model tag changed after cache lookup')
-            if any(_parts(messages)[1]) and 'vision' not in metadata['capabilities']:
-                raise ModelConfigurationError('Selected model does not advertise vision')
-            if think not in (False, None) and 'thinking' not in metadata['capabilities']:
-                raise ModelConfigurationError('Selected model does not advertise thinking')
-            final = None
-            async with http.stream('POST', _native_url(config) + '/api/chat', json=payload) as response:
-                if response.is_error:
-                    await response.aread()
-                    raise ProviderError(response.text, response.status_code)
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    data = json.loads(line)
-                    if 'error' in data:
-                        raise ProviderError(data['error'], data.get('status'))
-                    if data.get('model') and _normal(data['model']) != _normal(config.model):
-                        raise ModelConfigurationError('Provider changed the requested model')
-                    message = data.get('message', {})
-                    append_content(message.get('content', ''))
-                    if message.get('thinking') or message.get('content'):
-                        progress('thinking' if message.get('thinking') else 'generating')
-                    if data.get('done'):
-                        final = data
-                        break
-            if not final:
-                raise IncompleteResponseError('Stream ended without terminal response')
-            finish = final.get('done_reason')
+    final = None
+    payload = {}
+    try:
+        if (config.provider == 'ollama'):
+            payload = {'model': config.model, 'messages': _native_messages(messages), 'stream': True,
+                       'truncate': False, 'shift': False, 'keep_alive': float(config.keep_alive) if re.fullmatch(r'-?\d+(?:\.\d+)?', config.keep_alive) else config.keep_alive,
+                       'options': {'num_ctx': config.context_tokens, 'num_predict': cap, 'temperature': snapshot['temperature']}}
+            for key, value in [('top_p', config.top_p), ('top_k', config.top_k), ('seed', config.seed),
+                               ('num_thread', config.cpu_threads), ('num_gpu', config.gpu_layers)]:
+                if value is not None:
+                    payload['options'][key] = value
+            if think is not None:
+                payload['think'] = think
+            if response_format and response_format['type'] != 'text':
+                payload['format'] = 'json' if response_format['type'] == 'json_object' else response_format['json_schema']['schema']
+            async with httpx.AsyncClient(timeout=httpx.Timeout(config.load_seconds, connect=config.connect_seconds), headers=_headers(config)) as http:
+                metadata = await _metadata(http, config)
+                snapshot.update(metadata)
+                import durable_jobs as durable
+                identity = durable.checkpoint('model:' + config.model, lambda: metadata['digest'])
+                if identity != metadata['digest']:
+                    raise ModelConfigurationError('Model digest changed since job started')
+                expected = _EXPECTED_DIGEST.get()
+                if expected and expected[0] is config and expected[1] != metadata['digest']:
+                    raise ModelConfigurationError('Model tag changed after cache lookup')
+                if any(_parts(messages)[1]) and 'vision' not in metadata['capabilities']:
+                    raise ModelConfigurationError('Selected model does not advertise vision')
+                if think not in (False, None) and 'thinking' not in metadata['capabilities']:
+                    raise ModelConfigurationError('Selected model does not advertise thinking')
+                final = None
+                async with http.stream('POST', _native_url(config) + '/api/chat', json=payload) as response:
+                    if response.is_error:
+                        await response.aread()
+                        raise ProviderError(response.text, response.status_code)
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        if 'error' in data:
+                            raise ProviderError(data['error'], data.get('status'))
+                        if data.get('model') and _normal(data['model']) != _normal(config.model):
+                            raise ModelConfigurationError('Provider changed the requested model')
+                        message = data.get('message', {})
+                        append_content(message.get('content', ''))
+                        if message.get('thinking') or message.get('content'):
+                            progress('thinking' if message.get('thinking') else 'generating')
+                        if data.get('done'):
+                            final = data
+                            break
+                if not final:
+                    raise IncompleteResponseError('Stream ended without terminal response')
+                finish = final.get('done_reason')
+                snapshot.update(terminal_received=True, finish_reason=finish,
+                                prompt_tokens=final.get('prompt_eval_count'), generated_tokens=final.get('eval_count'))
+                for field in ('total_duration', 'load_duration', 'prompt_eval_duration', 'eval_duration'):
+                    if isinstance(final.get(field), (int, float)):
+                        snapshot[field + '_seconds'] = final[field] / 1e9
+                if finish != 'stop':
+                    raise IncompleteResponseError(f'LLM output incomplete ({finish})')
+                count, generated = final.get('prompt_eval_count'), final.get('eval_count')
+                # Structured thinking may be included in the second phase's prompt count.
+                if type(count) is not int or type(generated) is not int or count < 0 or generated < 0 or count + generated > config.context_tokens or generated >= cap:
+                    raise IncompleteResponseError('Unexpected context usage or generation cap reached')
+                snapshot['verified_context_tokens'] = await _verify_context(http, config, metadata['digest'])
+        else:
+            payload = {'model': config.model, 'messages': _openai_messages(messages), 'stream': True,
+                       config.output_parameter: cap, 'temperature': snapshot['temperature']}
+            payload.update(config.reasoning_options)
+            if response_format:
+                payload['response_format'] = response_format
+            for key, value in [('top_p', config.top_p), ('seed', config.seed)]:
+                if value is not None:
+                    payload[key] = value
+            async for data in _openai_stream(client, config, payload):
+                if data.get('model'):
+                    snapshot['provider_model'] = data['model']
+                if data.get('system_fingerprint'):
+                    snapshot['system_fingerprint'] = data['system_fingerprint']
+                if 'error' in data:
+                    raise ProviderError(str(data['error']))
+                for choice in data.get('choices', []):
+                    delta = choice.get('delta', {})
+                    append_content(delta.get('content') or '')
+                    if delta.get('content') or delta.get('reasoning_content') or delta.get('reasoning'):
+                        progress('thinking' if delta.get('reasoning_content') or delta.get('reasoning') else 'generating')
+                    if choice.get('finish_reason') is not None:
+                        finish = choice['finish_reason']
+                if data.get('usage'):
+                    snapshot['usage'] = data['usage']
+                    if data['usage'].get('total_tokens', 0) > config.context_tokens:
+                        raise ContextBudgetError('Provider context usage exceeds configured budget')
             if finish != 'stop':
                 raise IncompleteResponseError(f'LLM output incomplete ({finish})')
-            count, generated = final.get('prompt_eval_count'), final.get('eval_count')
-            # Structured thinking may be included in the second phase's prompt count.
-            if type(count) is not int or type(generated) is not int or count < 0 or generated < 0 or count + generated > config.context_tokens or generated >= cap:
-                raise IncompleteResponseError('Unexpected context usage or generation cap reached')
-            snapshot.update(prompt_tokens=count, generated_tokens=generated)
-            for field in ('total_duration', 'load_duration', 'prompt_eval_duration', 'eval_duration'):
-                if isinstance(final.get(field), (int, float)):
-                    snapshot[field + '_seconds'] = final[field] / 1e9
-            snapshot['verified_context_tokens'] = await _verify_context(http, config, metadata['digest'])
-    else:
-        payload = {'model': config.model, 'messages': _openai_messages(messages), 'stream': True,
-                   config.output_parameter: cap, 'temperature': snapshot['temperature']}
-        payload.update(config.reasoning_options)
-        if response_format:
-            payload['response_format'] = response_format
-        for key, value in [('top_p', config.top_p), ('seed', config.seed)]:
-            if value is not None:
-                payload[key] = value
-        async for data in _openai_stream(client, config, payload):
-            if data.get('model'):
-                snapshot['provider_model'] = data['model']
-            if data.get('system_fingerprint'):
-                snapshot['system_fingerprint'] = data['system_fingerprint']
-            if 'error' in data:
-                raise ProviderError(str(data['error']))
-            for choice in data.get('choices', []):
-                delta = choice.get('delta', {})
-                append_content(delta.get('content') or '')
-                if delta.get('content') or delta.get('reasoning_content') or delta.get('reasoning'):
-                    progress('thinking' if delta.get('reasoning_content') or delta.get('reasoning') else 'generating')
-                if choice.get('finish_reason') is not None:
-                    finish = choice['finish_reason']
-            if data.get('usage'):
-                snapshot['usage'] = data['usage']
-                if data['usage'].get('total_tokens', 0) > config.context_tokens:
-                    raise ContextBudgetError('Provider context usage exceeds configured budget')
-        if finish != 'stop':
-            raise IncompleteResponseError(f'LLM output incomplete ({finish})')
-        snapshot.update(digest=config.model_revision or None, verified_context_tokens=None)
-    answer = ''.join(content)
-    if not answer.strip():
-        raise IncompleteResponseError('LLM returned no final content')
+            snapshot.update(digest=config.model_revision or None, verified_context_tokens=None)
+        answer = ''.join(content)
+        if not answer.strip():
+            raise IncompleteResponseError('LLM returned no final content')
+    except BaseException as exc:
+        error_type = (exc.args[0] if isinstance(exc, asyncio.CancelledError) and exc.args
+                      and exc.args[0] in {'TimeoutError', 'LLMTotalTimeout', 'LLMCancelledError', 'WorkerStopped', 'LeaseLost'}
+                      else type(exc).__name__)
+        snapshot.update(status='failed', error_type=error_type,
+                        terminal_received=bool(final) if config.provider == 'ollama' else finish is not None,
+                        finish_reason=finish, response_bytes=content_bytes, wall_seconds=time.monotonic()-started)
+        # Only controlled local reasons, never provider text, prompts or fragments in logs.
+        if isinstance(exc, (IncompleteResponseError, ContextBudgetError)):
+            snapshot['failure_reason'] = str(exc)
+        import durable_jobs as durable
+        try:
+            durable.artifact('llm:transport', 'transport_failure', {'provenance': snapshot,
+                'partial_content': ''.join(content), 'error_detail': str(exc),
+                'http_status': getattr(exc, 'status_code', None)})
+            durable.record_metric({key: snapshot[key] for key in (
+                'status', 'error_type', 'terminal_received', 'finish_reason', 'response_bytes',
+                'model', 'digest', 'prompt_tokens', 'generated_tokens', 'wall_seconds',
+                'eval_duration_seconds', 'prompt_eval_duration_seconds') if snapshot.get(key) is not None})
+        except (LLMCancelledError, *durable.STORAGE_ERRORS):
+            logger.warning('Transport diagnostic persistence unavailable after %s', error_type)
+        _audit(snapshot, payload, ''.join(content))
+        raise
     snapshot['wall_seconds'] = time.monotonic() - started
     import durable_jobs as durable
     durable.record_metric({key: snapshot[key] for key in (
@@ -457,7 +484,7 @@ async def _run(client, config, kwargs, check_cancel, progress, operation=None):
                 result.llm_provenance['transport_attempts'] = attempt + 1
             return result
         except BaseException as exc:
-            task.cancel()
+            task.cancel(type(exc).__name__)
             await asyncio.gather(task, return_exceptions=True)
             if not isinstance(exc, Exception) or not retryable(exc) or attempt == config.max_retries:
                 raise

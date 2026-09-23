@@ -94,7 +94,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
 
     calls = [call for instance in fake_openai_module.instances for call in instance.calls]
     assert len(calls) == (10 if agenda_source == "pdf" else 6)
-    assert len(agenda_model.calls) == 6
+    assert len(agenda_model.calls) == 8
     routed = [(call, 'agenda_system_prompt') for _, call in agenda_model.calls]
     routed += [(call, 'pdf_system_prompt' if i < 2 else 'audit') for i, call in enumerate(calls[:-6])]
     routed += [(call, 'summary_system_prompt') for call in calls[-6:]]

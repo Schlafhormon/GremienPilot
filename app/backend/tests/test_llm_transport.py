@@ -136,6 +136,27 @@ def test_incomplete_native_output_never_succeeds(server, event):
     assert server['stream'].closed
 
 
+@pytest.mark.parametrize('ended', [False, True])
+def test_failed_stream_retains_private_fragment_and_observed_terminal_metrics(server, monkeypatch, ended, caplog):
+    import durable_jobs
+    artifacts, metrics = [], []
+    monkeypatch.setattr(durable_jobs, 'artifact', lambda step, kind, value: artifacts.append((kind, value)))
+    monkeypatch.setattr(durable_jobs, 'record_metric', metrics.append)
+    events = [{'message': {'content': 'PRIVATE PARTIAL'}, 'done': False}]
+    if ended:
+        events.append(terminal(done_reason='length', eval_count=100, message={'content': ''}))
+    server['stream'] = Bytes(ndjson(*events))
+    with pytest.raises(transport.IncompleteResponseError):
+        call()
+    failure = next(v for kind, v in artifacts if kind == 'transport_failure')
+    assert failure['partial_content'] == 'PRIVATE PARTIAL'
+    assert failure['provenance']['terminal_received'] is ended
+    assert failure['provenance']['finish_reason'] == ('length' if ended else None)
+    assert metrics[0]['status'] == 'failed'
+    assert ('generated_tokens' in metrics[0]) is ended
+    assert 'PRIVATE' not in caplog.text
+
+
 @pytest.mark.parametrize('actual', [None, 4096])
 def test_effective_context_is_verified(server, actual):
     server['actual_context'] = actual
