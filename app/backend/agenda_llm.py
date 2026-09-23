@@ -68,6 +68,9 @@ def array(items):
 
 TEXT = {'type': 'string', 'minLength': 1}
 EVIDENCE = array(obj({'line_id': TEXT}))
+# Representative anchors; episode boundaries and source_ranges retain access to
+# the entire original range. Enumerating every line can exhaust the response.
+RECONSTRUCTION_EVIDENCE = dict(EVIDENCE, maxItems=3)
 RANGES = array(obj({'start': {'type': 'integer', 'minimum': 0}, 'end': {'type': 'integer', 'minimum': 0}}))
 STATES = ['treated', 'deferred', 'removed', 'not_evidenced']
 INVENTORY = obj({'items': array(obj({'title': TEXT, 'number': {'type': ['string', 'null']},
@@ -378,6 +381,8 @@ class Workflow:
                     raise AgendaValidationError('invalid_agenda_status')
                 self.text(state['reason'])
                 self.evidence(state['evidence'], required=state['status'] != 'not_evidenced')
+                if len(state['evidence']) > 3:
+                    raise AgendaValidationError('too_many_state_anchors')
                 valid[identity] = state
             except (AgendaValidationError, KeyError, TypeError) as exc:
                 invalid.append({'entry': state, 'code': str(exc) if isinstance(exc, AgendaValidationError)
@@ -392,7 +397,7 @@ class Workflow:
         episode_id = {'enum': ids} if ids else TEXT
         schema = obj({'narrative': TEXT, 'episodes': array(obj({'start_line_id': TEXT, 'end_line_id': TEXT,
             'top_ids': array(episode_id), 'section': {'enum': ['public', 'nonpublic', None]},
-            'reason': TEXT, 'evidence': EVIDENCE}))})
+            'reason': TEXT, 'evidence': RECONSTRUCTION_EVIDENCE}))})
         def validate(data):
             self.text(data['narrative'])
             if not isinstance(data['episodes'], list):
@@ -408,11 +413,16 @@ class Workflow:
                     raise AgendaValidationError('invalid_section')
                 self.text(episode['reason'])
                 self.evidence(episode['evidence'])
+                if len(episode['evidence']) > 3:
+                    raise AgendaValidationError('too_many_episode_anchors')
         body = {'agenda': agenda, 'context': context, 'opinions': opinions}
         trajectory = self.source_call(role + ':trajectory:v1',
             'Rekonstruiere den gesamten tatsächlichen Sitzungsverlauf VOR der Detailzuordnung. '
             'Rekonstruiere episodes mit Originalgrenzen, TOP-IDs, Sitzungsteil und Originalbelegen. '
             'Erhalte Übergänge, Wiederaufnahmen und gemeinsame Beratungen; Reihenfolge folgt den Quellen. '
+            'narrative ist eine kurze Übersicht. Wähle je Episode höchstens drei ausschlaggebende '
+            'Belegzeilen; keine Aufzählung sämtlicher Zeilen. start_line_id/end_line_id binden den '
+            'vollständigen Originalabschnitt, der weiterhin über source_ranges zugänglich bleibt. '
             'Die TOP-Statusprüfung folgt separat. Prüfe bei opinions ALLE Abweichungen gegen die Quellen.',
             body, schema, validate)
         states = self.reconstruction_states(role, context, agenda, trajectory, opinions)
@@ -427,7 +437,8 @@ class Workflow:
             'ist KEIN not_evidenced. Jeder Ziel-TOP genau einmal, keine anderen IDs. '
             'Agenda und Verlauf bleiben vollständig sichtbar: Erhalte gemeinsame Beratungen und '
             'Wiederaufnahmen über Gruppengrenzen. Modellnotizen und Verlauf sind unbestätigte Entwürfe. '
-            'Fordere bei Bedarf Originalquellen an. Kurze konkrete Begründung und Originalbelege pro TOP. '
+            'Fordere bei Bedarf Originalquellen an. Kurze konkrete Begründung und höchstens drei '
+            'ausschlaggebende Originalbelege pro TOP; keine Aufzählung aller Quellenzeilen. '
             'Prüfe bei opinions ALLE Abweichungen unabhängig gegen die Originalquellen.')
         # Six entries keep UUIDs, reasons and evidence comfortably bounded without
         # changing sampling or output limits. All groups see the same full context.
@@ -436,7 +447,7 @@ class Workflow:
                 pending = ids[start:start+6]
                 for attempt in range(self.attempts):
                     state_schema = obj({'agenda_states': array(obj({'top_id': {'enum': pending},
-                        'status': {'enum': STATES}, 'reason': TEXT, 'evidence': EVIDENCE}))})
+                        'status': {'enum': STATES}, 'reason': TEXT, 'evidence': RECONSTRUCTION_EVIDENCE}))})
                     # Source requests may return an empty list; exact coverage is
                     # enforced in the validator on every final response.
                     state_schema['properties']['agenda_states']['maxItems'] = len(pending)

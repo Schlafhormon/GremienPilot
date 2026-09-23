@@ -30,7 +30,7 @@ def test_seven_of_36_are_retained_as_unreviewed_drafts(agenda_model):
     assert all(s['grounding']['content_status'] == 'unreviewed' for s in error.value.states)
 
 
-@pytest.mark.parametrize('defect', ['missing', 'duplicate', 'unknown', 'invalid_status'])
+@pytest.mark.parametrize('defect', ['missing', 'duplicate', 'unknown', 'invalid_status', 'excessive_evidence'])
 def test_only_missing_or_invalid_states_are_requested_again(agenda_model, defect):
     work, agenda, context = workflow()
     def partial(body):
@@ -42,8 +42,10 @@ def test_only_missing_or_invalid_states_are_requested_again(agenda_model, defect
                 answer['agenda_states'].append(deepcopy(answer['agenda_states'][-1]))
             elif defect == 'unknown':
                 answer['agenda_states'][-1]['top_id'] = 'foreign'
-            else:
+            elif defect == 'invalid_status':
                 answer['agenda_states'][-1]['status'] = 'unknown'
+            else:
+                answer['agenda_states'][-1]['evidence'] *= 61
         return answer
     agenda_model.overrides['independent:reconstruct:states:v1'] = partial
     result = work.reconstruction('independent:reconstruct', context, agenda)
@@ -113,6 +115,28 @@ def test_joint_and_resumed_episodes_survive_grouping_with_original_access(agenda
     originals = [b for b, _ in agenda_model.calls if 'requested_originals' in b]
     assert len(originals) == 6 and all(len(b['requested_originals']) == 2 for b in originals)
     assert all(b['opinions'] is None for b in originals)
+
+
+def test_reconstruction_bounds_anchors_without_restricting_source_access(agenda_model):
+    work, agenda, context = workflow()
+    work.reconstruction('primary:reconstruct', context, agenda)
+    for body, request in agenda_model.calls:
+        schema = request['response_format']['json_schema']['schema']['properties']
+        entries = schema['episodes' if 'episodes' in schema else 'agenda_states']['items']['properties']
+        assert entries['evidence']['maxItems'] == 3
+        assert 'source_ranges' in schema
+        assert body['context']['coverage'] == [0, 1]
+
+
+def test_excessive_episode_anchors_are_rejected_even_if_provider_ignores_schema(agenda_model):
+    work, agenda, context = workflow()
+    def excessive(body):
+        data = agenda_model.answer(body)
+        data['episodes'][0]['evidence'] *= 61
+        return data
+    agenda_model.overrides['primary:reconstruct:trajectory:v1'] = excessive
+    with pytest.raises(agenda_llm.AgendaValidationError, match='too_many_episode_anchors'):
+        work.reconstruction('primary:reconstruct', context, agenda)
 
 
 def test_missing_independent_check_preserves_primary_and_blocks_completion(agenda_model):

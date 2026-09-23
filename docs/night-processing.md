@@ -193,6 +193,10 @@ Modell und Volumes unverändert. `setup.ps1 start` baut geänderten Code nicht n
 Die Rekonstruktion erzeugt Verlauf/Episoden und TOP-Statusangaben getrennt.
 Statusgruppen umfassen höchstens sechs TOPs; vollständige Agenda, derselbe
 Sitzungskontext und Originalzugriff bleiben in jeder Gruppe verfügbar. Beide
+Antwortarten wählen höchstens drei repräsentative Belegstellen je Eintrag.
+Episodengrenzen binden weiterhin den gesamten Originalabschnitt; die Begrenzung
+betrifft die Belegaufzählung, nicht die zu lesenden Quellen. Das verhindert,
+dass lange Listen einzelner Zeilen die Ausgabe vorzeitig ausschöpfen. Beide
 Leser arbeiten weiterhin unabhängig. Fehlende oder doppelte Kennungen werden
 gezielt nachgefordert, gültige Teile bleiben unbestätigte Entwürfe. Erst exakt
 vollständige Abdeckung erlaubt die Detailzuordnung. Technische Lücken erhalten
