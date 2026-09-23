@@ -231,6 +231,7 @@ export interface StructuredSummary {
 }
 
 export interface SummarySourceLink {
+  grounding?: GroundingStatus;
   source_ids?: string[];
   scope?: string | null;
   section: keyof StructuredSummary | string;
@@ -242,6 +243,13 @@ export interface SummarySourceLink {
   excerpt: string;
   confidence: number;
   missing_source: boolean;
+}
+
+export interface GroundingStatus {
+  evidence_status: 'exact' | 'source_range' | 'unsupported';
+  content_status: 'unreviewed' | 'supported' | 'unclear' | 'contradicted';
+  questions: string[];
+  source_ids?: string[];
 }
 
 export interface SummaryReviewWarning {
@@ -360,7 +368,7 @@ export interface AgendaLLMUsage {
   processing_complete?: boolean;
   review_complete?: boolean;
   review_required?: boolean;
-  line_results?: { line_id: string; index: number; top_ids: string[]; status: 'assigned' | 'unassigned' | 'not_processed'; reason: string; review_status: string; evidence: { line_id: string; quote: string }[] }[];
+  line_results?: { line_id: string; index: number; top_ids: string[]; status: 'assigned' | 'unassigned' | 'not_processed'; reason: string; review_status: string; grounding?: GroundingStatus; evidence: { line_id: string; quote: string }[] }[];
   agenda_states?: { top_id: string; status: 'treated' | 'deferred' | 'removed' | 'not_evidenced'; reason: string; review_status: string; evidence: { line_id: string; quote: string }[] }[];
   reconstructions?: { narrative: string }[];
   provenance?: { identities?: { top_id: string; top_index: number; title: string; top_uid?: string }[]; model?: string; digest?: string; cache_namespace?: string; prompt_version?: string };

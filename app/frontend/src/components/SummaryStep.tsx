@@ -598,6 +598,10 @@ export default function SummaryStep({
                                     className="text-sm text-gray-700"
                                   >
                                     <div>{item}</div>
+                                    {source?.grounding && <p className="text-xs font-medium">
+                                      {source.grounding.evidence_status === 'exact' ? 'Exakt belegt · fachlich modellgeprüft' :
+                                        source.grounding.evidence_status === 'source_range' ? 'Quelle eingegrenzt · unbestätigt' : 'Unbelegt · unbestätigter Vorschlag'}
+                                    </p>}
                                     <div className="mt-1 flex flex-wrap gap-2">
                                       {source?.missing_source ? (
                                         <span className="rounded border border-yellow-300 bg-yellow-50 px-2 py-0.5 text-xs font-medium text-yellow-800">

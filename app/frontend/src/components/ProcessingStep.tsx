@@ -1,4 +1,5 @@
 import { API_BASE } from '../api';
+import { useEffect, useState } from 'react';
 import type { ProcessingStepProps } from '../types';
 
 const PIPELINE_STAGES = [
@@ -17,6 +18,11 @@ export default function ProcessingStep({
   canCancel = false,
   onCancel,
 }: ProcessingStepProps) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   const activeStage = pipeline?.stage ?? 'transcribe';
   const activeIndex = Math.max(
     0,
@@ -134,7 +140,8 @@ export default function ProcessingStep({
               {pipeline.execution.progress.round ? ` (Runde ${pipeline.execution.progress.round})` : ''}
             </p>}
             {pipeline?.execution?.progress?.phase === 'loading' && <p className="text-sm">Modell lädt oder verarbeitet die Eingabe; noch keine Ausgabe empfangen.</p>}
-            {pipeline?.execution?.progress?.last_delta_at != null && <p className="text-sm">Letzte Modellausgabe vor {Math.round(pipeline.execution.progress.silence_seconds ?? 0)} Sekunden.</p>}
+            {pipeline?.execution?.progress?.agenda_phase && <p className="text-sm">Prüfphase: {pipeline.execution.progress.agenda_phase}</p>}
+            {pipeline?.execution?.progress?.last_delta_at != null && <p className="text-sm">Letzte Modellausgabe vor {Math.max(0, Math.round(now / 1000 - pipeline.execution.progress.last_delta_at))} Sekunden.</p>}
           </div>
         )}
 

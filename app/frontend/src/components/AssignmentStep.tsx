@@ -835,6 +835,7 @@ export default function AssignmentStep({
                       <button
                         type="button"
                         aria-label={`Zeile ${index + 1} zuordnen`}
+                        id={`assignment-original-${index}`}
                         aria-pressed={assignedTo !== null && assignedTo === selectedTop}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -999,7 +1000,15 @@ export default function AssignmentStep({
                 Zeile {line.index + 1}: {line.status === 'not_processed' ? 'Technisch nicht verarbeitet' : line.status === 'unassigned' ? 'Fachlich begründet unzugeordnet' : line.top_ids.length > 1 ? 'Gemeinsame Beratung' : 'Zugeordnet'}
                 {line.top_ids.length > 0 && ': ' + line.top_ids.map(id => agendaDetection.llm?.provenance?.identities?.find(top => top.top_id === id)?.title ?? id).join(' / ')}
                 {' – '}{line.reason}
-                {['agreed', 'resolved'].includes(line.review_status) ? ' · Modellgeprüft' : line.review_status === 'technical_pending' ? ' · Technische Prüflücke' : ' · Prüfung offen'}
+                {line.grounding ? (line.grounding.evidence_status === 'exact' ? ' · Exakt belegt, fachlich modellgeprüft' :
+                  line.grounding.evidence_status === 'source_range' ? ' · Quelle eingegrenzt, unbestätigt' : ' · Unbelegt, unbestätigter Vorschlag') :
+                  line.review_status === 'technical_pending' ? ' · Technische Prüflücke' : ' · Prüfung offen'}
+                {line.grounding?.questions.map(question => <p key={question} className="text-amber-900">Prüffrage: {question}</p>)}
+                <button type="button" className="text-blue-700 underline" onClick={() => {
+                  const original = document.getElementById(`assignment-original-${line.index}`);
+                  original?.scrollIntoView({ block: 'center' });
+                  original?.focus();
+                }}>Originalbereich anzeigen</button>
                 {line.top_ids.length > 1 && <span> · Als gemeinsamer Vorschlag gespeichert; keine automatische Einzelzuordnung.</span>}
               </li>
             ))}</ul>

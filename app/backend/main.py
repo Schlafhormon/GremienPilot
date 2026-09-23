@@ -847,6 +847,7 @@ class SummarizeRequest(BaseModel):
 
 
 class StructuredSummaryResponse(BaseModel):
+    rejected_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     evidence: List[Dict[str, Any]] = Field(default_factory=list)
     review_questions: List[Dict[str, Any]] = Field(default_factory=list)
     verification: Dict[str, Any] = Field(default_factory=dict)
@@ -859,6 +860,7 @@ class StructuredSummaryResponse(BaseModel):
 
 
 class SummarySourceLinkResponse(BaseModel):
+    grounding: Dict[str, Any] = Field(default_factory=dict)
     source_ids: List[str] = Field(default_factory=list)
     scope: Optional[str] = None
     section: str
@@ -2022,6 +2024,32 @@ def current_summary_input(
     return snapshot, summary_snapshot_hash(snapshot)
 
 
+def preserve_assignment_questions(result, session, source_indices):
+    """A source-grounded statement does not certify its proposed TOP membership."""
+    from source_contract import marked_text, reviewed
+    from summary_grounding import digest
+    from summarize import render_structured_summary
+    usage = (((session or {}).get('agenda_proposals') or {}).get('result') or {}).get('llm') or {}
+    open_rows = [r for r in usage.get('line_results', []) if r.get('index') in source_indices and
+                (r.get('uncertain') or r.get('grounding', {}).get('evidence_status') not in (None, 'exact') or
+                 r.get('review_status') not in ('agreed', 'resolved'))]
+    if not open_rows or not result.structured:
+        return
+    question = 'Gehören diese Originalbeiträge tatsächlich zu diesem TOP, einschließlich gemeinsamer Beratung oder Wiederaufnahme?'
+    for item in result.structured.evidence:
+        g = item.get('grounding') or {'reference_status': 'exact', 'source_ids': [r['source_id'] for r in item['sources']]}
+        item['grounding'] = reviewed(g, questions=[question])
+        item['grounding']['assignment_origins'] = [dict(line_id=r['line_id'], index=r['index'],
+            grounding=r.get('grounding'), review_status=r.get('review_status')) for r in open_rows]
+        text = marked_text(item.get('original_text', item['item_text']), item['grounding'])
+        item['item_text'] = text
+        getattr(result.structured, item['section'])[item['item_index']] = text
+    result.summary = render_structured_summary(result.structured)
+    result.structured.verification['summary_sha256'] = digest(result.summary)
+    result.llm_usage['review_required'] = True
+    result.llm_usage['assignment_review_required'] = True
+
+
 def _replace_exact_labels(value: Any, replacements: dict[str, str]) -> Any:
     effective = {
         old: new
@@ -2202,9 +2230,32 @@ def reconcile_session_summaries(
             if review_was_edited
             else expected_review or requested_review
         )
-        if summary_was_edited and not review_was_edited:
+        if (summary_was_edited and not review_was_edited) or (manually_edited and
+                (old_review.get('structured') or {}).get('verification', {}).get('source_contract') == 'graded-sources-v1'):
             # Generated claims and source links no longer describe manual text.
-            review = {}
+            if (old_review.get('structured') or {}).get('verification', {}).get('source_contract') == 'graded-sources-v1':
+                from source_contract import marked_text
+                from export_protocol import parse_summary_sections
+                from summarize import StructuredSummary, render_structured_summary
+                old_structure = old_review['structured']
+                questions = list(dict.fromkeys(q for e in old_structure.get('evidence', [])
+                    for q in e.get('grounding', {}).get('questions', [])))
+                questions.append('Ist diese manuell bearbeitete Aussage durch die Originalquellen belegt?')
+                g = dict(evidence_status='unsupported',reference_status='unsupported',content_status='unreviewed',
+                         questions=questions,source_ids=[],origin='manual_edit',recorded_at=time.time())
+                manual = StructuredSummary(**{key:[marked_text(item,g) for item in items]
+                    for key,items in parse_summary_sections(summary).items()})
+                manual.verification = dict(old_structure.get('verification') or {})
+                manual.verification.update(processing_complete=False)
+                for section in ('discussion','decisions','votes','action_items','open_points','uncertainties'):
+                    for number,text in enumerate(getattr(manual,section)):
+                        manual.evidence.append(dict(section=section,item_index=number,item_text=text,scope='unclear',
+                            sources=[],grounding=g))
+                summary = render_structured_summary(manual)
+                review = dict(old_review,structured=manual.to_dict(),source_links=[],
+                    retained_evidence=old_structure.get('evidence', []))
+            else:
+                review = {}
 
         snapshot, input_hash = current_summary_input(state, index)
         proof = (review.get('structured') or {}).get('verification') or {}
@@ -2465,6 +2516,7 @@ def _run_summary_job(summary_job_id: str) -> None:
                     meeting_context=meeting_context_from_transcript(transcript),
                     source_lines=[format_line_for_summary(line, names) for line in lines])
             result.llm_usage["original_line_indices"] = source_indices
+            preserve_assignment_questions(result, session, source_indices)
             if summary_job_cancelled(summary_job_id):
                 finalize_summary_job_cancellation(summary_job_id, job)
                 return
@@ -2547,12 +2599,14 @@ def save_pipeline_session(
     export_metadata: dict[str, Any] | None = None,
     current_step: int | None = None,
     skipped_assignment: bool | None = None,
+    draft_phase: str | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id) or {"session_id": session_id}
     ctx = durable.CURRENT.get()
-    if ctx and summaries is None:
+    if ctx and summaries is None and not draft_phase:
         return session
-    if ctx and durable.published("pipeline:published"):
+    publication_key = "pipeline:draft:" + draft_phase if draft_phase else "pipeline:published"
+    if ctx and durable.published(publication_key):
         return session
     state = dict(session)
     if job_id is not None:
@@ -2604,7 +2658,7 @@ def save_pipeline_session(
     state.setdefault("summary_states", {})
     state.setdefault("export_metadata", {})
     state.setdefault("skipped_assignment", False)
-    with durable.publication("pipeline:published"):
+    with durable.publication(publication_key):
         return save_session(session_id, state,
             expected_revision=ctx.payload.get("session_revision") if ctx else session.get("revision"),
             bump_revision=True)
@@ -2791,6 +2845,13 @@ def summarize_pipeline_segments(
                     f"({safe_exception_label(exc)})."
                 )
             append_pipeline_warning(pipeline_id, message)
+            if getattr(exc, 'partial_result', None):
+                partial = exc.partial_result
+                review = build_summary_review(structured=partial.structured,summary=partial.summary,
+                    lines=[{**line,'speaker':(speaker_names or {}).get(line['speaker'],line['speaker'])} for line in transcript])
+                return {0:partial.summary}, {0:dict(structured=partial.structured.to_dict(),
+                    source_links=[link.to_dict() for link in review.source_links],
+                    review_warnings=[w.to_dict() for w in review.warnings],llm_usage=partial.llm_usage,error=safe_exception_label(exc))}
             return {}, {
                 0: {
                     "structured": None,
@@ -2817,6 +2878,7 @@ def summarize_pipeline_segments(
         if not lines:
             summaries[top_index] = ""
             summary_reviews[top_index] = {
+                "empty_source": True,
                 "structured": None,
                 "source_links": [],
                 "review_warnings": [
@@ -2844,6 +2906,7 @@ def summarize_pipeline_segments(
                     system_prompt=system_prompt,
                     meeting_context=meeting_context_from_transcript(transcript),
                 )
+            preserve_assignment_questions(result, source_session, source_indices)
             review = build_summary_review(
                 structured=result.structured,
                 summary=result.summary,
@@ -2889,6 +2952,15 @@ def summarize_pipeline_segments(
                 ],
                 "error": safe_exception_label(exc),
             }
+            if getattr(exc, 'partial_result', None):
+                partial = exc.partial_result
+                preserve_assignment_questions(partial,source_session,source_indices)
+                review = build_summary_review(structured=partial.structured,summary=partial.summary,
+                    lines=[{**line,'speaker':(speaker_names or {}).get(line['speaker'],line['speaker'])} for line in lines])
+                summaries[top_index] = partial.summary
+                summary_reviews[top_index].update(structured=partial.structured.to_dict(),
+                    source_links=[link.to_dict() for link in review.source_links],
+                    review_warnings=[w.to_dict() for w in review.warnings],llm_usage=partial.llm_usage)
 
         save_pipeline_state(pipeline_id, result_refs={
             "summary_progress": {"completed_tops": top_index + 1, "total_tops": len(tops),
@@ -2985,8 +3057,14 @@ def _run_pipeline_job(
         )
         transcript = durable.checkpoint("pipeline:agenda-transcript:v1",
             lambda: split_transcript_for_agenda_detection(transcript))
-        tops, assignments, agenda_info, pdf_metadata = durable.checkpoint("pipeline:agenda", lambda: detect_pipeline_agenda(
-            pipeline_id, transcript, known_tops=known_tops, pdf_path=pdf_path, options=options))
+        def agenda_complete(value):
+            info = value[2]
+            usage = info.get('llm') or {}
+            return not info.get('pdf_incomplete') and (options.get('skip_agenda_detection') or
+                (usage.get('processing_complete') and usage.get('review_complete')))
+        agenda_result = durable.draft_checkpoint("pipeline:agenda", lambda: detect_pipeline_agenda(
+            pipeline_id, transcript, known_tops=known_tops, pdf_path=pdf_path, options=options), agenda_complete)
+        tops, assignments, agenda_info, pdf_metadata = agenda_result
         pdf_extraction = agenda_info.get("pdf_extraction")
         exact_pdf_agenda = bool(pdf_extraction and tops[:len(pdf_extraction["tops"])] == pdf_extraction["tops"])
         pdf_ids = [item["id"] for item in (pdf_extraction or {}).get("items", []) if item["kind"] == "agenda"] if exact_pdf_agenda else []
@@ -3015,11 +3093,22 @@ def _run_pipeline_job(
             agenda_proposals=agenda_proposals,
             skipped_assignment=not bool(tops),
             current_step=2,
+            draft_phase=None if agenda_complete(agenda_result) else 'agenda',
         )
         save_pipeline_state(
             pipeline_id,
             result_refs={"agenda": agenda_info, "top_count": len(tops)},
         )
+
+        if not agenda_complete(agenda_result):
+            execution = durable.load(pipeline_id) if durable.CURRENT.get() else None
+            failure_phase = ((execution or {}).get('progress') or {}).get('agenda_phase', 'agenda_detect')
+            save_pipeline_state(pipeline_id, status=PIPELINE_STATUS_FAILED,
+                stage=PIPELINE_STAGE_AGENDA_DETECT, progress=72,
+                error='TOP-Zuordnung technisch unvollständig', result_refs={
+                    'processing_complete': False, 'ready_for_review': False,
+                    'publication_status': 'incomplete_draft', 'failure_phase': failure_phase})
+            return
 
         ensure_pipeline_not_cancelled(pipeline_id)
         save_pipeline_state(
@@ -3027,14 +3116,22 @@ def _run_pipeline_job(
             stage=PIPELINE_STAGE_SUMMARIZE,
             progress=82,
         )
+        expected = {i for i in range(len(tops)) if summary_line_indices(dict(
+            transcript=transcript, tops=tops, top_ids=top_ids, assignments=assignments,
+            agenda_proposals=agenda_proposals), i)} if tops else {0}
+        def summaries_complete(value):
+            reviews = {int(k):v for k,v in value[1].items()}
+            return expected <= set(reviews) and all(not reviews[i].get('error') and
+                (reviews[i].get('llm_usage') or {}).get('processing_complete') for i in expected)
         if not tops and not options.get('skip_agenda_detection'):
             summaries, summary_reviews = {}, {}
             append_pipeline_warning(pipeline_id, 'Keine belegte Agenda; keine automatische Ersatz-Zusammenfassung.')
         else:
-            summaries, summary_reviews = durable.checkpoint("pipeline:summaries", lambda: summarize_pipeline_segments(
+            summaries, summary_reviews = durable.draft_checkpoint("pipeline:summaries", lambda: summarize_pipeline_segments(
                 pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options,
                 source_session=dict(transcript=transcript, tops=tops, top_ids=top_ids,
-                                    assignments=assignments, agenda_proposals=agenda_proposals)))
+                                    assignments=assignments, agenda_proposals=agenda_proposals)),
+                summaries_complete)
         summaries = {int(k): v for k, v in summaries.items()}
         summary_reviews = {int(k): v for k, v in summary_reviews.items()}
         summary_states = build_generated_summary_states(
@@ -3065,13 +3162,11 @@ def _run_pipeline_job(
             export_metadata=pdf_metadata,
             skipped_assignment=not bool(tops),
             current_step=2 if not tops else 3,
+            draft_phase=None if summaries_complete((summaries,summary_reviews)) else 'summaries',
         )
 
         ensure_pipeline_not_cancelled(pipeline_id)
         agenda_usage = agenda_info.get("llm") or {}
-        expected = {i for i in range(len(tops)) if summary_line_indices(dict(
-            transcript=transcript, tops=tops, top_ids=top_ids, assignments=assignments,
-            agenda_proposals=agenda_proposals), i)} if tops else {0}
         complete = (not agenda_info.get("pdf_incomplete")
                     and (options.get('skip_agenda_detection') or
                          (agenda_usage.get('processing_complete') and agenda_usage.get('review_complete')))
@@ -3083,11 +3178,14 @@ def _run_pipeline_job(
         save_pipeline_state(
             pipeline_id,
             status=PIPELINE_STATUS_COMPLETED if complete else PIPELINE_STATUS_FAILED,
-            stage=PIPELINE_STAGE_READY_FOR_REVIEW,
-            progress=100,
+            stage=PIPELINE_STAGE_READY_FOR_REVIEW if complete else PIPELINE_STAGE_SUMMARIZE,
+            progress=100 if complete else 82,
             error=None,
-            result_refs={"ready_for_review": True,
+            result_refs={"ready_for_review": bool(complete),
                          "processing_complete": complete,
+                         "publication_status": 'review_draft' if complete and (agenda_usage.get('review_required') or
+                             any((r.get('llm_usage') or {}).get('review_required') for r in summary_reviews.values()))
+                             else 'verified' if complete else 'incomplete_draft',
                          "unassigned_line_count": assignments.count(None)},
         )
     except LLMCancelledError:
@@ -3412,7 +3510,8 @@ async def get_pipeline_result(pipeline_id: str):
         raise HTTPException(status_code=404, detail="Pipeline nicht gefunden")
     if (
         pipeline_job.get("status") not in {PIPELINE_STATUS_COMPLETED, PIPELINE_STATUS_FAILED}
-        or pipeline_job.get("stage") != PIPELINE_STAGE_READY_FOR_REVIEW
+        or (pipeline_job.get("stage") != PIPELINE_STAGE_READY_FOR_REVIEW and
+            _pipeline_refs(pipeline_job).get('publication_status') != 'incomplete_draft')
     ):
         raise HTTPException(status_code=409, detail="Pipeline ist noch nicht reviewbar")
 
@@ -4083,9 +4182,30 @@ async def list_session_speaker_match_diagnostics(session_id: str):
 async def export_protocol_endpoint(request: ProtocolExportRequest):
     """Render the completed protocol as TXT, DOCX or PDF."""
     if request.session_id:
+        saved_session = get_required_session(request.session_id)
+        saved_reviews = saved_session.get('summary_reviews') or {}
+        request.summary_reviews = {**request.summary_reviews, **saved_reviews}
         pipeline = load_latest_pipeline_job_for_session(request.session_id)
         if pipeline and (pipeline['status'] != 'completed' or _pipeline_refs(pipeline).get('processing_complete') is not True):
             raise HTTPException(409, 'Pipeline technisch unvollständig; erhaltene Ergebnisse sind ein prüfbarer Entwurf')
+        if pipeline and _pipeline_refs(pipeline).get('publication_status') == 'review_draft':
+            if 'Prüfentwurf' not in request.metadata.title:
+                request.metadata.title = (request.metadata.title or 'Sitzungsprotokoll') + ' – Prüfentwurf'
+            usage = ((_pipeline_refs(pipeline).get('agenda') or {}).get('llm') or {})
+            for index in range(len(request.tops)):
+                review = request.summary_reviews.setdefault(index,{})
+                questions = list(review.get('review_warnings') or [])
+                model_ids = {i['top_id'] for i in (usage.get('provenance') or {}).get('identities',[])
+                             if i.get('top_index') == index}
+                for row in usage.get('line_results',[]):
+                    if row.get('grounding',{}).get('evidence_status') == 'exact':
+                        continue
+                    if model_ids.intersection(row.get('top_ids',[])) or not row.get('top_ids'):
+                        for question in row.get('grounding',{}).get('questions',[]):
+                            message = f"Originalzeile {row['index']+1}: {question}"
+                            if not any(q.get('message') == message for q in questions):
+                                questions.append(dict(kind='assignment_open',message=message,line_indices=[row['index']]))
+                review['review_warnings'] = questions
     if any((review.get('llm_usage') or {}).get('processing_complete') is False
            for review in request.summary_reviews.values() if isinstance(review, dict)):
         raise HTTPException(409, 'Technisch unvollständige Zusammenfassungen sind nicht exportierbar')
@@ -4761,8 +4881,9 @@ def run_durable_job(job):
         state = 'review_required' if result['review_required'] or not result['tops'] else 'completed'
         return result, state if result['processing_complete'] or result.get('review_questions') else 'failed'
     if job['kind'] == 'agenda':
-        result = durable.checkpoint('agenda:validated', lambda: calculate_agenda(
-            AgendaDetectionRequest(**payload['request'])).model_dump())
+        result = durable.draft_checkpoint('agenda:validated', lambda: calculate_agenda(
+            AgendaDetectionRequest(**payload['request'])).model_dump(), lambda value:
+                (value.get('llm') or {}).get('processing_complete') and (value.get('llm') or {}).get('review_complete'))
         state = (result.get('llm') or {}).get('status')
         if state in {'disabled', 'failed', 'partial_failure', 'fallback', 'partial_fallback'}:
             return result, 'failed'
@@ -4779,7 +4900,8 @@ def run_durable_job(job):
             state = 'review_required' if refs.get('processing_complete') and needs_review else 'completed'
             if refs.get('processing_complete') is False:
                 state = 'failed'
-        return {'session_id': old['session_id']}, state
+        return {'session_id': old['session_id'], 'processing_complete':refs.get('processing_complete',False),
+                'publication_status':refs.get('publication_status','incomplete_draft')}, state
     if job['kind'] == 'summary':
         run_summary_job(job['job_id'])
         old = load_summary_job(job['job_id'])

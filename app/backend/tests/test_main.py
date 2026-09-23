@@ -1261,8 +1261,8 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
         pipeline_id = response.json()["pipeline_id"]
 
         assert wait_until(
-            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"]
-            == "ready_for_review"
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"]
+            == "failed"
         )
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
@@ -1315,8 +1315,8 @@ def test_pipeline_failure_keeps_technical_gap_without_invented_agenda(
         pipeline_id = response.json()["pipeline_id"]
 
         assert wait_until(
-            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"]
-            == "ready_for_review"
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"]
+            == "failed"
         )
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
@@ -1517,8 +1517,8 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
         pipeline_id = response.json()["pipeline_id"]
 
         assert wait_until(
-            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"]
-            == "ready_for_review"
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"]
+            == "failed"
         )
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
@@ -1871,6 +1871,12 @@ def test_known_agenda_total_failure_is_persisted_as_incomplete(tmp_path, monkeyp
     assert session['agenda_proposals']['result']['llm']['gaps'][0]['kind'] == 'technical'
     assert not main.load_pipeline_job(pipeline_id)['result_refs']['processing_complete']
     assert not session['summaries'].get('0')
+    pipeline = main.load_pipeline_job(pipeline_id)
+    assert pipeline['stage'] == 'agenda_detect' and pipeline['progress'] < 100
+    with persistence.connect() as db:
+        keys={row[0] for row in db.execute('SELECT step_key FROM durable_steps WHERE job_id=?',(pipeline_id,))}
+    assert not {'pipeline:agenda','pipeline:summaries','pipeline:published'} & keys
+    assert 'pipeline:draft:agenda' in keys
     assert result['warnings']
     assert 'SECRET' not in str(result)
     assert len(fake_openai_module.instances) == 1  # No summary over heuristic replacement text.
@@ -1895,7 +1901,7 @@ def test_reuse_verified_pdf_keeps_source_and_ids_without_browser_file(tmp_path, 
             data={'pdf_source_job_id': extracted['document']['job_id'], 'agenda_use_llm': 'false'})
         assert response.status_code == 200, response.text
         pipeline_id = response.json()['pipeline_id']
-        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['stage'] == 'ready_for_review')
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'failed')
         session = client.get(f'/api/pipeline/{pipeline_id}/result').json()['session']
         assert session['tops'] == extracted['tops']
         assert session['top_ids'] == [i['id'] for i in extracted['items'] if i['kind'] == 'agenda']
