@@ -199,3 +199,20 @@ def test_source_resume_refuses_broken_bindings(failed_graded_job,defect,monkeypa
                 db.execute('UPDATE durable_jobs SET payload=? WHERE job_id=?',(json.dumps(payload),job_id))
     with pytest.raises(ValueError):
         resume_pipeline.resume_sources(job_id,apply=True)
+
+
+def test_source_resume_accepts_only_identical_retained_audio_copy(failed_graded_job,tmp_path):
+    from pathlib import Path
+    job_id=failed_graded_job
+    pipeline=persistence.load_pipeline_job(job_id)
+    original=Path(pipeline['result_refs']['audio_path'])
+    retained=tmp_path/'retained.wav'
+    retained.write_bytes(b'different')
+    pipeline['result_refs']['audio_path']=str(retained)
+    persistence.save_pipeline_job(job_id,pipeline)
+    with pytest.raises(ValueError,match='input hash binding'):
+        resume_pipeline.resume_sources(job_id)
+    retained.write_bytes(original.read_bytes())
+    report=resume_pipeline.resume_sources(job_id,apply=True)
+    child=jobs.load(report['job_id'])
+    assert {d['path'] for d in child['documents']} >= {str(original),str(retained)}

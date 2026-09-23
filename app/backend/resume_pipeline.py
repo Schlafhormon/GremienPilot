@@ -74,8 +74,13 @@ def resume_sources(job_id, *, apply=False):
                 {k:v for k,v in row.items() if k != 'line_id'} for row in transcript]:
             raise ValueError('Accepted transcript differs from completed audio checkpoint')
         audio = pipeline['result_refs'].get('audio_path')
-        if not any(d['path'] == audio for d in job['documents']):
+        retained_audio = durable.document(audio)
+        if not any(d['sha256'] == retained_audio['sha256'] and Path(d['path']).stat().st_size == Path(audio).stat().st_size
+                   for d in job['documents']):
             raise ValueError('Retained audio lacks input hash binding')
+        documents = deepcopy(job['documents'])
+        if not any(d['path'] == audio for d in documents):
+            documents.append(retained_audio)
         pdf_path = pipeline['result_refs'].get('pdf_path')
         document = durable.document(pdf_path)
         prefix = 'pdf:v2:' + document['sha256']
@@ -129,6 +134,8 @@ def resume_sources(job_id, *, apply=False):
             previous_versions=previous,current_versions=versions,created_at=time.time(),
             retained_hashes={k:durable.hash_value(v) for k,v in retained.items()},
             retained_completed_at={k:completed_at[k] for k in retained},
+            retained_audio_binding=dict(path=audio,sha256=retained_audio['sha256'],
+                original_paths=[d['path'] for d in job['documents'] if d['sha256'] == retained_audio['sha256']]),
             archived_in_parent=[k for k in steps if k not in retained],backup=str(backup))
         # Child queue, pipeline row and copied checkpoints become visible atomically.
         with persistence.connect() as db:
@@ -138,7 +145,7 @@ def resume_sources(job_id, *, apply=False):
                 progress,error,result_refs_json,created_at,updated_at) VALUES (?,?,?,'pending','agenda_detect',72,NULL,?,?,?)''',
                 (child_id,session_id,pipeline['transcription_job_id'],json.dumps(refs),now,now))
             db.execute("INSERT INTO durable_jobs (job_id,kind,state,payload,documents,created_at,updated_at) VALUES (?,'pipeline','queued',?,?,?,?)",
-                (child_id,json.dumps(payload),json.dumps(job['documents']),now,now))
+                (child_id,json.dumps(payload),json.dumps(documents),now,now))
             for key,value in {**retained,'operator:source-contract-resume':json.dumps(history)}.items():
                 db.execute('INSERT INTO durable_steps VALUES (?,?,?,?)',(child_id,key,value,completed_at.get(key,now)))
                 db.execute('INSERT INTO durable_step_integrity VALUES (?,?,?)',(child_id,key,durable.hash_value(value)))
