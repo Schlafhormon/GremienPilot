@@ -62,7 +62,9 @@ def validate(job_id, output):
         transcript = [TranscriptUtterance(**{k: row.get(k) for k in ('speaker', 'text', 'line_id', 'start', 'end')})
                       for row in steps['pipeline:agenda-transcript:v1']]
         pdf = steps['pipeline:pdf:page-evidence-v3']
-        agenda = model_agenda(pdf['tops'], [item['id'] for item in pdf['items'] if item['kind'] == 'agenda'])
+        # Match detect_pipeline_agenda: model identities are agenda:index; PDF
+        # publication IDs are attached only after the detector has returned.
+        agenda = model_agenda(pdf['tops'])
         parent = persistence.load_pipeline_job(history['parent_job_id'])
         old_usage = parent['result_refs']['agenda']['llm']
         if agenda != [{k: v for k, v in item.items() if k not in {'top_index', 'top_uid'}}
