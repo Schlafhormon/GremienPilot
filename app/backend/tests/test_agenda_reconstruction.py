@@ -145,3 +145,21 @@ def test_missing_independent_check_preserves_primary_and_blocks_completion(agend
     assert len(result.llm.reconstructions) == 1
     assert not result.llm.processing_complete and not result.llm.review_complete
     assert all(g['kind'] == 'technical' for g in result.llm.gaps)
+
+
+def test_adjudication_keeps_global_timeline_but_only_compares_target_states(agenda_model):
+    work, agenda, context = workflow()
+    opinions = [work.reconstruction(role + ':reconstruct', context, agenda) for role in ('primary', 'independent')]
+    agenda_model.calls.clear()
+    result = work.reconstruction('resolve:states', context, agenda, opinions)
+    assert len(result['agenda_states']) == 36
+    timeline = agenda_model.calls[0][0]
+    assert all('agenda_states' not in opinion for opinion in timeline['opinions'])
+    assert all(opinion['episodes'] for opinion in timeline['opinions'])
+    for body, _ in agenda_model.calls[1:]:
+        assert body['agenda'] == agenda
+        assert body['context']['coverage'] == [0, 1]
+        assert body['trajectory']['episodes'] == timeline['opinions'][0]['episodes']
+        assert [len(opinion['agenda_states']) for opinion in body['opinions']] == [6, 6]
+        assert all({s['top_id'] for s in opinion['agenda_states']} == set(body['expected_top_ids'])
+                   for opinion in body['opinions'])

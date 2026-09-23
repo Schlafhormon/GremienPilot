@@ -415,7 +415,9 @@ class Workflow:
                 self.evidence(episode['evidence'])
                 if len(episode['evidence']) > 3:
                     raise AgendaValidationError('too_many_episode_anchors')
-        body = {'agenda': agenda, 'context': context, 'opinions': opinions}
+        trajectory_opinions = ([{k: v for k, v in opinion.items() if k != 'agenda_states'}
+                                for opinion in opinions] if opinions is not None else None)
+        body = {'agenda': agenda, 'context': context, 'opinions': trajectory_opinions}
         trajectory = self.source_call(role + ':trajectory:v1',
             'Rekonstruiere den gesamten tatsächlichen Sitzungsverlauf VOR der Detailzuordnung. '
             'Rekonstruiere episodes mit Originalgrenzen, TOP-IDs, Sitzungsteil und Originalbelegen. '
@@ -451,8 +453,10 @@ class Workflow:
                     # Source requests may return an empty list; exact coverage is
                     # enforced in the validator on every final response.
                     state_schema['properties']['agenda_states']['maxItems'] = len(pending)
+                    state_opinions = ([{'agenda_states': [s for s in opinion['agenda_states'] if s['top_id'] in pending]}
+                                       for opinion in opinions] if opinions is not None else None)
                     body = dict(agenda=agenda, context=context, trajectory=trajectory,
-                                opinions=opinions, expected_top_ids=pending)
+                                opinions=state_opinions, expected_top_ids=pending)
                     if attempt:
                         body['technical_repair'] = {'code': 'incomplete_agenda_states',
                             'missing_top_ids': pending, 'instruction': 'Ergänze ausschließlich diese noch fehlenden Prüfungen.'}

@@ -202,6 +202,11 @@ gezielt nachgefordert, gültige Teile bleiben unbestätigte Entwürfe. Erst exak
 vollständige Abdeckung erlaubt die Detailzuordnung. Technische Lücken erhalten
 keinen Ersatzstatus und keinen Erfolgscheckpoint.
 
+Beim Abgleich erhält die Verlaufsklärung beide vollständigen Episodenentwürfe;
+die Statusgruppen erhalten jeweils nur die verglichenen Statusantworten ihrer
+Ziel-TOPs. Vollständiger Kontext, Agenda und geklärter Verlauf bleiben verfügbar.
+So vervielfacht der Abgleich nicht sämtliche Statuslisten in jeder Anfrage.
+
 Transportabbrüche speichern empfangene Fragmente ausschließlich lokal als
 `transport_failure`. Abschlussereignis, Abschlussgrund, bekannte Tokenzahlen,
 Laufzeit und Fehlerklasse unterscheiden eine gemeldete Ausgabegrenze von einem
