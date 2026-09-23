@@ -190,6 +190,19 @@ def build_protocol_document(
         else:
             sections = parse_summary_sections(editable_summary)
 
+        if structured and structured.get('verification', {}).get('source_contract') == 'graded-sources-v1':
+            from source_contract import marked_text, digest
+            verification = structured['verification']
+            if verification.get('summary_sha256') != digest(editable_summary):
+                # Manual wording cannot inherit the generated source certificate.
+                questions = [q for e in structured.get('evidence', []) for q in e.get('grounding', {}).get('questions', [])]
+                g = {'evidence_status': 'unsupported', 'content_status': 'unreviewed',
+                     'questions': questions or ['Ist diese bearbeitete Fassung durch die Originalquellen belegt?']}
+                sections = {key: [marked_text(item, g) for item in items] for key, items in sections.items()}
+            if any('[UNBESTÄTIGT' in text or '[VERWORFEN' in text for items in sections.values() for text in items):
+                if 'Prüfentwurf' not in metadata.title:
+                    metadata.title = (metadata.title or 'Sitzungsprotokoll') + ' – Prüfentwurf'
+
         protocol_tops.append(
             ProtocolTop(
                 index=index + 1,

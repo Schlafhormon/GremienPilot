@@ -64,6 +64,10 @@ def init_schema(db):
             request_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, phase TEXT NOT NULL,
             recorded_at REAL NOT NULL, metrics TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS durable_artifacts (
+            artifact_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, step_key TEXT NOT NULL,
+            kind TEXT NOT NULL, value TEXT NOT NULL, sha256 TEXT NOT NULL, recorded_at REAL NOT NULL
+        );
     """)
 
 
@@ -82,9 +86,25 @@ def load(job_id):
 
 
 def public(job):
-    return {key: job.get(key) for key in PUBLIC if key != "documents"} | {
+    result = {key: job.get(key) for key in PUBLIC if key != "documents"} | {
         "documents": [{k: v for k, v in doc.items() if k != "path"} for doc in job.get("documents") or []]
     }
+    if (result.get('progress') or {}).get('last_delta_at') is not None:
+        result['progress'] = {**result['progress'], 'silence_seconds':
+            max(0, time.time() - result['progress']['last_delta_at'])}
+    return result
+
+
+def artifact(step, kind, value):
+    """Private local evidence, never a successful processing checkpoint or API log."""
+    ctx = CURRENT.get()
+    if ctx is None:
+        return
+    encoded = json.dumps(value, ensure_ascii=False)
+    with persistence.connect() as db:
+        fence(db)
+        db.execute('INSERT INTO durable_artifacts VALUES (?,?,?,?,?,?,?)',
+                   (str(uuid.uuid4()), ctx.job_id, step, kind, encoded, hash_value(encoded), time.time()))
 
 
 def version_snapshot(payload=None):
@@ -92,7 +112,7 @@ def version_snapshot(payload=None):
     from llm_config import get_llm_config
     files = ("llm_config.py", "durable_jobs.py", "summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_detection.py",
              "extract_tops.py", "llm_transport.py", "main.py", "agenda_context.py",
-             "agenda_labels.py", "assignment_suggestions.py", "persistence.py")
+             "agenda_labels.py", "assignment_suggestions.py", "persistence.py", "source_contract.py")
     policy_keys = (
         "PDF_RENDER_DPI", "PDF_MAX_PAGE_PIXELS", "PDF_MAX_PAGES", "PDF_OUTPUT_TOKENS",
         "PDF_MODEL_ATTEMPTS", "PDF_REVIEW_ROUNDS",
@@ -199,6 +219,26 @@ def checkpoint(key, operation):
         encoded = json.dumps(value)
         db.execute("INSERT INTO durable_steps VALUES (?,?,?,?)", (ctx.job_id, key, encoded, time.time()))
         db.execute('INSERT INTO durable_step_integrity VALUES (?,?,?)', (ctx.job_id, key, hash_value(encoded)))
+    return value
+
+
+def draft_checkpoint(key, operation, complete):
+    """Retain inspectable partial results without certifying a completed step."""
+    class IncompleteDraft(Exception):
+        def __init__(self, value):
+            self.value = value
+    def run():
+        value = operation()
+        if not complete(value):
+            raise IncompleteDraft(value)
+        return value
+    try:
+        value = checkpoint(key, run)
+    except IncompleteDraft as exc:
+        artifact(key, 'incomplete_draft', exc.value)
+        return exc.value
+    if not complete(value):
+        raise ValueError('Invalid completed checkpoint; explicit migration required')
     return value
 
 

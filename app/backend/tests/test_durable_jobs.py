@@ -485,13 +485,14 @@ def test_agenda_resume_keeps_split_source_ids_and_successful_model_steps(agenda_
         with pytest.raises(jobs.WorkerStopped):
             main.calculate_agenda(request)
     original_ids = [r['line_id'] for b, _ in agenda_model.calls if b['phase'] == 'primary:detail' for r in b['target_lines']]
-    assert len(original_ids) == 3 and original_ids[0] == 'original'
+    assert len(original_ids) == 3 and original_ids[0] == 'L1'
     agenda_model.calls.clear()
     agenda_model.overrides.clear()
     with claimed(job):
         result = main.calculate_agenda(request)
     assert result.llm.review_complete
-    assert [line.line_id for line in result.transcript] == original_ids
+    assert [r['ref'] for r in result.llm.provenance['source_catalog']['references']] == original_ids
+    assert [line.line_id for line in result.transcript] == [r['original_id'] for r in result.llm.provenance['source_catalog']['references']]
     assert [b['phase'] for b, _ in agenda_model.calls] == ['independent:detail']
     assert result.transcript[0].start == 10 and result.transcript[-1].end == 40
 

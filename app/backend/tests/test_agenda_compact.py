@@ -35,7 +35,7 @@ def test_compact_joint_gap_and_disagreement(agenda_model):
     assert result.llm.processing_complete and result.llm.review_complete
 
 
-@pytest.mark.parametrize('mutation', ['gap', 'overlap', 'outside', 'bool', 'reversed', 'unknown_top', 'quote', 'confidence'])
+@pytest.mark.parametrize('mutation', ['gap', 'overlap', 'outside', 'bool', 'reversed', 'unknown_top', 'confidence'])
 def test_invalid_compact_spans_are_technical_failure(agenda_model, monkeypatch, mutation):
     monkeypatch.setenv('AGENDA_REPAIR_SPLIT_DEPTH', '0')
     def bad(body):

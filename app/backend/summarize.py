@@ -78,6 +78,7 @@ class StructuredSummary:
     evidence: list[dict] = field(default_factory=list)
     review_questions: list[dict] = field(default_factory=list)
     verification: dict = field(default_factory=dict)
+    rejected_candidates: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -110,6 +111,7 @@ class SummarySourceLink:
     missing_source: bool = False
     source_ids: list[str] = field(default_factory=list)
     scope: str | None = None
+    grounding: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -556,27 +558,34 @@ def build_summary_review(
     from summary_grounding import digest
     review = SummaryReview()
     verification = structured.verification if structured else {}
-    valid = bool(verification.get('processing_complete')
-                 and verification.get('source_sha256') == digest([_line_text(line) for line in lines])
+    valid = bool(verification.get('source_sha256') == digest([_line_text(line) for line in lines])
                  and verification.get('summary_sha256') == digest(summary))
     if not valid:
         review.warnings.append(SummaryReviewWarning(kind='verification_required',
             message='Für diese Text- und Quellenfassung liegt keine vollständige automatische Prüfung vor. '
                     'Bitte neu generieren oder die manuelle Fassung fachlich prüfen.'))
         return review
+    if not verification.get('processing_complete'):
+        review.warnings.append(SummaryReviewWarning(kind='technical_incomplete',
+            message='Entwurf erhalten; erforderliche unabhängige Prüfungen sind technisch unvollständig.', severity='error'))
     sources = {row['source_id']: row for row in verification.get('sources', [])}
     def indices(evidence):
         return sorted({sources[item['source_id']]['line_index'] for item in evidence
                        if item.get('source_id') in sources})
     for item in structured.evidence:
         refs = item['sources']
-        line_indices = indices(refs)
+        accessible = list(dict.fromkeys([ref['source_id'] for ref in refs] + item.get('grounding', {}).get('source_ids', [])))
+        line_indices = indices([{'source_id': identity} for identity in accessible])
         start, end = _source_time_range(lines, line_indices)
         review.source_links.append(SummarySourceLink(
             section=item['section'], item_index=item['item_index'], item_text=item['item_text'],
             line_indices=line_indices, start=start, end=end,
             excerpt=_source_excerpt(lines, line_indices), missing_source=not line_indices,
-            source_ids=[ref['source_id'] for ref in refs], scope=item['scope']))
+            source_ids=accessible, scope=item['scope'], grounding=item.get('grounding', {})))
+        for question in item.get('grounding', {}).get('questions', []):
+            review.warnings.append(SummaryReviewWarning(kind='open_evidence', message=question,
+                section=item['section'], item_index=item['item_index'], line_indices=line_indices,
+                start=start, end=end, excerpt=_source_excerpt(lines, line_indices)))
     for issue in structured.review_questions:
         line_indices = indices(issue['evidence'])
         start, end = _source_time_range(lines, line_indices)
@@ -664,26 +673,52 @@ def summarize_segment(
     usage = {'configuration': config.public_snapshot()}
     workflow = Workflow(client, config, build_structured_system_prompt(system_prompt)
                         + "\nTOP: " + top_title, meeting_context, usage)
+    def attach_partial(error):
+        if not workflow.latest_claims:
+            return error
+        from source_contract import reviewed, marked_text
+        partial = StructuredSummary()
+        for claim in workflow.latest_claims:
+            g = reviewed(claim['grounding'], questions=['Die unabhängige Prüfung ist unvollständig. Stützt die Quelle diese Aussage?'])
+            items = getattr(partial, claim['section'])
+            text = marked_text(claim['text'], g)
+            partial.evidence.append(dict(section=claim['section'],item_index=len(items),item_text=text,
+                original_text=claim['text'],scope=claim['scope'],sources=claim['evidence'],grounding=g))
+            items.append(text)
+        text = render_structured_summary(partial)
+        partial.verification = dict(processing_complete=False,source_contract='graded-sources-v1',
+            source_sha256=digest(lines),summary_sha256=digest(text),sources=list(workflow.partial_rows.values()))
+        error.partial_result = SummarizationResult(summary=text,structured=partial,duration_seconds=time.monotonic()-start,
+            llm_usage={**usage,'processing_complete':False,'grounding_incomplete':True,'review_required':True})
+        return error
     try:
         claims, issues, rows, count = workflow.run(lines)
-    except (LLMCancelledError, ContextBudgetError):
+    except LLMCancelledError:
         raise
+    except ContextBudgetError as exc:
+        raise attach_partial(exc)
     except ValueError as exc:
-        raise StructuredOutputError("Automatische Quellenprüfung technisch unvollständig") from exc
+        raise attach_partial(StructuredOutputError("Automatische Quellenprüfung technisch unvollständig")) from exc
     except Exception as exc:
         info = classify_llm_error(exc)
-        raise LLMCallError("Automatische Quellenprüfung fehlgeschlagen (" + info.category + ")",
-                           category=info.category, transient=info.transient) from exc
+        raise attach_partial(LLMCallError("Automatische Quellenprüfung fehlgeschlagen (" + info.category + ")",
+                           category=info.category, transient=info.transient)) from exc
     structured = StructuredSummary()
+    from source_contract import marked_text
     for claim in claims:
         section = claim['section']
         items = getattr(structured, section)
         structured.evidence.append(dict(section=section, item_index=len(items),
-            item_text=claim['text'], scope=claim['scope'], sources=claim['evidence']))
-        items.append(claim['text'])
+            item_text=marked_text(claim['text'], claim['grounding']), scope=claim['scope'], sources=claim['evidence'],
+            grounding=claim['grounding'], original_text=claim['text']))
+        items.append(marked_text(claim['text'], claim['grounding']))
+    structured.rejected_candidates = usage.get('rejected_candidates', [])
+    for claim in structured.rejected_candidates:
+        structured.uncertainties.append(marked_text(claim['text'], claim['grounding']))
     structured.review_questions = issues
     structured.verification = dict(processing_complete=True, source_sha256=digest(lines),
-        sources=rows, checks=usage['required_checks'], prompt_version=usage['prompt_version'])
+        sources=rows, checks=usage['required_checks'], prompt_version=usage['prompt_version'],
+        source_contract='graded-sources-v1')
     summary = render_structured_summary(structured)
     if not summary:
         # No semantic filler. Absence is a model result, with evidence and completed checks.

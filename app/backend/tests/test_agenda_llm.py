@@ -99,7 +99,7 @@ def test_initial_failure_never_becomes_semantic_gap_or_heuristic(agenda_model, m
     assert all(g['kind'] == 'technical' for g in result.llm.gaps)
 
 
-@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'unknown_top', 'unknown_source', 'bad_quote', 'missing_reason'])
+@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'unknown_top', 'unknown_source', 'missing_reason'])
 def test_strict_coverage_identity_and_evidence_validation(agenda_model, monkeypatch, mutation):
     monkeypatch.setenv('AGENDA_REPAIR_SPLIT_DEPTH', '0')
     def bad(body):
@@ -168,7 +168,7 @@ def test_source_retrieval_is_model_requested_and_bounded(agenda_model, monkeypat
     result = run(['Früherer Aufruf.', 'Fortsetzung.'])
     assert result.llm.review_complete
     reread = [b for b, _ in agenda_model.calls if 'requested_originals' in b]
-    assert reread[0]['requested_originals'][0]['line_id'] == 'line-0'
+    assert reread[0]['requested_originals'][0]['line_id'] == 'L1'
     agenda_model.overrides['independent:detail'] = {'source_ranges': [{'start': 0, 'end': 0}], 'lines': []}
     result = run(['Früherer Aufruf.'])
     assert result.llm.processing_complete and not result.llm.review_complete
@@ -201,7 +201,7 @@ def test_reconstruction_can_request_original_sources(agenda_model):
     result = run(['Beratung.'])
     assert result.llm.review_complete
     calls = [b for b, _ in agenda_model.calls if b['phase'] == 'independent:reconstruct']
-    assert len(calls) == 2 and calls[1]['requested_originals'][0]['line_id'] == 'line-0'
+    assert len(calls) == 2 and calls[1]['requested_originals'][0]['line_id'] == 'L1'
 
 
 def test_oversized_single_source_never_silently_truncated(agenda_model):

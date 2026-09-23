@@ -8,11 +8,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from copy import deepcopy
+from source_contract import SourceCatalog, reviewed
 
 from llm_transport import (complete, fits, structured_output_budget, cache_key,
                            cache_read, cache_write, ContextBudgetError, model_fingerprint)
 
-VERSION = 'source-minutes-v1'
+VERSION = 'source-minutes-graded-v2'
 SECTIONS = ('discussion', 'decisions', 'votes', 'action_items', 'open_points', 'uncertainties')
 SCOPES = ('current', 'proposal', 'retrospective', 'quoted_prior', 'unclear')
 BASE = """Du erstellst und prüfst eine Niederschrift einer deutschen Gremiensitzung.
@@ -25,7 +27,8 @@ Sachfeststellungen. Erwähnte Personen sind nicht automatisch die Sprechenden.
 Prüfe Verneinungen, Einschränkungen, Korrekturen und den zeitlichen/Gremienbezug im
 vollständigen Kontext. Keine fachlichen Schlüsse allein aus Signalwörtern. Keine
 Erfindungen, stillen Datumsänderungen oder unbelegten Auflösungen von Abkürzungen.
-Jede Notiz benötigt exakte source_id und unverändertes quote als nachprüfbaren Beleg.
+Wähle für jede Notiz verfügbare source_id; die Anwendung übernimmt den Originaltext.
+Unbestätigte Vorstufen sind keine Tatsachen. Prüfe Aussagen stets erneut an Originalquellen.
 Bei Entscheidungen/Abstimmungen/Aufträgen belege auch die heutige Annahme/Beauftragung.
 Keine Konfidenzwerte; begründe offene Probleme als konkrete beantwortbare Prüffragen.
 Formuliere Notizen und Prüffragen knapp; wiederhole keine Belege oder Aussagen ohne fachlichen Grund.
@@ -41,7 +44,7 @@ def arr(items):
 
 
 TEXT = {'type': 'string', 'minLength': 1}
-EVIDENCE = arr(obj({'source_id': TEXT, 'quote': TEXT}))
+EVIDENCE = arr(obj({'source_id': TEXT}))
 CLAIM = obj({'section': {'enum': list(SECTIONS)}, 'text': TEXT,
              'scope': {'enum': list(SCOPES)}, 'evidence': EVIDENCE})
 DRAFT = obj({'claims': arr(CLAIM), 'considered_source_ids': arr(TEXT)})
@@ -109,6 +112,9 @@ class Workflow:
         self.policy = dict(digest=model_fingerprint(config).get("digest"), output=self.output, attempts=self.attempts, rounds=self.rounds,
                            chunk_chars=self.chunk_chars, code=digest(Path(__file__).read_text()))
         self.rows = []
+        self.open_drafts = {}
+        self.latest_claims = []
+        self.partial_rows = {}
 
     def messages(self, phase, instruction, body):
         # The blind facts inventory is source-bound, not TOP-bound. Identical
@@ -123,8 +129,8 @@ class Workflow:
         return {'type': 'json_schema', 'json_schema': {'name': 'minutes', 'strict': True, 'schema': schema}}
 
     def evidence(self, evidence, allowed):
-        if not evidence:
-            raise SummaryValidationError('Missing source evidence')
+        if not isinstance(evidence, list):
+            raise SummaryValidationError('Unreadable source evidence')
         for item in evidence:
             if item['source_id'] not in allowed or item['quote'] not in allowed[item['source_id']]['text']:
                 raise SummaryValidationError('Invalid source reference or quote')
@@ -140,7 +146,8 @@ class Workflow:
             for claim in data['claims']:
                 self.evidence(claim['evidence'], allowed)
                 if claim['section'] in {'decisions', 'votes', 'action_items'} and claim['scope'] != 'current':
-                    raise SummaryValidationError('Outcome category requires current scope')
+                    claim['grounding'] = reviewed(claim['grounding'], questions=[
+                        'Wurde heute entschieden beziehungsweise beauftragt oder nur ein Vorschlag/früherer Stand berichtet?'])
         return validate
 
     def call(self, phase, instruction, body, schema, validate):
@@ -151,8 +158,20 @@ class Workflow:
             raise ContextBudgetError('Summary verification exceeds configured context; no result certified')
         key = cache_key(self.config, messages, VERSION + ':' + phase, dict(self.policy, schema=schema))
         step = 'summary:' + digest([messages, schema, self.policy, self.config.public_snapshot()])
+        originals = (self.rows or body.get('source', [])) if schema == DRAFT else body.get('source', [])
+        catalog = SourceCatalog(originals, 'source_id')
         def check(data):
-            validate_schema(data, schema)
+            # Internal provenance is application-owned; the model never certifies itself.
+            wire = deepcopy(data)
+            def strip(node):
+                if isinstance(node, dict):
+                    node.pop('grounding', None)
+                    if 'source_id' in node: node.pop('quote', None)
+                    for item in node.values(): strip(item)
+                elif isinstance(node, list):
+                    for item in node: strip(item)
+            strip(wire)
+            validate_schema(wire, schema)
             validate(data)
         def operation():
             cached = cache_read(key)
@@ -160,28 +179,50 @@ class Workflow:
                 check(cached)
                 self.usage['cached_calls'] = self.usage.get('cached_calls', 0) + 1
                 return cached
+            last_diagnostic = None
+            seen_invalid = set()
             for attempt in range(self.attempts):
                 durable.check()
                 durable.progress({'phase': 'summary_' + phase, 'model_calls': self.usage.get('attempted_calls', 0)})
                 self.usage['attempted_calls'] = self.usage.get('attempted_calls', 0) + 1
                 request = messages if not attempt else messages + [{'role': 'user', 'content':
-                    'Die vorige Ausgabe war technisch ungültig. Erzeuge das vollständige Schema mit allen exakten IDs und Zitaten erneut.'}]
+                    json.dumps({'technical_repair': last_diagnostic,
+                        'instruction': 'Korrigiere nur die beanstandeten Felder. Erhalte alle gültigen Aussagen und Quellenauswahlen; liefere das vollständige Schema.'}, ensure_ascii=False)}]
                 response = complete(self.client, self.config, model=self.config.model, messages=request,
                     max_tokens=self.output, temperature=0.1, response_format=fmt, **self.config.reasoning_options)
                 if hasattr(response, 'llm_provenance'):
                     self.usage.setdefault('requests', []).append(response.llm_provenance)
                 try:
-                    data = parse(response.choices[0].message.content)
+                    raw = response.choices[0].message.content
+                    durable.artifact(step, 'model_attempt', {'phase': phase, 'attempt': attempt, 'raw': raw})
+                    data = catalog.prepare(parse(raw))
+                    for claim in data.get('claims', []):
+                        inherited = [c for c in self.open_drafts.values() if c['text'] == claim['text']]
+                        if inherited:
+                            claim['grounding'] = deepcopy(inherited[0]['grounding'])
                     check(data)
-                except (ValueError, KeyError, TypeError):
+                except (ValueError, KeyError, TypeError) as exc:
+                    last_diagnostic = {'code': str(exc) if isinstance(exc, SummaryValidationError) else type(exc).__name__}
+                    durable.artifact(step, 'technical_diagnostic', {'phase': phase, 'attempt': attempt,
+                        'code': str(exc) if isinstance(exc, SummaryValidationError) else type(exc).__name__})
                     self.usage['invalid_calls'] = self.usage.get('invalid_calls', 0) + 1
-                    if attempt + 1 == self.attempts:
+                    signature = digest(raw)
+                    if attempt + 1 == self.attempts or signature in seen_invalid:
                         raise
+                    seen_invalid.add(signature)
                     continue
                 cache_write(key, data)
                 return data
         data = durable.checkpoint(step, operation)
         check(data)  # Checkpoint replay never bypasses validation.
+        for claim in data.get('claims', []):
+            g = claim['grounding']
+            if g['reference_status'] != 'exact' or g.get('questions'):
+                self.open_drafts[digest(claim)] = deepcopy(claim)
+        if 'claims' in data and phase != 'blind_inventory':
+            self.latest_claims = deepcopy(data['claims'])
+            self.partial_rows.update({r['source_id']: r for r in originals})
+        durable.artifact(step, 'draft_diagnostics', data)
         self.usage.setdefault('completed_checks', []).append({'phase': phase, 'input_sha256': digest(body)})
         return data
 
@@ -285,6 +326,11 @@ class Workflow:
         seen_findings = set()
         repair_rounds = 0
         for round_index in range(self.rounds + 1):
+            # Retained open drafts join BEFORE the final checks. Adding a claim
+            # afterwards would falsely certify wording the reviewers never saw.
+            for draft in self.open_drafts.values():
+                if not any(c['text'] == draft['text'] for c in candidates):
+                    candidates.append(deepcopy(draft))
             issues = []
             for rows, _ in blind:
                 issues.extend(self.review(candidates, rows, 'final_review'))
@@ -309,7 +355,8 @@ class Workflow:
                     continue
                 # All notes stay visible; only the targeted question is repaired.
                 # The next pass rechecks the entire changed final version.
-                candidates = self.call('reconcile',
+                prior = candidates
+                changed = self.call('reconcile',
                     'Kläre diese konkreten Modellwidersprüche/Prüffragen anhand der vollständigen '
                     'zugehörigen Originalquelle. Gib die vollständige Endfassung zurück; erhalte '
                     'alle anderen Notizen und deren Belege. Unauflösbare Fragen bleiben unter '
@@ -318,13 +365,35 @@ class Workflow:
                     dict(source=rows, candidate=candidates, issues=local_issues,
                          source_catalog=list(allowed), round=round_index), DRAFT,
                     self.draft_validator(self.rows))['claims']
+                # Keep untargeted claims byte-for-byte. A repair cannot silently
+                # drop or rewrite successful parts, even when the model does so.
+                targeted = {int(cid.split(':')[1]) for issue in local_issues for cid in issue['claim_ids']}
+                if len(changed) < len(prior):
+                    self.usage['stop_reason'] = 'repair_dropped_claims'
+                    continue
+                candidates = [changed[i] if i in targeted else c for i, c in enumerate(prior)]
+                if any(issue['kind'] == 'omission' for issue in local_issues):
+                    candidates.extend(c for c in changed[len(prior):] if c not in candidates)
             if digest(candidates) == before:
                 self.usage['stop_reason'] = 'unchanged_candidate'
                 break
+        rejected = []
+        final = []
+        for i, claim in enumerate(candidates):
+            relevant = [q for q in issues if f'C:{i}' in q['claim_ids'] or not q['claim_ids']]
+            contradicted = any(q['kind'] == 'contradiction' for q in relevant)
+            claim['grounding'] = reviewed(claim['grounding'], supported=not relevant and
+                not claim['grounding'].get('questions') and claim['section'] != 'uncertainties',
+                questions=[q['question'] for q in relevant], contradicted=contradicted)
+            (rejected if contradicted else final).append(claim)
+        for claim in final:
+            if claim['grounding']['evidence_status'] != 'exact' and not claim['grounding']['questions']:
+                claim['grounding']['questions'] = ['Stützt die Originalquelle diese Aussage in diesem Sitzungskontext?']
         self.usage.update(processing_complete=True, grounding_incomplete=False,
             source_line_count=len(lines), considered_source_ids=list(allowed),
             source_sha256=digest(lines), prompt_version=VERSION, policy=self.policy,
             required_checks=['generate', 'blind_inventory', 'draft_review', 'final_review', 'consolidated_review'],
-            review_required=bool(issues or any(c['section'] == 'uncertainties' for c in candidates)),
+            review_required=bool(issues or rejected or any(c['grounding']['evidence_status'] != 'exact' for c in final)),
+            rejected_candidates=rejected, open_evidence_questions=sum(len(c['grounding']['questions']) for c in final + rejected),
             reconciliation_rounds=repair_rounds)
-        return candidates, issues, self.rows, len(primary)
+        return final, issues, self.rows, len(primary)

@@ -49,8 +49,10 @@ def test_unknown_quote_cannot_become_source_link(summary_model):
     summary_model.overrides['generate'] = dict(considered_source_ids=['T:0:0', 'T:1:0'], claims=[dict(
         section='decisions', text='Eine erfundene Entscheidung.', scope='current',
         evidence=[dict(source_id='T:0:0', quote='Nicht in der Quelle')])])
-    with pytest.raises(summarize.StructuredOutputError):
-        generate()
+    result = generate()
+    assert result.llm_usage['processing_complete'] and result.llm_usage['review_required']
+    assert '[UNBESTÄTIGT' in result.summary
+    assert result.structured.evidence[0]['grounding']['evidence_status'] != 'exact'
 
 
 @pytest.mark.parametrize('scope', ['proposal', 'retrospective', 'quoted_prior', 'unclear'])
@@ -58,8 +60,10 @@ def test_model_temporal_scope_must_agree_with_outcome_category(scope, summary_mo
     summary_model.overrides['generate'] = dict(considered_source_ids=['T:0:0', 'T:1:0'], claims=[dict(
         section='decisions', text='Die frühere Entscheidung.', scope=scope,
         evidence=[dict(source_id='T:0:0', quote='A: Sachverhalt.')])])
-    with pytest.raises(summarize.StructuredOutputError):
-        generate()
+    result = generate()
+    assert result.llm_usage['processing_complete'] and result.llm_usage['review_required']
+    assert '[UNBESTÄTIGT' in result.summary
+    assert result.structured.evidence[0]['grounding']['evidence_status'] != 'exact'
 
 
 def question(body):
