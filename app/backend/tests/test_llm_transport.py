@@ -336,7 +336,9 @@ def test_real_http_active_stream_outlives_read_timeout(streaming_http_server):
 
 def test_real_http_read_timeout_before_first_token(streaming_http_server):
     config = replace(get_llm_config(), base_url=streaming_http_server+'/silent', timeout_seconds=.05, load_seconds=.05)
-    with pytest.raises(httpx.ReadTimeout):
+    # The transport watchdog and socket timeout race, especially on Windows.
+    # Both must abort the silent stream; neither may produce a completion.
+    with pytest.raises((httpx.ReadTimeout, TimeoutError)):
         call(config)
 
 

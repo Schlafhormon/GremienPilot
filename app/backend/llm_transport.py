@@ -274,6 +274,7 @@ async def _openai_stream(client, config, payload):
 
 
 async def _generate(client, config, kwargs, progress):
+    started = time.monotonic()
     messages = kwargs['messages']
     maximum = config.output_budget(kwargs['max_tokens'])
     if type(maximum) is not int or maximum <= 0:
@@ -363,6 +364,9 @@ async def _generate(client, config, kwargs, progress):
             if type(count) is not int or type(generated) is not int or count < 0 or generated < 0 or count + generated > config.context_tokens or generated >= cap:
                 raise IncompleteResponseError('Unexpected context usage or generation cap reached')
             snapshot.update(prompt_tokens=count, generated_tokens=generated)
+            for field in ('total_duration', 'load_duration', 'prompt_eval_duration', 'eval_duration'):
+                if isinstance(final.get(field), (int, float)):
+                    snapshot[field + '_seconds'] = final[field] / 1e9
             snapshot['verified_context_tokens'] = await _verify_context(http, config, metadata['digest'])
     else:
         payload = {'model': config.model, 'messages': _openai_messages(messages), 'stream': True,
@@ -397,6 +401,12 @@ async def _generate(client, config, kwargs, progress):
     answer = ''.join(content)
     if not answer.strip():
         raise IncompleteResponseError('LLM returned no final content')
+    snapshot['wall_seconds'] = time.monotonic() - started
+    import durable_jobs as durable
+    durable.record_metric({key: snapshot[key] for key in (
+        'model', 'digest', 'prompt_tokens', 'generated_tokens', 'wall_seconds',
+        'total_duration_seconds', 'load_duration_seconds', 'prompt_eval_duration_seconds',
+        'eval_duration_seconds', 'verified_context_tokens') if key in snapshot})
     _audit(snapshot, payload, answer)
     logger.info('LLM completion provenance: %s', json.dumps(snapshot, sort_keys=True))
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=answer), finish_reason=finish)],

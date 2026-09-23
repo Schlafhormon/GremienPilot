@@ -50,7 +50,7 @@ from summarize import (
     meeting_context_from_transcript,
     summarize_segment,
 )
-from extract_tops import extract_agenda_data_from_pdf
+from extract_tops import extract_agenda_data_from_pdf, PdfReviewRequired
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
 from export_protocol import (
@@ -698,6 +698,7 @@ class SessionResponse(BaseModel):
     audio_metadata: Optional[AudioMetadata] = None
     job: Optional[TranscriptionJob] = None
     latest_pipeline: Optional[PipelineStatusResponse] = None
+    pdf_extraction: Optional[Dict[str, Any]] = None
     latest_summary_job: Optional[SummaryJobResponse] = None
 
 
@@ -720,6 +721,7 @@ class SessionListItem(BaseModel):
     pipeline_job_id: Optional[str] = None
     pipeline_status: Optional[str] = None
     pipeline_stage: Optional[str] = None
+    pipeline_error: Optional[str] = None
     pipeline_progress: Optional[int] = None
 
 
@@ -927,6 +929,9 @@ class ExtractTOPsResponse(BaseModel):
     document: Dict[str, Any] = Field(default_factory=dict)
     pages: List[Dict[str, Any]] = Field(default_factory=list)
     audits: List[Dict[str, Any]] = Field(default_factory=list)
+    contract_version: Optional[str] = None
+    review_questions: List[Dict[str, Any]] = Field(default_factory=list)
+    stop_reason: Optional[str] = None
 
 
 class AssignmentSuggestionsRequest(BaseModel):
@@ -1028,6 +1033,7 @@ class ExportAppendixRequest(BaseModel):
 
 
 class ProtocolExportRequest(BaseModel):
+    session_id: Optional[str] = None
     format: str = "docx"
     metadata: ExportMetadataRequest = Field(default_factory=ExportMetadataRequest)
     appendix: ExportAppendixRequest = Field(default_factory=ExportAppendixRequest)
@@ -1153,6 +1159,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         audio_url=job_response.audio_url if job_response else None,
         audio_metadata=job_response.audio_metadata if job_response else None,
         job=job_response,
+        pdf_extraction=_pipeline_refs(latest_pipeline).get("pdf_extraction") if latest_pipeline else None,
         latest_pipeline=(
             build_pipeline_status_response(latest_pipeline)
             if latest_pipeline is not None
@@ -2645,11 +2652,12 @@ def detect_pipeline_agenda(
     if not agenda_tops and (pdf_path or options.get("auto_detect_tops_from_pdf")):
         if not pdf_path or not Path(pdf_path).is_file():
             raise ValueError("Vorgesehenes PDF fehlt; keine Ersatzagenda aus dem Transkript")
-        extracted = durable.checkpoint("pipeline:pdf:v2", lambda:
+        extracted = durable.checkpoint("pipeline:pdf:page-evidence-v3", lambda:
             extract_agenda_data_from_pdf(pdf_path, model=model,
                 system_prompt=options.get("pdf_system_prompt")).to_dict())
+        save_pipeline_state(pipeline_id, result_refs={"pdf_extraction": extracted, "processing_complete": False})
         if not extracted["processing_complete"] or extracted["review_required"] or not extracted["tops"]:
-            raise ValueError("PDF-Auswertung unvollständig; keine Ersatzagenda aus dem Transkript")
+            raise PdfReviewRequired(extracted)
         agenda_tops = extracted["tops"]
         pdf_metadata = extracted["metadata"]
         pdf_extraction = extracted
@@ -3159,6 +3167,12 @@ async def health_check():
         raise HTTPException(
             status_code=503, detail="Models not loaded yet - server starting up"
         )
+    manager = getattr(app.state, "durable_manager", None)
+    if manager and manager.started and not manager.thread.is_alive():
+        raise HTTPException(503, 'Hintergrund-Worker nicht verfügbar')
+    if manager and manager.storage_fault:
+        raise HTTPException(503, 'Datenbankintegrität gestört; gesicherte Wiederherstellung erforderlich'
+                            if manager.storage_fault == 'DatabaseError' else 'Datenbankspeicher vorübergehend nicht verfügbar')
     models = getattr(app.state, "models", None)
     on_demand = bool(getattr(models, "gpu_managed", False))
     return {
@@ -3236,8 +3250,8 @@ async def start_pipeline(
         if not source_job or source_job['kind'] != 'pdf' or source_job['state'] != 'completed':
             raise HTTPException(422, 'PDF-Quelljob ist nicht vollständig abgeschlossen')
         source_extraction = source_job.get('result')
-        if not source_extraction or not source_extraction.get('processing_complete') or source_extraction.get('review_required'):
-            raise HTTPException(422, 'PDF-Quelljob ist nicht vollständig geprüft')
+        if not source_extraction or source_extraction.get('contract_version') != 'page-evidence-v3' or not source_extraction.get('processing_complete') or source_extraction.get('review_required'):
+            raise HTTPException(422, 'PDF-Quelljob hat keine vollständige visuelle Quellenprüfung nach aktuellem Vertrag; neue Auswertung erforderlich')
         source_hash = (source_extraction.get('document') or {}).get('sha256')
         if not source_hash or not source_extraction.get('items') or not source_extraction.get('audits') or not any(
             doc['sha256'] == source_hash for doc in source_job.get('documents') or []
@@ -4068,6 +4082,13 @@ async def list_session_speaker_match_diagnostics(session_id: str):
 @app.post("/api/export")
 async def export_protocol_endpoint(request: ProtocolExportRequest):
     """Render the completed protocol as TXT, DOCX or PDF."""
+    if request.session_id:
+        pipeline = load_latest_pipeline_job_for_session(request.session_id)
+        if pipeline and (pipeline['status'] != 'completed' or _pipeline_refs(pipeline).get('processing_complete') is not True):
+            raise HTTPException(409, 'Pipeline technisch unvollständig; erhaltene Ergebnisse sind ein prüfbarer Entwurf')
+    if any((review.get('llm_usage') or {}).get('processing_complete') is False
+           for review in request.summary_reviews.values() if isinstance(review, dict)):
+        raise HTTPException(409, 'Technisch unvollständige Zusammenfassungen sind nicht exportierbar')
     export_format = request.format.lower().strip()
     if export_format not in {"txt", "docx", "pdf"}:
         raise HTTPException(status_code=400, detail="Exportformat nicht unterstützt")
@@ -4671,7 +4692,8 @@ def submit_legacy_job(kind, job_id):
     session = load_session(old.get("session_id")) if old.get("session_id") else None
     refs = _pipeline_refs(old) if kind == "pipeline" else old.get("refs") or {}
     pdf = refs.get("pdf_path")
-    documents = [durable.document(pdf)] if pdf and Path(pdf).exists() else []
+    audio = refs.get("audio_path") or old.get("file_path")
+    documents = [durable.document(path) for path in (pdf, audio) if path and Path(path).is_file()]
     source_id = (((refs.get('options') or {}).get('pdf_source_extraction') or {}).get('document') or {}).get('job_id')
     if source_id:
         source_job = durable.load(source_id)
@@ -4703,6 +4725,8 @@ def mirror_durable_job(job):
               "review_required": "completed", "superseded": "failed"}.get(state, state)
     if state == 'review_required' and job.get('result') is None:
         status = 'failed'
+    if job['kind'] == 'pipeline' and state == 'review_required' and (job.get('result') or {}).get('processing_complete') is False:
+        status = 'failed'
     if job['kind'] == 'pipeline':
         # Technical failures never turn into a successful legacy completion.
         old = save_pipeline_state(job['job_id'], status=status, error=job.get('error'),
@@ -4733,9 +4757,9 @@ def run_durable_job(job):
             value = extract_agenda_data_from_pdf(payload['path'], model=payload.get('model'),
                                                 system_prompt=payload.get('system_prompt'))
             return value.to_dict()
-        result = durable.checkpoint('pdf:validated:v2', extract)
+        result = durable.checkpoint('pdf:validated:page-evidence-v3', extract)
         state = 'review_required' if result['review_required'] or not result['tops'] else 'completed'
-        return result, state if result['processing_complete'] else 'failed'
+        return result, state if result['processing_complete'] or result.get('review_questions') else 'failed'
     if job['kind'] == 'agenda':
         result = durable.checkpoint('agenda:validated', lambda: calculate_agenda(
             AgendaDetectionRequest(**payload['request'])).model_dump())

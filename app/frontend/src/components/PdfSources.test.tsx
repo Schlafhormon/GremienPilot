@@ -16,3 +16,12 @@ describe('PDF sources', () => {
     expect(screen.getByText(/Dokument-ID: digest/)).toBeInTheDocument();
   });
 });
+
+
+it('shows unresolved questions alongside the retained draft and page links', () => {
+  render(<PdfSources result={{ tops: ['Draft'], metadata: {}, processing_complete: false, review_required: true,
+    document: { sha256: 'digest', page_count: 3, url: '/api/model-jobs/job/documents/digest' },
+    review_questions: [{kind: 'continuation', item_ids: ['a'], pages: [1, 2], description: 'Gehört diese Fortsetzung zu A?'}] }} />);
+  expect(screen.getByText(/prüfbarer Agendaentwurf/)).toBeInTheDocument();
+  expect(screen.getByText(/Gehört diese Fortsetzung zu A/)).toBeInTheDocument();
+});

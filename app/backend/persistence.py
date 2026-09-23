@@ -1499,11 +1499,13 @@ def save_session(
         )
 
         if state.get("job_id"):
+            # Multiple sessions may retain the same confirmed recording. Saving a
+            # fork must not transfer ownership or alter the source job's timestamp.
             db.execute(
                 """
                 UPDATE transcription_jobs
                 SET session_id = ?, updated_at = ?
-                WHERE job_id = ?
+                WHERE job_id = ? AND session_id IS NULL
                 """,
                 (session_id, now, state["job_id"]),
             )
@@ -1782,6 +1784,7 @@ def list_sessions(
                 latest_pipeline.pipeline_job_id,
                 latest_pipeline.status AS pipeline_status,
                 latest_pipeline.stage AS pipeline_stage,
+                latest_pipeline.error AS pipeline_error,
                 latest_pipeline.progress AS pipeline_progress,
                 (SELECT COUNT(*) FROM tops t WHERE t.session_id = s.session_id)
                     AS top_count,
@@ -1830,6 +1833,10 @@ def list_sessions(
             "processing",
         } or summary_job_status in {"pending", "processing", "cancelling"}:
             derived_status = "processing"
+        elif pipeline_status == "failed" or job_status == "failed":
+            derived_status = "failed"
+        elif pipeline_status == "cancelled" or job_status == "cancelled":
+            derived_status = "cancelled"
         elif unresolved_summary_count > 0:
             derived_status = "review"
         elif summary_count > 0:

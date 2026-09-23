@@ -64,3 +64,15 @@ describe('SessionHistory', () => {
     );
   });
 });
+
+
+it('shows failed phase and retained artifacts even when summaries exist', async () => {
+  vi.mocked(listSessions).mockResolvedValue({ items: [{ session_id: 'failed', title: 'Synthetic',
+    status: 'failed', committee: '', meeting_date: '', revision: 1, created_at: 1, updated_at: 1,
+    top_count: 2, transcript_line_count: 42, summary_count: 2, audio_available: true,
+    pipeline_stage: 'agenda_detect', pipeline_error: 'PDF-Prüfung offen' }], total: 1, limit: 20, offset: 0 });
+  render(<SessionHistory onOpen={vi.fn()} onNewSession={vi.fn()} />);
+  expect(await screen.findByText(/Verarbeitung fehlgeschlagen · Phase: PDF-/)).toBeInTheDocument();
+  expect(screen.getByText('42 Transkriptzeilen')).toBeInTheDocument();
+  expect(screen.getByText(/Gespeicherte Ergebnisse bleiben erhalten/)).toBeInTheDocument();
+});

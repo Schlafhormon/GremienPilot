@@ -6,7 +6,11 @@ Only model-output deltas update model progress. Heartbeats prove ownership only.
 from contextlib import contextmanager
 from contextvars import ContextVar
 import asyncio
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Native Windows tests/operator tools; production uses Linux flock.
+    fcntl = None
+    import msvcrt
 import hashlib
 import json
 import os
@@ -21,6 +25,7 @@ import persistence
 from llm_transport import LLMCancelledError, request_control, retryable
 
 ACTIVE = {"queued", "running", "retry_wait"}
+STORAGE_ERRORS = (sqlite3.OperationalError, OSError)
 TERMINAL = {"completed", "review_required", "failed", "cancelled", "superseded"}
 class LeaseLost(LLMCancelledError):
     """Ownership expired; this is a recoverable interruption, not a user cancellation."""
@@ -51,6 +56,14 @@ def init_schema(db):
             step_key TEXT NOT NULL, value TEXT NOT NULL, completed_at REAL NOT NULL,
             PRIMARY KEY(job_id, step_key)
         );
+        CREATE TABLE IF NOT EXISTS durable_step_integrity (
+            job_id TEXT NOT NULL, step_key TEXT NOT NULL, sha256 TEXT NOT NULL,
+            PRIMARY KEY(job_id, step_key)
+        );
+        CREATE TABLE IF NOT EXISTS durable_metrics (
+            request_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, phase TEXT NOT NULL,
+            recorded_at REAL NOT NULL, metrics TEXT NOT NULL
+        );
     """)
 
 
@@ -79,7 +92,7 @@ def version_snapshot(payload=None):
     from llm_config import get_llm_config
     files = ("llm_config.py", "durable_jobs.py", "summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_detection.py",
              "extract_tops.py", "llm_transport.py", "main.py", "agenda_context.py",
-             "agenda_labels.py", "assignment_suggestions.py")
+             "agenda_labels.py", "assignment_suggestions.py", "persistence.py")
     policy_keys = (
         "PDF_RENDER_DPI", "PDF_MAX_PAGE_PIXELS", "PDF_MAX_PAGES", "PDF_OUTPUT_TOKENS",
         "PDF_MODEL_ATTEMPTS", "PDF_REVIEW_ROUNDS",
@@ -98,8 +111,12 @@ def version_snapshot(payload=None):
         refs = json.loads(refs)
     request = payload.get('request') or refs.get('options') or refs
     models = {name: get_llm_config(request.get(name)).public_snapshot()
-              for name in ('model', 'summary_model') if request.get(name)}
-    return {"overrides": models, "model": get_llm_config(request.get("model")).public_snapshot(), "policy": {
+              for name in ('model', 'agenda_model', 'summary_model') if request.get(name)}
+    return {"transcription": {
+        "code": hashlib.sha256(Path(__file__).with_name('transcribe.py').read_bytes()).hexdigest(),
+        "policy": {key: os.environ.get(key) for key in ('WHISPER_MODEL', 'WHISPER_DEVICE',
+            'WHISPER_LANGUAGE', 'WHISPER_BATCH_SIZE', 'WHISPER_CPU_THREADS', 'SPEAKER_EMBEDDING_MODEL')}
+    }, "overrides": models, "model": get_llm_config(request.get("model")).public_snapshot(), "policy": {
         key: os.environ.get(key) for key in policy_keys
     }, "code": {
         name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in files}}
@@ -158,26 +175,38 @@ def cancel(job_id):
     return load(job_id)
 
 
+def hash_value(value):
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
 def checkpoint(key, operation):
     ctx = CURRENT.get()
     if ctx is None:
         return operation()
-    check()
     with persistence.connect() as db:
-        row = db.execute("SELECT value FROM durable_steps WHERE job_id=? AND step_key=?", (ctx.job_id, key)).fetchone()
+        fence(db)
+        row = db.execute("""SELECT s.value, i.sha256 FROM durable_steps s
+            LEFT JOIN durable_step_integrity i ON i.job_id=s.job_id AND i.step_key=s.step_key
+            WHERE s.job_id=? AND s.step_key=?""", (ctx.job_id, key)).fetchone()
     if row:
+        if row[1] and row[1] != hash_value(row[0]):
+            raise ValueError('Checkpoint integrity mismatch')
         return json.loads(row[0])
     value = operation()
     with persistence.connect() as db:
         db.execute("BEGIN IMMEDIATE")
         fence(db)
-        db.execute("INSERT INTO durable_steps VALUES (?,?,?,?)", (ctx.job_id, key, json.dumps(value), time.time()))
+        encoded = json.dumps(value)
+        db.execute("INSERT INTO durable_steps VALUES (?,?,?,?)", (ctx.job_id, key, encoded, time.time()))
+        db.execute('INSERT INTO durable_step_integrity VALUES (?,?,?)', (ctx.job_id, key, hash_value(encoded)))
     return value
 
 
 def progress(value):
     ctx = CURRENT.get()
     if ctx:
+        if 'elapsed_seconds' not in value and value.get('phase'):
+            ctx.phase = value['phase']
         with persistence.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             fence(db)
@@ -229,6 +258,17 @@ class Runtime:
         self.job_id, self.owner, self.stop = job["job_id"], owner, stop
         self.payload = job["payload"]
         self.publication = None
+        self.phase = 'starting'
+
+
+def record_metric(value):
+    """Content-free local measurements, tied to the active pipeline phase."""
+    ctx = CURRENT.get()
+    if ctx:
+        with persistence.connect() as db:
+            fence(db)
+            db.execute('INSERT INTO durable_metrics VALUES (?,?,?,?,?)',
+                       (str(uuid.uuid4()), ctx.job_id, ctx.phase, time.time(), json.dumps(value)))
 
 
 class ProcessLock:
@@ -237,8 +277,12 @@ class ProcessLock:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = open(str(path) + ".worker.lock", "a")
         try:
-            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            if fcntl is not None:
+                fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
             self.handle.close()
             raise RuntimeError("Only one backend process per SQLite database is supported (workers=1, replicas=1)")
         return self
@@ -256,6 +300,7 @@ class Manager:
         self.lease = max(3, float(os.environ.get("MODEL_JOB_LEASE_SECONDS", "60")))
         self.max_attempts = max(1, int(os.environ.get("MODEL_JOB_MAX_ATTEMPTS", "3")))
         self.owner = str(uuid.uuid4())
+        self.storage_fault = None
 
     async def start(self):
         if self.started:
@@ -287,9 +332,18 @@ class Manager:
         while not self.stop_event.is_set():
             try:
                 job = claim(self.owner + "/" + str(uuid.uuid4()), self.lease)
-            except sqlite3.OperationalError:
+                self.storage_fault = None
+            except STORAGE_ERRORS as exc:
+                self.storage_fault = type(exc).__name__
                 logging.getLogger(__name__).warning("Durable queue database temporarily unavailable")
                 self.stop_event.wait(1)
+                continue
+            except sqlite3.DatabaseError:
+                # Do not silently kill the thread or pretend a corrupt database
+                # is a valid empty queue. Health exposes the need for recovery.
+                self.storage_fault = 'DatabaseError'
+                logging.getLogger(__name__).error('Durable database integrity failure; operator recovery required')
+                self.stop_event.wait(5)
                 continue
             if job is None:
                 self.stop_event.wait(0.5)
@@ -299,7 +353,7 @@ class Manager:
             except Exception:
                 # A failed persistence write leaves the lease recoverable. The attempt
                 # counter still bounds repeated execution once that lease expires.
-                logging.getLogger(__name__).exception("Durable worker could not persist job transition")
+                logging.getLogger(__name__).warning("Durable worker could not persist job transition; lease retained")
                 self.stop_event.wait(1)
 
     def execute(self, job):
@@ -308,11 +362,14 @@ class Manager:
         done = threading.Event()
         def heartbeat():
             while not done.wait(self.lease / 3):
-                with persistence.connect() as db:
-                    now = time.time()
-                    db.execute("""UPDATE durable_jobs SET heartbeat_at=?,lease_until=?
-                        WHERE job_id=? AND owner=? AND state='running' AND lease_until>?""",
-                        (now, now + self.lease, ctx.job_id, ctx.owner, now))
+                try:
+                    with persistence.connect() as db:
+                        now = time.time()
+                        db.execute("""UPDATE durable_jobs SET heartbeat_at=?,lease_until=?
+                            WHERE job_id=? AND owner=? AND state='running' AND lease_until>?""",
+                            (now, now + self.lease, ctx.job_id, ctx.owner, now))
+                except STORAGE_ERRORS:
+                    logging.getLogger(__name__).warning("Durable heartbeat storage temporarily unavailable")
         heart = threading.Thread(target=heartbeat, daemon=True)
         heart.start()
         state, result, error = "completed", None, None
@@ -349,8 +406,10 @@ class Manager:
             cause = exc
             while cause.__cause__ or cause.__context__:
                 cause = cause.__cause__ or cause.__context__
-            state = "retry_wait" if retryable(cause) and job['attempt'] < self.max_attempts else "failed"
+            state = "retry_wait" if (retryable(cause) or isinstance(cause, STORAGE_ERRORS)) and job['attempt'] < self.max_attempts else "failed"
             error = getattr(exc, "public_message", type(exc).__name__)  # Never persist provider bodies/secrets.
+            if hasattr(exc, 'review_result'):
+                state, result = 'review_required', exc.review_result
         finally:
             done.set()
             heart.join()
@@ -410,7 +469,7 @@ def raise_if_transient(exc):
     cause = exc
     while cause.__cause__ or cause.__context__:
         cause = cause.__cause__ or cause.__context__
-    if retryable(cause) or getattr(exc, 'transient', False):
+    if retryable(cause) or isinstance(cause, STORAGE_ERRORS) or getattr(exc, 'transient', False):
         raise exc
 
 

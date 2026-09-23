@@ -201,6 +201,11 @@ export default function SessionHistory({ onOpen, onNewSession }: SessionHistoryP
                     <span>{session.summary_count} Zusammenfassungen</span>
                     <span>{session.audio_available ? 'Audio verfügbar' : 'Kein Audio verfügbar'}</span>
                   </div>
+                  {session.status === 'failed' && <div className="mt-3 text-sm text-red-800" role="status">
+                    <p>Verarbeitung fehlgeschlagen · Phase: {({ agenda_detect: 'PDF-/TOP-Prüfung', transcribe: 'Transkription', summarize: 'Zusammenfassung', ready_for_review: 'Abschlussprüfung' } as Record<string, string>)[session.pipeline_stage ?? ''] ?? session.pipeline_stage ?? 'Unbekannt'}</p>
+                    {session.pipeline_error && <p>{session.pipeline_error}</p>}
+                    <p>Gespeicherte Ergebnisse bleiben erhalten. Kein vollständig geprüftes Protokoll.</p>
+                  </div>}
                   {session.status === 'processing' && (
                     <div className="mt-3 h-1.5 max-w-md overflow-hidden rounded-full bg-gray-200">
                       <div

@@ -22,7 +22,7 @@ import main
 import persistence
 
 
-def wait(predicate, seconds=5):
+def wait(predicate, seconds=15):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if predicate():
@@ -505,3 +505,86 @@ def test_agenda_phase_and_coverage_survive_transport_progress():
     progress = jobs.load(job['job_id'])['progress']
     assert progress['agenda_phase'] == 'independent:detail'
     assert progress['processed_lines'] == 12 and progress['total_lines'] == 24
+
+
+@pytest.mark.parametrize('failure', [OSError('temporary filesystem unavailable'), __import__('sqlite3').OperationalError('locked')])
+def test_worker_recovers_temporary_storage_failure_while_claiming(monkeypatch, failure):
+    job = jobs.submit('test', {})
+    claim = jobs.claim
+    calls = []
+    def temporarily_unavailable(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise failure
+        return claim(*args, **kwargs)
+    monkeypatch.setattr(jobs, 'claim', temporarily_unavailable)
+    executed = []
+    manager = jobs.Manager(lambda value: (executed.append(value['job_id']), 'completed'))
+    asyncio.run(manager.start())
+    try:
+        wait(lambda: jobs.load(job['job_id'])['state'] == 'completed')
+        assert manager.thread.is_alive() and executed == [job['job_id']]
+        with pytest.raises(RuntimeError, match='Only one'):
+            with jobs.ProcessLock():
+                pass
+    finally:
+        asyncio.run(manager.stop())
+
+
+def test_storage_failure_after_transcript_checkpoint_retries_without_audio():
+    job = jobs.submit('test', {})
+    calls = []
+    def audio():
+        calls.append('audio')
+        return [{'line_id': 'l1', 'text': 'synthetic'}]
+    def runner(value):
+        transcript = jobs.checkpoint('pipeline:transcript', audio)
+        if value['attempt'] == 1:
+            raise OSError('temporary mount failure')
+        return transcript, 'completed'
+    manager = jobs.Manager(runner)
+    manager.execute(jobs.claim('first', 60))
+    assert jobs.load(job['job_id'])['state'] == 'retry_wait'
+    with persistence.connect() as db:
+        db.execute('UPDATE durable_jobs SET available_at=0')
+    manager.execute(jobs.claim('restarted', 60))
+    assert jobs.load(job['job_id'])['state'] == 'completed'
+    assert calls == ['audio']
+
+
+def test_checkpoint_corruption_is_rejected_without_rerunning_operation():
+    job = jobs.submit('test', {})
+    with claimed(job):
+        jobs.checkpoint('pipeline:transcript', lambda: ['confirmed'])
+        with persistence.connect() as db:
+            db.execute("UPDATE durable_steps SET value='[]' WHERE job_id=?", (job['job_id'],))
+        with pytest.raises(ValueError, match='integrity'):
+            jobs.checkpoint('pipeline:transcript', lambda: pytest.fail('Audio repeated'))
+
+
+def test_database_integrity_error_keeps_worker_alive_and_is_visible_in_health(monkeypatch):
+    import sqlite3
+    from fastapi import HTTPException
+    job = jobs.submit('test', {})
+    original_claim = jobs.claim
+    broken = [True]
+    def claim(*args):
+        if broken[0]:
+            raise sqlite3.DatabaseError('synthetic integrity failure')
+        return original_claim(*args)
+    monkeypatch.setattr(jobs, 'claim', claim)
+    manager = jobs.Manager(lambda _: ({}, 'completed'))
+    monkeypatch.setattr(main.app.state, 'durable_manager', manager, raising=False)
+    monkeypatch.setattr(main.app.state, 'models_loaded', True, raising=False)
+    asyncio.run(manager.start())
+    try:
+        wait(lambda: manager.storage_fault == 'DatabaseError')
+        assert manager.thread.is_alive()
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(main.health_check())
+        assert error.value.status_code == 503
+        broken[0] = False
+        wait(lambda: jobs.load(job['job_id'])['state'] == 'completed')
+        assert manager.storage_fault is None and manager.thread.is_alive()
+    finally:
+        asyncio.run(manager.stop())

@@ -42,7 +42,7 @@ def test_incomplete_pdf_result_never_calls_transcript_detector(tmp_path, monkeyp
 
 def test_retained_sources_are_hash_bound_and_accessible_after_completion(tmp_path, monkeypatch, fake_openai_module):
     monkeypatch.setenv('LLM_IMAGE_TOKENS', '1024')
-    fake_openai_module.responses = [json.dumps(v) for v in [agenda(), agenda(), audit()]]
+    fake_openai_module.responses = [json.dumps(v) for v in [agenda(), agenda(), audit(), audit(0)]]
     source = pdf_bytes()
     with TestClient(main.app) as client:
         response = client.post('/api/extract-tops', files={'pdf': ('source.pdf', source, 'application/pdf')})
@@ -98,3 +98,19 @@ def test_legacy_completed_result_cannot_claim_new_visual_verification():
                                data={'pdf_source_job_id': old['job_id']})
         assert response.status_code == 422
         assert 'visuelle Quellenprüfung' in response.json()['detail']
+
+
+def test_failed_pdf_draft_and_questions_are_visible_in_restored_session(tmp_path):
+    import persistence
+    from extract_tops import PdfAgendaExtractionResult
+    draft = PdfAgendaExtractionResult(review_questions=[dict(kind='unclear', item_ids=[], pages=[1], description='Bitte Quelle prüfen')]).to_dict()
+    persistence.save_session('draft-session', {})
+    persistence.save_pipeline_job('draft-pipeline', dict(session_id='draft-session', status='failed', stage='agenda_detect',
+        result_refs={'pdf_extraction': draft, 'processing_complete': False}))
+    response = main.build_session_response(persistence.load_session('draft-session'))
+    assert response.pdf_extraction['review_questions'][0]['pages'] == [1]
+    import asyncio
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.export_protocol_endpoint(main.ProtocolExportRequest(session_id='draft-session', tops=['Draft'])))
+    assert exc.value.status_code == 409

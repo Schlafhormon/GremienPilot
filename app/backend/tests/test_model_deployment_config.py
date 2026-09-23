@@ -43,3 +43,13 @@ def test_kubernetes_default_endpoint_has_a_matching_internal_service():
     text = (ROOT / 'k8s/ollama/deployment.yaml').read_text()
     assert 'kind: Service' in text and 'name: ollama' in text
     assert 'key: LLM_MODEL' in text
+
+
+def test_docker_sqlite_lives_on_linux_volume_not_windows_bind_mount():
+    compose = (ROOT / 'docker-compose.yml').read_text()
+    assert 'backend_state:/app/state' in compose
+    assert 'PERSISTENCE_DB_PATH=${PERSISTENCE_DB_PATH:-/app/state/sessions.sqlite3}' in compose
+    assert 'PERSISTENCE_DB_PATH=/app/state/sessions.sqlite3' in (ROOT / '.env.example').read_text()
+    monitor = (ROOT / 'scripts/monitor_pipeline.py').read_text()
+    assert "['docker', 'exec', '-i', container, 'python'" in monitor
+    assert 'sample.update(live_snapshot(' in monitor

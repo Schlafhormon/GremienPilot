@@ -618,11 +618,13 @@ export default function App() {
     setPdfExtraction(null);
     setAutoDetectTopsFromPdf(false);
     setPipelineId((session as SessionDraft).pipeline_id ?? null);
-    setPipelineJob(null);
+    setPipelineJob("latest_pipeline" in session ? session.latest_pipeline ?? null : null);
+    setPdfExtraction("pdf_extraction" in session ? session.pdf_extraction ?? null : null);
     setSummaryJob(
       "latest_summary_job" in session ? session.latest_summary_job ?? null : null
     );
-    setPipelineNotice(null);
+    setPipelineNotice("latest_pipeline" in session && session.latest_pipeline?.status === 'failed'
+      ? `Verarbeitung fehlgeschlagen (${session.latest_pipeline.stage}). ${session.latest_pipeline.error ?? ''} Gespeicherte Ergebnisse bleiben erhalten.` : null);
     setDirectProtocolAvailable(false);
     setIsProcessing(false);
     setIsGeneratingSummary(false);
@@ -1700,6 +1702,8 @@ export default function App() {
         />
       ) : (
         <SummaryStep
+          sessionId={sessionId}
+          pipelineIncomplete={!!pipelineJob && pipelineJob.status !== 'completed'}
           onBack={handleStep3Back}
           tops={validTops}
           transcript={transcript}

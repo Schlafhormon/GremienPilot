@@ -1,8 +1,9 @@
-"""Explicit, offline migration to compact assignments without repeating completed work.
+"""Explicit migration of interrupted agenda work without repeating transcription.
 
 Only supports an unfinished PDF/agenda stage and narrowly scoped configuration
 changes. Run while the backend is stopped. The old configuration and checkpoints
-remain recorded; ordinary worker version checks are never disabled.
+remain recorded; ordinary worker version checks are never disabled. With
+--pdf-contract, the local model service must be reachable for digest verification.
 """
 import argparse
 import json
@@ -15,15 +16,18 @@ import durable_jobs as durable
 import persistence
 
 
-def validate_versions(old, new):
+def validate_versions(old, new, *, pdf_contract=False):
     for section in set(old) | set(new):
-        if section not in {'model', 'overrides', 'policy', 'code'} and old.get(section) != new.get(section):
+        if section not in {'model', 'overrides', 'policy', 'code'} and old.get(section) != new.get(section) and not (
+                pdf_contract and section == 'transcription' and section not in old):
             raise ValueError('Unsupported version change')
     allowed = {
         'model': {'thinking', 'thinking_tokens', 'config_id'},
         'policy': {'AGENDA_COMPACT_ASSIGNMENTS', 'AGENDA_OUTPUT_TOKENS_PER_LINE', 'AGENDA_DETECTION_CHUNK_LINES'},
         'code': {'agenda_llm.py', 'durable_jobs.py', 'main.py'},
     }
+    if pdf_contract:
+        allowed['code'].update({'extract_tops.py', 'llm_transport.py', 'summary_grounding.py', 'persistence.py'})
     changes = {}
     def compare(section, before, after, permitted):
         changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
@@ -41,8 +45,9 @@ def validate_versions(old, new):
     return changes
 
 
-def resume(job_id, *, apply=False, fork_session=False):
+def resume(job_id, *, apply=False, fork_session=False, pdf_contract=False):
     with durable.ProcessLock():
+        persistence.init_db()
         job = durable.load(job_id)
         if not job or job['kind'] != 'pipeline' or job['state'] not in {'queued', 'running', 'retry_wait', 'failed'}:
             raise ValueError('Expected an interrupted pipeline, not a cancelled or completed job')
@@ -57,23 +62,42 @@ def resume(job_id, *, apply=False, fork_session=False):
             if durable.document(doc['path'])['sha256'] != doc['sha256']:
                 raise ValueError('Source document changed')
         versions = durable.version_snapshot(job['payload'])
-        changes = validate_versions(job['payload']['versions'], versions)
+        changes = validate_versions(job['payload']['versions'], versions, pdf_contract=pdf_contract)
         with persistence.connect() as db:
             steps = dict(db.execute('SELECT step_key,value FROM durable_steps WHERE job_id=?', (job_id,)))
         for key in steps:
             if not (key in {'model-identities', 'pipeline:transcript', 'pipeline:agenda-transcript:v1'}
-                    or key.startswith(('model:', 'pdf:v2:', 'operator:compact-resume:'))):
+                    or key.startswith(('model:', 'pdf:v2:', 'operator:compact-resume:', 'operator:pdf-contract-resume:'))):
                 raise ValueError('Unsupported completed step: ' + key)
         transcript = json.loads(steps.get('pipeline:transcript', 'null'))
         if not isinstance(transcript, list) or not transcript:
             raise ValueError('A completed transcript checkpoint is required')
         if 'model-identities' not in steps:
             raise ValueError('Immutable model identity is required')
+        audio_document = None
+        identities = json.loads(steps['model-identities'])
+        if pdf_contract:
+            from llm_config import get_llm_config
+            from llm_transport import model_fingerprint
+            for name, identity in identities.items():
+                current = model_fingerprint(get_llm_config(name))
+                if not identity.get('digest') or identity != current:
+                    raise ValueError('Model digest changed; migration refused')
+            audio = pipeline['result_refs'].get('audio_path')
+            if not audio or not Path(audio).is_file():
+                raise ValueError('Retained audio is required for provenance')
+            audio_document = durable.document(audio)
+            # Historical jobs did not bind audio hashes. Do not pretend otherwise:
+            # anchor the retained source now and keep the accepted transcript intact.
+            transcription = persistence.load_job(pipeline['transcription_job_id'])
+            saved_lines = [{k: v for k, v in line.items() if k != 'line_id'} for line in transcript]
+            if not transcription or transcription['status'] != 'completed' or transcription.get('transcript') != saved_lines:
+                raise ValueError('Transcript checkpoint differs from completed transcription')
         report = dict(job_id=job_id, transcript_lines=len(transcript), retained_steps=len(steps), changes=changes,
                       fork_session=fork_session, applied=apply)
         if not apply:
             return report
-        backup = persistence.get_db_path().parent / 'backups' / ('compact-resume-' + str(uuid.uuid4()) + '.sqlite3')
+        backup = persistence.get_db_path().parent / 'backups' / ('pdf-resume-' + str(uuid.uuid4()) + '.sqlite3')
         backup.parent.mkdir(exist_ok=True)
         with persistence.connect() as source, sqlite3.connect(backup) as dest:
             source.backup(dest)
@@ -90,14 +114,36 @@ def resume(job_id, *, apply=False, fork_session=False):
         history = dict(previous_versions=job['payload']['versions'], current_versions=versions,
                        retained_steps=list(steps), previous_attempt=job['attempt'], applied_at=now,
                        previous_session_id=pipeline['session_id'], current_session_id=session_id,
-                       reason='Operator requested compact assignments and disabled thinking; completed PDF steps retained under original provenance.')
+                       reason=('PDF page-evidence-v3: old inventories/merge are drafts; all audits rerun with new contract.' if pdf_contract else
+                               'Operator requested compact assignments and disabled thinking; completed PDF steps retained under original provenance.'),
+                       checkpoint_hashes={k: durable.hash_value(v) for k, v in steps.items()},
+                       audio_binding=('retained source hash verified now; historical input hash unavailable' if audio_document else None))
         with persistence.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if fork_session:
+                # Keep the failed phase visible on the previous session after the
+                # live job moves to its new target. This row never enters the queue.
+                archived = dict(db.execute('SELECT * FROM pipeline_jobs WHERE pipeline_job_id=?', (job_id,)).fetchone())
+                archived_id = str(uuid.uuid4())
+                archived.update(pipeline_job_id=archived_id, status='failed',
+                                error=archived.get('error') or 'Unterbrochener Auftrag wird in einer neuen Sitzung fortgesetzt')
+                archived_refs = json.loads(archived['result_refs_json'] or '{}')
+                archived['result_refs_json'] = json.dumps({**archived_refs, 'archived_job_id': job_id,
+                                                          'resumed_session_id': session_id})
+                columns = list(archived)
+                db.execute('INSERT INTO pipeline_jobs (' + ','.join(columns) + ') VALUES (' +
+                           ','.join('?' for _ in columns) + ')', [archived[k] for k in columns])
+                history['archived_pipeline_id'] = archived_id
             db.execute('INSERT INTO durable_steps VALUES (?,?,?,?)',
-                       (job_id, 'operator:compact-resume:' + str(uuid.uuid4()), json.dumps(history), now))
-            db.execute("""UPDATE durable_jobs SET payload=?,state='queued',owner=NULL,lease_until=NULL,
+                       (job_id, ('operator:pdf-contract-resume:' if pdf_contract else 'operator:compact-resume:') + str(uuid.uuid4()), json.dumps(history), now))
+            documents = list(job['documents'] or [])
+            if audio_document and audio_document['path'] not in {d['path'] for d in documents}:
+                documents.append(audio_document)
+            db.execute("""UPDATE durable_jobs SET payload=?,documents=?,state='queued',owner=NULL,lease_until=NULL,
                 heartbeat_at=NULL,attempt=0,available_at=0,error=NULL,result=NULL,progress=?,updated_at=? WHERE job_id=?""",
-                       (json.dumps(payload), json.dumps({'phase': 'resume_from_checkpoint'}), now, job_id))
+                       (json.dumps(payload), json.dumps(documents), json.dumps({'phase': 'resume_from_checkpoint'}), now, job_id))
+            for key, value in steps.items():
+                db.execute('INSERT OR IGNORE INTO durable_step_integrity VALUES (?,?,?)', (job_id, key, durable.hash_value(value)))
             refs = dict(pipeline['result_refs'], execution_state='queued')
             refs.pop('cancel_requested', None)
             db.execute("""UPDATE pipeline_jobs SET status='pending',error=NULL,result_refs_json=?,updated_at=?,session_id=?
@@ -110,5 +156,6 @@ if __name__ == '__main__':
     parser.add_argument('job_id')
     parser.add_argument('--apply', action='store_true', help='Apply after backup; default validates only')
     parser.add_argument('--fork-session', action='store_true', help='Continue in a new session, preserving any edits to the old session')
+    parser.add_argument('--pdf-contract', action='store_true', help='Migrate unfinished PDF checks to page-evidence-v3; verify local model digest and retained audio')
     args = parser.parse_args()
-    print(json.dumps(resume(args.job_id, apply=args.apply, fork_session=args.fork_session), ensure_ascii=False, indent=2))
+    print(json.dumps(resume(args.job_id, apply=args.apply, fork_session=args.fork_session, pdf_contract=args.pdf_contract), ensure_ascii=False, indent=2))

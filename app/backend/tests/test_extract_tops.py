@@ -52,7 +52,7 @@ def test_real_pdf_rendering_all_pages_and_independent_audit(tmp_path, monkeypatc
     monkeypatch.setenv('LLM_CONTEXT_TOKENS', '65536')
     per_page = [agenda([p], [item(f'p{p}-a', p)]) for p in range(1, len(kinds) + 1)]
     merged = agenda(range(1, len(kinds) + 1), [i for page in per_page for i in page['items']])
-    fake_openai_module.responses = [json.dumps(v) for v in per_page + [merged] + [audit(p) for p in merged['pages']]]
+    fake_openai_module.responses = [json.dumps(v) for v in per_page + [merged] + [audit(p) for p in merged['pages']] + [audit(0)]]
     result = pdf.extract_agenda_data_from_pdf(str(path))
     assert result.processing_complete and not result.review_required
     assert len(result.pages) == len(kinds)
@@ -61,7 +61,7 @@ def test_real_pdf_rendering_all_pages_and_independent_audit(tmp_path, monkeypatc
         assert (p['text_characters'] == 0) == (kind == 'scan')
     calls = [c for instance in fake_openai_module.instances for c in instance.calls]
     visual = [c for c in calls if isinstance(c['messages'][1]['content'], list) and any(p['type'] == 'image_url' for p in c['messages'][1]['content'])]
-    assert len(visual) == len(kinds) * 2
+    assert len(visual) == len(kinds) * 2 + 1
     assert all(c['response_format']['type'] == 'json_schema' for c in calls)
     assert all(len(c['messages']) == 2 for c in calls)  # independent audit contexts
 
@@ -71,7 +71,7 @@ def test_broken_text_layer_never_overrules_visual_evidence(tmp_path, monkeypatch
     path = tmp_path / 'synthetic.pdf'; path.write_bytes(pdf_bytes())
     monkeypatch.setattr(pdfplumber.page.Page, 'extract_text', lambda *_: 'f�r\nWRONG DATE 1900-01-01')
     monkeypatch.setenv('LLM_IMAGE_TOKENS', '1024')
-    fake_openai_module.responses = [json.dumps(v) for v in [agenda(), agenda(), audit()]]
+    fake_openai_module.responses = [json.dumps(v) for v in [agenda(), agenda(), audit(), audit(0)]]
     result = pdf.extract_agenda_data_from_pdf(str(path))
     assert result.tops == ['Haushalt']
     request = fake_openai_module.instances[0].calls[0]
@@ -89,25 +89,29 @@ def test_missing_and_unreadable_pdf_fail_without_model(tmp_path, fake_openai_mod
 def test_repair_and_page_break_reconciliation(tmp_path, monkeypatch):
     path = tmp_path / 'synthetic.pdf'; path.write_bytes(pdf_bytes(('digital', 'scan')))
     first = agenda([1], [item('a', title='Plan')])
-    second = agenda([2], [item('fragment', 2, title='Fortsetzung'), item('b', 2, title='Rat')])
-    merged = agenda([1, 2], [item('a', title='Plan Fortsetzung'), item('b', 2, title='Rat')])
+    second = agenda([2], [item('fragment', 2, title='Fortsetzung'), item('b', 2, title='Rat', parent_id='fragment')])
+    merged = agenda([1, 2], [item('a', title='Plan Fortsetzung'), item('b', 2, title='Rat', parent_id='a')])
     corrected = json.loads(json.dumps(merged)); corrected['items'][0]['sources'].append({'page': 2, 'quote': 'Fortsetzung'})
+    issue = dict(kind='continuation', item_ids=['a'], metadata_fields=[], description='Fortsetzungsquelle prüfen?',
+                 pages=[1, 2], evidence=[{'page': 2, 'quote': 'Fortsetzung'}])
+    patch = dict(upsert=[dict(item=corrected['items'][0], after_id=None)], delete_ids=[], metadata=[])
     calls = []
-    responses = iter([first, second, merged, audit(1), audit(2, [{'description': 'Fortsetzungsquelle Seite 2 fehlt', 'pages': [2]}]), corrected, audit(1), audit(2)])
+    responses = iter([first, second, merged, audit(1), audit(2), audit(0, [issue]), patch, audit(1), audit(2), audit(0)])
     def request(config, prompt, content, schema):
         calls.append((prompt, content))
         return json.dumps(next(responses))
     monkeypatch.setattr(pdf, '_request', request)
     result = pdf.extract_agenda_data_from_pdf(str(path))
     assert result.processing_complete
-    assert len(result.audits) == 4
-    assert len([p for p in calls[5][1] if p['type'] == 'image_url']) == 1
+    assert len(result.audits) == 6
+    assert len([p for p in calls[6][1] if p['type'] == 'image_url']) == 2
     assert result.items[0]['sources'][-1]['page'] == 2
+    assert result.items[1]['parent_id'] == result.items[0]['id']
 
 
 def test_malformed_and_empty_model_outputs_are_repaired(tmp_path, monkeypatch):
     path = tmp_path / 'synthetic.pdf'; path.write_bytes(pdf_bytes())
-    responses = iter(['not JSON', json.dumps(agenda()), json.dumps(agenda(items=[])), json.dumps(agenda()), json.dumps(audit())])
+    responses = iter(['not JSON', json.dumps(agenda()), json.dumps(agenda(items=[])), json.dumps(agenda()), json.dumps(audit()), json.dumps(audit(0))])
     monkeypatch.setattr(pdf, '_request', lambda *args: next(responses))
     assert pdf.extract_agenda_data_from_pdf(str(path)).processing_complete
 
@@ -115,10 +119,14 @@ def test_malformed_and_empty_model_outputs_are_repaired(tmp_path, monkeypatch):
 def test_unresolved_audit_cannot_publish(tmp_path, monkeypatch):
     path = tmp_path / 'synthetic.pdf'; path.write_bytes(pdf_bytes())
     monkeypatch.setenv('PDF_REVIEW_ROUNDS', '1')
-    responses = iter([agenda(), agenda(), audit(1, [{'description': 'Zeile unlesbar', 'pages': [1]}])])
+    issue = dict(kind='unclear', item_ids=[], metadata_fields=[], description='Welche Zeile ist lesbar?',
+                 pages=[1], evidence=[{'page': 1, 'quote': None}])
+    responses = iter([agenda(), agenda(), audit(1, [issue]), audit(0)])
     monkeypatch.setattr(pdf, '_request', lambda *args: json.dumps(next(responses)))
-    with pytest.raises(pdf.ExtractionError, match='widersprüchlich'):
-        pdf.extract_agenda_data_from_pdf(str(path))
+    result = pdf.extract_agenda_data_from_pdf(str(path))
+    assert not result.processing_complete and result.review_required
+    assert result.review_questions == [issue]
+    assert result.items and result.stop_reason == 'review_budget'
 
 
 def test_resume_uses_completed_page_and_request_checkpoints(tmp_path, monkeypatch):
@@ -137,7 +145,7 @@ def test_resume_uses_completed_page_and_request_checkpoints(tmp_path, monkeypatc
         with pytest.raises(LLMCancelledError): pdf.extract_agenda_data_from_pdf(str(path))
         assert len(calls) == 2
         merged = agenda([1, 2], [item('p1-a'), item('p2-a', 2)])
-        responses = iter([agenda([2], [item('p2-a', 2)]), merged, audit(1), audit(2)])
+        responses = iter([agenda([2], [item('p2-a', 2)]), merged, audit(1), audit(2), audit(0)])
         monkeypatch.setattr(pdf, '_request', lambda *args: json.dumps(next(responses)))
         result = pdf.extract_agenda_data_from_pdf(str(path))
         monkeypatch.setattr(pdf, '_request', lambda *args: pytest.fail('Completed calls repeated'))
@@ -160,7 +168,7 @@ def test_text_extraction_error_is_recorded_but_image_still_processed(tmp_path, m
     path = tmp_path / 'synthetic.pdf'; path.write_bytes(pdf_bytes())
     def broken(*args): raise RuntimeError('synthetic text failure')
     monkeypatch.setattr(pdfplumber.page.Page, 'extract_text', broken)
-    answers = iter([agenda(), agenda(), audit()])
+    answers = iter([agenda(), agenda(), audit(), audit(0)])
     monkeypatch.setattr(pdf, '_request', lambda *args: json.dumps(next(answers)))
     result = pdf.extract_agenda_data_from_pdf(str(path))
     assert result.processing_complete

@@ -92,7 +92,7 @@ services:
       - SUMMARY_RECONCILIATION_ROUNDS=${SUMMARY_RECONCILIATION_ROUNDS:-2}
       - SUMMARY_MODEL_ATTEMPTS=${SUMMARY_MODEL_ATTEMPTS:-2}
       - SUMMARY_OUTPUT_TOKENS=${SUMMARY_OUTPUT_TOKENS:-4096}
-      - PERSISTENCE_DB_PATH=${PERSISTENCE_DB_PATH:-/app/data/sessions.sqlite3}
+      - PERSISTENCE_DB_PATH=${PERSISTENCE_DB_PATH:-/app/state/sessions.sqlite3}
       - JOB_MAX_AGE_SECONDS=${JOB_MAX_AGE_SECONDS:-7200}
       - JOB_MAX_COUNT=${JOB_MAX_COUNT:-100}
       - DELETE_UPLOADS_ON_JOB_CLEANUP=${DELETE_UPLOADS_ON_JOB_CLEANUP:-false}
@@ -114,6 +114,9 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data
+      # SQLite locking must stay inside Linux. Never open the live database from
+      # a Windows host process while the backend writes to it.
+      - backend_state:/app/state
       - backend_hf_cache:/app/.cache/huggingface
       - backend_torch_cache:/app/.cache/torch
     healthcheck:
@@ -152,6 +155,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  backend_state:
   ollama_data:
   backend_hf_cache:
   backend_torch_cache:

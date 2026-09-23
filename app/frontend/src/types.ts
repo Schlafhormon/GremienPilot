@@ -166,6 +166,7 @@ export interface SessionSavePayload {
 }
 
 export interface SessionResponse extends SessionSavePayload {
+  pdf_extraction?: PdfAgendaExtractionResult | null;
   session_id: string;
   revision?: number;
   created_at?: number | null;
@@ -204,6 +205,7 @@ export interface SessionHistoryItem {
   pipeline_job_id?: string | null;
   pipeline_status?: string | null;
   pipeline_stage?: string | null;
+  pipeline_error?: string | null;
   pipeline_progress?: number | null;
 }
 
@@ -415,6 +417,10 @@ export interface PdfAgendaMetadata {
 }
 
 export interface PdfAgendaExtractionResult {
+  contract_version?: string;
+  stop_reason?: string | null;
+  review_questions?: Array<{ kind: string; item_ids: string[]; pages: number[]; description: string }>;
+
   tops: string[];
   metadata: PdfAgendaMetadata;
   processing_complete?: boolean;
@@ -502,6 +508,8 @@ export interface AssignmentStepProps {
 }
 
 export interface SummaryStepProps {
+  sessionId?: string | null;
+  pipelineIncomplete?: boolean;
   onBack: () => void;
   tops: string[];
   transcript: TranscriptLine[];

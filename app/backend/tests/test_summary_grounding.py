@@ -73,7 +73,9 @@ def test_disagreement_gets_targeted_followup_and_rechecks_changed_final(summary_
     summary_model.overrides['final_review'] = question
     def repair(body):
         summary_model.overrides.pop('final_review')
-        return dict(claims=body['candidate'], considered_source_ids=body['source_catalog'])
+        claims = deepcopy(body['candidate'])
+        claims[0]['text'] = 'Präzisierter Sachverhalt.'
+        return dict(claims=claims, considered_source_ids=body['source_catalog'])
     summary_model.overrides['reconcile'] = repair
     result = generate()
     assert result.llm_usage['reconciliation_rounds'] == 1
@@ -86,7 +88,7 @@ def test_unresolved_question_is_concrete_and_has_source_access(summary_model):
     summary_model.overrides['final_review'] = question
     result = generate()
     assert result.llm_usage['processing_complete'] and result.llm_usage['review_required']
-    assert result.llm_usage['reconciliation_rounds'] == 2
+    assert result.llm_usage['reconciliation_rounds'] == 1
     review = summarize.build_summary_review(structured=result.structured, summary=result.summary,
         lines=[dict(speaker='A', text='Sachverhalt.'), dict(speaker='B', text='Fortsetzung.')])
     assert review.warnings[0].message.endswith('berichtet?')
@@ -242,3 +244,25 @@ def test_whitespace_is_preserved_in_source_certificate(summary_model):
     review = summarize.build_summary_review(structured=result.structured, summary=result.summary,
         lines=[dict(speaker='A', text='  Original  '), dict(speaker='B', text='\nweiter\n')])
     assert not review.warnings
+
+
+def test_shared_blind_facts_inventory_keeps_independent_reviews_for_each_top(summary_model):
+    from test_durable_jobs import claimed
+    job = jobs.submit('test', {})
+    with claimed(job):
+        first = summarize.summarize_segment('TOP A', 'S: Gemeinsame Beratung.', model='test-model')
+        second = summarize.summarize_segment('TOP B', 'S: Gemeinsame Beratung.', model='test-model')
+    phases = [body['phase'] for body, _ in summary_model.calls]
+    assert phases.count('blind_inventory') == 1
+    for phase in ['generate', 'draft_review', 'final_review', 'consolidated_review']:
+        assert phases.count(phase) == 2
+    assert first.llm_usage['processing_complete'] and second.llm_usage['processing_complete']
+
+
+def test_unchanged_summary_repair_preserves_review_question_without_repeat(summary_model):
+    summary_model.overrides['final_review'] = question
+    result = generate()
+    assert result.llm_usage['review_required']
+    assert result.llm_usage['stop_reason'] == 'unchanged_candidate'
+    assert [body['phase'] for body, _ in summary_model.calls].count('reconcile') == 1
+    assert result.structured.review_questions

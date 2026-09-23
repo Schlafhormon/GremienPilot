@@ -34,6 +34,8 @@ const CHANGE_REASON_LABELS: Record<string, string> = {
 };
 
 export default function SummaryStep({
+  sessionId,
+  pipelineIncomplete = false,
   onBack,
   tops,
   transcript,
@@ -196,6 +198,10 @@ export default function SummaryStep({
 
   const handleExport = async (format: ExportFormat) => {
     setExportError(null);
+    if (pipelineIncomplete) {
+      setExportError('Pipeline technisch unvollständig. Die gespeicherten Ergebnisse sind ein Entwurf.');
+      return;
+    }
     if (busy || !summariesAreFresh) {
       setExportError('Zusammenfassungen müssen nach den Korrekturen aktualisiert werden.');
       return;
@@ -213,6 +219,7 @@ export default function SummaryStep({
       const exportTops = hasTops ? tops : ['Gesamtes Gespräch'];
       const exportAssignments = hasTops ? assignments : transcript.map(() => 0);
       const blob = await exportProtocol({
+        sessionId,
         format,
         metadata: exportMetadata,
         tops: exportTops,
@@ -728,6 +735,7 @@ export default function SummaryStep({
       )}
 
       {/* Export Section */}
+      {pipelineIncomplete && <p role="alert" className="text-red-800">Pipeline technisch unvollständig. Ergebnisse bleiben als Entwurf erhalten; Export gesperrt.</p>}
       <div id="protocol-export" tabIndex={-1} className="scroll-mt-4 bg-white rounded-lg border border-gray-200 p-4">
         <div className="space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -742,7 +750,7 @@ export default function SummaryStep({
                 <button
                   key={format}
                   onClick={() => handleExport(format)}
-                  disabled={exportingFormat !== null || !summariesAreFresh || busy || editingTop !== null}
+                  disabled={pipelineIncomplete || exportingFormat !== null || !summariesAreFresh || busy || editingTop !== null}
                   className={`px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 ${
                     format === 'docx' && !exportBlocked
                       ? 'bg-blue-600 text-white hover:bg-blue-700'

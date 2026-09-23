@@ -1035,6 +1035,7 @@ export async function extractTOPsFromPDF(
 }
 
 export interface ProtocolExportPayload {
+  sessionId?: string | null;
   format: ExportFormat;
   metadata: ExportMetadata;
   tops: string[];
@@ -1053,6 +1054,7 @@ export async function exportProtocol(payload: ProtocolExportPayload): Promise<Bl
     },
     body: JSON.stringify({
       format: payload.format,
+      session_id: payload.sessionId,
       metadata: {
         committee: payload.metadata.committee,
         date: payload.metadata.date,

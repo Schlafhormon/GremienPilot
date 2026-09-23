@@ -388,3 +388,10 @@ it('shows every open question and navigates joint TOP source lines', async () =>
   await user.click(screen.getByRole('button', {name: 'Konkrete Prüffrage 4?'}));
   expect(screen.getByText('Haushalt wird beraten').closest('div')?.className).toContain('ring-2');
 });
+
+
+it('blocks export for a technically incomplete pipeline with retained summaries', () => {
+  renderSummaryStep({ pipelineIncomplete: true });
+  expect(screen.getByText(/Pipeline technisch unvollständig/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'DOCX' })).toBeDisabled();
+});

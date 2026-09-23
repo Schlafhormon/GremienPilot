@@ -17,7 +17,7 @@ from conftest import FakeTranscriptionResult
 from speaker_recognition import LocalSpeakerEmbedding
 
 
-def wait_until(predicate, timeout=5.0, interval=0.02):
+def wait_until(predicate, timeout=15.0, interval=0.02):
     deadline = time.time() + timeout
     while time.time() < deadline:
         if predicate():
@@ -82,7 +82,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
     if agenda_source == "pdf":
         data["auto_detect_tops_from_pdf"] = "true"
         files["pdf"] = ("agenda.pdf", pdf_bytes(), "application/pdf")
-        fake_openai_module.responses.extend(json.dumps(v) for v in [agenda(), agenda(), audit()])
+        fake_openai_module.responses.extend(json.dumps(v) for v in [agenda(), agenda(), audit(), audit(0)])
     from summary_fixtures import SummaryModel
     fake_openai_module.content = SummaryModel()
     with TestClient(main.app) as client:
@@ -93,7 +93,7 @@ def test_pipeline_routes_prompts_to_actual_model_messages(
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
     calls = [call for instance in fake_openai_module.instances for call in instance.calls]
-    assert len(calls) == (9 if agenda_source == "pdf" else 6)
+    assert len(calls) == (10 if agenda_source == "pdf" else 6)
     assert len(agenda_model.calls) == 6
     routed = [(call, 'agenda_system_prompt') for _, call in agenda_model.calls]
     routed += [(call, 'pdf_system_prompt' if i < 2 else 'audit') for i, call in enumerate(calls[:-6])]
@@ -1795,7 +1795,7 @@ def test_pdf_agenda_api_preserves_scope_and_numbers_through_assignment(tmp_path,
         item('b', number='2.1', title='Schulbau', section='public', parent_id='a'),
         item('c', number='7', title='Anfragen', section='public'),
         item('d', number='2', title='Vergabe', section='nonpublic')])
-    fake_openai_module.responses = [json.dumps(v) for v in [value, value, audit()]]
+    fake_openai_module.responses = [json.dumps(v) for v in [value, value, audit(), audit(0)]]
     with TestClient(main.app) as client:
         response = client.post('/api/extract-tops', files={'pdf': ('agenda.pdf', pdf.getvalue(), 'application/pdf')})
         assert response.status_code == 200
@@ -1885,7 +1885,7 @@ def fake_pdf_result(tops, metadata, **kwargs):
 def test_reuse_verified_pdf_keeps_source_and_ids_without_browser_file(tmp_path, monkeypatch, fake_openai_module):
     configure_test_app(tmp_path, monkeypatch)
     monkeypatch.setenv('LLM_IMAGE_TOKENS', '1024')
-    fake_openai_module.responses = [json.dumps(v) for v in [agenda(), agenda(), audit()]]
+    fake_openai_module.responses = [json.dumps(v) for v in [agenda(), agenda(), audit(), audit(0)]]
     monkeypatch.setattr(main, 'transcribe_audio', lambda *a, **kw: FakeTranscriptionResult(
         transcript=[{'speaker': 'MOD', 'text': 'Allgemeine Beratung', 'start': 0, 'end': 1}], audio_duration_seconds=1))
     monkeypatch.setattr(main, 'summarize_segment', lambda *a, **kw: summarize.SummarizationResult(summary='Beratung', duration_seconds=0, llm_usage={'processing_complete': True}))

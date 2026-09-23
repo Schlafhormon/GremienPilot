@@ -664,3 +664,26 @@ def test_agenda_labels_and_stable_ids_survive_api_edit_reorder_and_reload(tmp_pa
     assert stored['tops'] == updated_tops
     assert stored['top_ids'] == [ids[i] for i in order]
     assert stored['assignments'] == [2, 1]
+
+
+def test_failed_pipeline_status_wins_over_retained_transcript_and_summary():
+    persistence.save_session('failed-draft', {'tops': ['Synthetic'],
+        'transcript': [{'speaker': 'S', 'text': 'Retained', 'start': 0, 'end': 1}],
+        'summaries': {0: 'Retained draft'}})
+    persistence.save_pipeline_job('failed-pipeline', {'session_id': 'failed-draft',
+        'status': 'failed', 'stage': 'agenda_detect', 'error': 'PDF review unresolved', 'progress': 72})
+    rows, total = persistence.list_sessions(status='failed')
+    assert total == 1 and rows[0]['status'] == 'failed'
+    assert rows[0]['pipeline_stage'] == 'agenda_detect'
+    assert rows[0]['pipeline_error'] == 'PDF review unresolved'
+    assert rows[0]['transcript_line_count'] == 1 and rows[0]['summary_count'] == 1
+
+
+def test_fork_and_later_publication_preserve_original_recording_owner():
+    persistence.save_job('shared-audio', {'session_id': 'source', 'status': 'completed',
+        'transcript': [{'speaker': 'S', 'text': 'Synthetic', 'start': 0, 'end': 1}]})
+    original = persistence.load_job('shared-audio')
+    persistence.save_session('fork', {'job_id': 'shared-audio', 'tops': ['Draft']})
+    persistence.save_session('fork', {'job_id': 'shared-audio', 'tops': ['Final'], 'summaries': {0: 'Result'}})
+    assert persistence.load_job('shared-audio') == original
+    assert persistence.load_session('fork')['job_id'] == 'shared-audio'

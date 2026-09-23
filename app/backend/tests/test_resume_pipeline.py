@@ -73,3 +73,52 @@ def test_dry_run_never_mutates(interrupted):
     before = jobs.load('job')
     resume_pipeline.resume('job')
     assert jobs.load('job') == before
+
+
+def test_pdf_contract_migration_requires_unchanged_model_and_transcription(interrupted):
+    old = interrupted['payload']['versions']
+    changed = copy.deepcopy(old)
+    changed['code']['extract_tops.py'] = 'new contract'
+    assert 'extract_tops.py' in resume_pipeline.validate_versions(old, changed, pdf_contract=True)['code']
+    changed['model']['model'] = 'other model'
+    with pytest.raises(ValueError, match='Unsupported changes'):
+        resume_pipeline.validate_versions(old, changed, pdf_contract=True)
+
+    changed = copy.deepcopy(old)
+    changed['transcription']['policy']['WHISPER_MODEL'] = 'other whisper'
+    with pytest.raises(ValueError, match='Unsupported version'):
+        resume_pipeline.validate_versions(old, changed, pdf_contract=True)
+
+
+def test_pdf_migration_binds_audio_preserves_edits_and_keeps_old_audits_as_history(interrupted, tmp_path, monkeypatch):
+    import llm_transport
+    audio = tmp_path / 'synthetic.wav'
+    audio.write_bytes(b'synthetic audio')
+    transcription = [dict(speaker='S', text='Original', start=0, end=1)]
+    persistence.save_job('audio-job', dict(status='completed', transcript=transcription, file_path=str(audio)))
+    # Use exactly the committed transcription representation, plus its stable ID.
+    transcript = [dict(line_id='line-0', **r) for r in persistence.load_job('audio-job')['transcript']]
+    with persistence.connect() as db:
+        db.execute("UPDATE pipeline_jobs SET transcription_job_id='audio-job',result_refs_json=? WHERE pipeline_job_id='job'",
+                   (json.dumps({'audio_path': str(audio)}),))
+        db.execute("UPDATE durable_steps SET value=? WHERE step_key='pipeline:transcript'", (json.dumps(transcript),))
+        db.execute("INSERT INTO durable_steps VALUES ('job','pdf:v2:hash:review:0:1',?,?)",
+                   (json.dumps({'complete': True}), time.time()))
+    edited = persistence.save_session('original', {'tops': ['Manual edit']})
+    monkeypatch.setattr(llm_transport, 'model_fingerprint', lambda _: {'digest': 'different'})
+    with pytest.raises(ValueError, match='digest changed'):
+        resume_pipeline.resume('job', pdf_contract=True, fork_session=True)
+    monkeypatch.setattr(llm_transport, 'model_fingerprint', lambda _: {'digest': 'same'})
+    report = resume_pipeline.resume('job', apply=True, pdf_contract=True, fork_session=True)
+    assert persistence.load_session('original') == edited
+    assert persistence.load_session(report['session_id'])['transcript'] == transcript
+    archived = persistence.load_latest_pipeline_job_for_session('original')
+    assert archived['status'] == 'failed' and archived['stage'] == 'agenda_detect'
+    assert jobs.load(archived['pipeline_job_id']) is None
+    assert jobs.load('job')['documents'][0]['sha256'] == jobs.document(audio)['sha256']
+    with persistence.connect() as db:
+        assert db.execute("SELECT value FROM durable_steps WHERE step_key='pdf:v2:hash:review:0:1'").fetchone()
+        assert db.execute("SELECT 1 FROM durable_steps WHERE step_key LIKE 'pdf:page-evidence-v3:%'").fetchone() is None
+        history = json.loads(db.execute("SELECT value FROM durable_steps WHERE step_key LIKE 'operator:pdf-contract-resume:%'").fetchone()[0])
+        assert history['checkpoint_hashes']['pipeline:transcript']
+        assert 'historical input hash unavailable' in history['audio_binding']

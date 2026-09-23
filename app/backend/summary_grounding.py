@@ -28,6 +28,7 @@ Erfindungen, stillen Datumsänderungen oder unbelegten Auflösungen von Abkürzu
 Jede Notiz benötigt exakte source_id und unverändertes quote als nachprüfbaren Beleg.
 Bei Entscheidungen/Abstimmungen/Aufträgen belege auch die heutige Annahme/Beauftragung.
 Keine Konfidenzwerte; begründe offene Probleme als konkrete beantwortbare Prüffragen.
+Formuliere Notizen und Prüffragen knapp; wiederhole keine Belege oder Aussagen ohne fachlichen Grund.
 """
 
 
@@ -110,7 +111,11 @@ class Workflow:
         self.rows = []
 
     def messages(self, phase, instruction, body):
-        return [{'role': 'system', 'content': self.system + '\n' + instruction},
+        # The blind facts inventory is source-bound, not TOP-bound. Identical
+        # shared/resumed source groups can reuse it; every TOP still receives
+        # its own primary draft and all independent candidate/final reviews.
+        system = self.system.rsplit('\nTOP: ', 1)[0] if phase == 'blind_inventory' else self.system
+        return [{'role': 'system', 'content': system + '\n' + instruction},
                 {'role': 'user', 'content': json.dumps(dict(phase=phase, meeting_context=self.context,
                                                            **body), ensure_ascii=False)}]
 
@@ -277,6 +282,8 @@ class Workflow:
             dict(candidate=candidates, independent_inventory=independent,
                  source_catalog=list(allowed), issues=issues), DRAFT,
             self.draft_validator(self.rows))['claims']
+        seen_findings = set()
+        repair_rounds = 0
         for round_index in range(self.rounds + 1):
             issues = []
             for rows, _ in blind:
@@ -287,6 +294,13 @@ class Workflow:
                 issues.extend(self.review(candidates, rows, 'consolidated_review'))
             if not issues or round_index == self.rounds:
                 break
+            fingerprint = digest(sorted(digest(issue) for issue in issues))
+            if fingerprint in seen_findings:
+                self.usage['stop_reason'] = 'repeated_findings'
+                break
+            seen_findings.add(fingerprint)
+            before = digest(candidates)
+            repair_rounds += 1
             for rows, _ in blind:
                 local_ids = {r['source_id'] for r in rows}
                 local_issues = [issue for issue in issues if any(
@@ -304,10 +318,13 @@ class Workflow:
                     dict(source=rows, candidate=candidates, issues=local_issues,
                          source_catalog=list(allowed), round=round_index), DRAFT,
                     self.draft_validator(self.rows))['claims']
+            if digest(candidates) == before:
+                self.usage['stop_reason'] = 'unchanged_candidate'
+                break
         self.usage.update(processing_complete=True, grounding_incomplete=False,
             source_line_count=len(lines), considered_source_ids=list(allowed),
             source_sha256=digest(lines), prompt_version=VERSION, policy=self.policy,
             required_checks=['generate', 'blind_inventory', 'draft_review', 'final_review', 'consolidated_review'],
             review_required=bool(issues or any(c['section'] == 'uncertainties' for c in candidates)),
-            reconciliation_rounds=round_index)
+            reconciliation_rounds=repair_rounds)
         return candidates, issues, self.rows, len(primary)
