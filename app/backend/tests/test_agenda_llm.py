@@ -11,6 +11,37 @@ def transcript(texts):
     return [TranscriptUtterance('M', text, f'line-{i}', i, i+1) for i, text in enumerate(texts)]
 
 
+@pytest.mark.parametrize('mode', ['fast', 'slow'])
+def test_context_packing_bounds_work_and_preserves_every_source(monkeypatch, mode):
+    from processing_mode import processing_scope
+    work = agenda_llm.Workflow.__new__(agenda_llm.Workflow)
+    rows = [{'index': i, 'text': 'Source'} for i in range(1774)]
+    checked = []
+    def fits(phase, instruction, body, schema):
+        checked.append(body['sources'])
+        return len(body['sources']) <= 1400
+    work.fits = fits
+    with processing_scope(mode):
+        groups = list(work.context_groups('context', '', [], rows, {}))
+    assert [row for group in groups for row in group] == rows
+    assert [len(group) for group in groups] == [1400, 374]
+    assert len(checked) < 30  # Formerly 1773 complete tokenizations.
+    assert all(group in checked for group in groups)
+
+
+def test_context_packing_rejects_single_oversized_source_and_obeys_cancellation(monkeypatch):
+    from llm_transport import ContextBudgetError
+    work = agenda_llm.Workflow.__new__(agenda_llm.Workflow)
+    work.fits = lambda *args: False
+    with pytest.raises(ContextBudgetError, match='single_context_source'):
+        list(work.context_groups('context', '', [], [{'index': 0}], {}))
+    def cancelled():
+        raise LLMCancelledError()
+    monkeypatch.setattr(agenda_llm.durable, 'check', cancelled)
+    with pytest.raises(LLMCancelledError):
+        list(work.context_groups('context', '', [], [{'index': 0}], {}))
+
+
 def run(texts, tops=None, **kwargs):
     return segment_known_agenda(transcript(texts), tops or ['1 Haushalt', '2 Schulbau'], use_llm=True, **kwargs)
 

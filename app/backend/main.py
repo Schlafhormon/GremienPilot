@@ -2369,7 +2369,7 @@ def reconcile_session_summaries(
         next_summaries[index] = summary
         if review:
             next_reviews[index] = review
-        next_states[index] = {
+        next_state = {
             **previous_state,
             **dict(requested_states.get(index) or {}),
             "top_id": top_id,
@@ -2379,8 +2379,14 @@ def reconcile_session_summaries(
             "current_input_hash": input_hash,
             "change_reasons": change_reasons,
             "origin": "manual" if manually_edited else previous_state.get("origin", "pipeline"),
-            "updated_at": time.time(),
         }
+        # An unchanged save must not create another client-side dirty state.
+        if {k: v for k, v in next_state.items() if k != 'updated_at'} != {
+                k: v for k, v in previous_state.items() if k != 'updated_at'}:
+            next_state['updated_at'] = time.time()
+        elif 'updated_at' in previous_state:
+            next_state['updated_at'] = previous_state['updated_at']
+        next_states[index] = next_state
 
     state["summaries"] = next_summaries
     state["summary_reviews"] = next_reviews

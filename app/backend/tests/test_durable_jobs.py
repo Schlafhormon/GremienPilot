@@ -433,6 +433,30 @@ def test_expired_lease_is_retryable_interruption_not_user_cancel():
     assert result['error'] == 'LeaseLost'
 
 
+def test_heartbeat_retries_brief_writer_contention_without_losing_lease(monkeypatch):
+    import sqlite3
+    job = jobs.submit('test', {})
+    real_connect = persistence.connect
+    failures = []
+    def connect(*args, **kwargs):
+        if 'timeout' in kwargs and not failures:
+            failures.append(time.monotonic())
+            raise sqlite3.OperationalError('database is locked')
+        return real_connect(*args, **kwargs)
+    monkeypatch.setattr(persistence, 'connect', connect)
+    def runner(value):
+        initial = value['heartbeat_at']
+        wait(lambda: jobs.load(job['job_id'])['heartbeat_at'] > initial, seconds=2)
+        assert time.monotonic() - failures[0] < .8
+        jobs.check()
+        return {}, 'completed'
+    manager = jobs.Manager(runner)
+    manager.lease = 3
+    manager.execute(jobs.claim(manager.owner, manager.lease))
+    assert jobs.load(job['job_id'])['state'] == 'completed'
+    assert len(failures) == 1
+
+
 @pytest.mark.parametrize('transcription_metadata_missing', [False, True])
 def test_pipeline_restart_reuses_transcription_agenda_and_summaries(monkeypatch, transcription_metadata_missing):
     from conftest import FakeTranscriptionResult

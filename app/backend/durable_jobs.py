@@ -414,15 +414,26 @@ class Manager:
         token = CURRENT.set(ctx)
         done = threading.Event()
         def heartbeat():
-            while not done.wait(self.lease / 3):
+            delay = self.lease / 3
+            while not done.wait(delay):
                 try:
-                    with persistence.connect() as db:
+                    with persistence.connect(timeout=min(1, self.lease / 6)) as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        # Calculate expiry AFTER obtaining the write lock. Never
+                        # extend an expired lease or revive a replaced worker.
                         now = time.time()
-                        db.execute("""UPDATE durable_jobs SET heartbeat_at=?,lease_until=?
+                        changed = db.execute("""UPDATE durable_jobs SET heartbeat_at=?,lease_until=?
                             WHERE job_id=? AND owner=? AND state='running' AND lease_until>?""",
-                            (now, now + self.lease, ctx.job_id, ctx.owner, now))
-                except STORAGE_ERRORS:
-                    logging.getLogger(__name__).warning("Durable heartbeat storage temporarily unavailable")
+                            (now, now + self.lease, ctx.job_id, ctx.owner, now)).rowcount
+                    if not changed:
+                        return
+                    delay = self.lease / 3
+                except STORAGE_ERRORS as exc:
+                    # Retry promptly after brief autosave contention instead of
+                    # losing another full heartbeat interval while idle.
+                    delay = min(1, self.lease / 12)
+                    logging.getLogger(__name__).warning('Durable heartbeat storage temporarily unavailable (%s)',
+                                                       getattr(exc, 'sqlite_errorname', type(exc).__name__))
         heart = threading.Thread(target=heartbeat, daemon=True)
         heart.start()
         state, result, error = "completed", None, None

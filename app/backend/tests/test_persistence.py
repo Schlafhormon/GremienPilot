@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 import pytest
 
@@ -6,6 +7,56 @@ from fastapi.testclient import TestClient
 
 import main
 import persistence
+
+
+def test_unchanged_session_save_does_not_change_summary_timestamps():
+    client = TestClient(main.app)
+    payload = {'tops': ['Haushalt'], 'top_ids': ['top-a'], 'transcript': [
+        {'speaker': 'S', 'text': 'Beratung', 'start': 0, 'end': 1}], 'assignments': [0]}
+    first = client.post('/api/sessions', json=payload).json()
+    second = client.put('/api/sessions/' + first['session_id'], json=first).json()
+    third = client.put('/api/sessions/' + first['session_id'], json=second).json()
+    assert first['summary_states'] == second['summary_states'] == third['summary_states']
+    third['summaries'] = {'0': 'Manuell bearbeitet'}
+    changed = client.put('/api/sessions/' + first['session_id'], json=third).json()
+    assert changed['summary_states']['0']['updated_at'] > third['summary_states']['0']['updated_at']
+
+
+def test_reader_snapshot_does_not_block_queue_writes():
+    import durable_jobs
+    job = durable_jobs.submit('test', {})
+    errors = []
+    with persistence.connect() as reader:
+        assert reader.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+        reader.execute('BEGIN')
+        reader.execute('SELECT * FROM durable_jobs').fetchall()
+        def write():
+            try:
+                with persistence.connect(timeout=.2) as writer:
+                    writer.execute('UPDATE durable_jobs SET heartbeat_at=123 WHERE job_id=?', (job['job_id'],))
+            except Exception as exc:
+                errors.append(exc)
+        thread = threading.Thread(target=write)
+        thread.start()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert not errors
+        assert reader.execute('SELECT heartbeat_at FROM durable_jobs').fetchone()[0] is None
+    assert durable_jobs.load(job['job_id'])['heartbeat_at'] == 123
+
+
+def test_large_payload_serialization_happens_outside_writer_transaction(monkeypatch):
+    original = persistence._to_json
+    def encode(value):
+        with persistence.connect(timeout=.1) as writer:
+            writer.execute('BEGIN IMMEDIATE')
+        return original(value)
+    monkeypatch.setattr(persistence, '_to_json', encode)
+    saved = persistence.save_session('s', {'tops': ['A'], 'top_ids': ['a'],
+        'agenda_proposals': {'evidence': 'x' * 100000},
+        'summary_states': {0: {'top_id': 'a'}}, 'summary_reviews': {0: {}},
+        'transcript': [{'speaker': 'S', 'text': 'A', 'start': 0, 'end': 1, 'timing': {'source': 'test'}}]})
+    assert saved['agenda_proposals']['evidence'] == 'x' * 100000
 
 
 def test_persistence_initializes_expected_tables(tmp_path, monkeypatch):

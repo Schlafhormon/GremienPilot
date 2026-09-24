@@ -1,5 +1,19 @@
 # Dauerhafte Modellarbeiten
 
+Die lokale SQLite-Datenbank verwendet WAL, damit lesende Sitzungs- und
+Statusabfragen kurze Worker-Schreibvorgänge nicht blockieren. Große JSON-Daten
+werden vor Beginn der Schreibtransaktion vorbereitet. Nach einer kurzen
+Datenbanksperre versucht der Heartbeat zeitnah erneut zu schreiben; abgelaufene
+oder übertragene Leases werden weiterhin strikt abgewiesen. Sicherungen müssen
+die SQLite-Backup-API verwenden und dürfen nicht nur die laufende Hauptdatei
+kopieren, da aktuelle Transaktionen in der WAL-Datei liegen können.
+
+Unveränderte Sitzungsdaten behalten ihre Statuszeitstempel. Das Frontend zählt
+reine Statuszeitstempel nicht als Änderung für Autosave. Die Kontextaufteilung
+sucht passende Quellenblöcke mit binärer Suche und prüft jeden gewählten Block
+gegen das vollständige Tokenbudget. Diese technischen Optimierungen gelten
+für Fast und Slow und ergänzen keine Modellprüfungen.
+
 SQLite (`PERSISTENCE_DB_PATH`) und das Upload-Verzeichnis müssen einen Neustart überleben. Unterstützt wird ein Backend-Prozess mit einer gemeinsamen seriellen Arbeitswarteschlange, auf einem lokalen Dateisystem. `flock` auf einer Datei neben SQLite verweigert einen zweiten Prozess. Mehrere Hosts/Repliken, NFS und mehrere unabhängig kopierte Datenbanken sind kein unterstützter Worker-Cluster. Kubernetes verwendet deshalb `Recreate`; CPU/GPU und Provider bleiben separat konfigurierbar.
 
 Neue Starts: `POST /api/extract-tops/jobs` (Multipart wie bisher), `POST /api/agenda-detection/jobs` (bisheriges JSON). Die Antwort ist `202` mit `job_id`. `GET /api/model-jobs/{id}` liefert kurze Statusantworten, `POST /api/model-jobs/{id}/cancel` bricht ab. PDF-Clients können alternativ `Prefer: respond-async` am bisherigen Endpunkt verwenden. Alte Endpunkte behalten ihren synchronen Ergebnisvertrag, laufen intern jedoch ebenfalls dauerhaft; alte Clients können weiterhin am Proxy-Timeout scheitern. Der neue Browser-Client verwendet Statusabfragen. Pipeline- und Zusammenfassungsantworten behalten ihre alten Statuswerte und ergänzen `execution` mit dem genauen Jobzustand.

@@ -278,6 +278,27 @@ class Workflow:
             detail['duration_seconds'] = round(time.monotonic()-began, 3)
             self.usage.chunks.append(detail)
 
+    def context_groups(self, phase, instruction, agenda, units, schema):
+        """Find fitting source prefixes without tokenizing every growing prefix.
+
+        Every returned group has passed the full request/schema budget check.
+        Source order and coverage are unchanged; this performs no model calls.
+        """
+        start = 0
+        while start < len(units):
+            low, high, best = 1, len(units) - start, 0
+            while low <= high:
+                durable.check()
+                size = (low + high) // 2
+                if self.fits(phase, instruction, {'agenda': agenda, 'sources': units[start:start+size]}, schema):
+                    best, low = size, size + 1
+                else:
+                    high = size - 1
+            if not best:
+                raise ContextBudgetError('single_context_source_exceeds_budget')
+            yield units[start:start+best]
+            start += best
+
     def context(self, role, agenda):
         """Read every source; recursively condense only when full input cannot fit.
 
@@ -302,17 +323,8 @@ class Workflow:
             if policy().fast and len(data['evidence']) > FAST_CONTEXT_ANCHORS:
                 raise AgendaValidationError('context_evidence_limit_exceeded')
         def summarize(units, level):
-            packed, current = [], []
-            for unit in units:
-                body = {'agenda': agenda, 'sources': current + [unit]}
-                if current and not self.fits(role + ':context', instruction, body, notes_schema):
-                    packed.append(current)
-                    current = []
-                current.append(unit)
-            if current:
-                packed.append(current)
             nodes = []
-            for group in packed:
+            for group in self.context_groups(role + ':context', instruction, agenda, units, notes_schema):
                 data = self.call(role + ':context', instruction, {'agenda': agenda, 'sources': group}, notes_schema, validate)
                 start = group[0]['index'] if level == 0 else group[0]['coverage'][0]
                 end = group[-1]['index'] if level == 0 else group[-1]['coverage'][1]

@@ -122,6 +122,13 @@ function readRoute(): AppRoute {
 function serializeSessionPayload(payload: SessionSavePayload): string {
   const contentPayload = { ...payload };
   delete contentPayload.revision;
+  // Server bookkeeping is not an editor change. Otherwise each successful
+  // autosave schedules another one when summary timestamps are refreshed.
+  contentPayload.summary_states = Object.fromEntries(Object.entries(payload.summary_states ?? {}).map(([key, state]) => {
+    const content = { ...state };
+    delete content.updated_at;
+    return [key, content];
+  }));
   return JSON.stringify(contentPayload);
 }
 

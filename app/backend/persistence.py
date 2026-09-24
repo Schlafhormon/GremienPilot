@@ -31,10 +31,10 @@ def get_db_path() -> Path:
     return Path(os.environ.get("PERSISTENCE_DB_PATH", str(DEFAULT_DB_PATH)))
 
 
-def connect(db_path: Path | None = None) -> sqlite3.Connection:
+def connect(db_path: Path | None = None, *, timeout: float = 5) -> sqlite3.Connection:
     path = db_path or get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, timeout=timeout)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -43,6 +43,9 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
 def init_db(db_path: Path | None = None) -> None:
     """Create or migrate the local SQLite database."""
     with connect(db_path) as db:
+        # The production database lives on a local Linux volume. Readers must
+        # not prevent the queue heartbeat from committing a short write.
+        db.execute('PRAGMA journal_mode = WAL')
         from durable_jobs import init_schema
         init_schema(db)
         db.executescript(
@@ -1452,6 +1455,17 @@ def save_session(
     bump_revision: bool = True,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
+    # Prepare potentially multi-megabyte JSON before holding SQLite's single
+    # writer lock. Revision checks and all publications remain transactional.
+    metadata_json = _to_json(state.get('export_metadata') or {})
+    proposals_json = _to_json(state.get('agenda_proposals'))
+    reviews_json = {int(index): _to_json(value) or '{}' for index, value in (state.get('summary_reviews') or {}).items()}
+    states_json = {int(index): _to_json(value) or '{}' for index, value in (state.get('summary_states') or {}).items()}
+    transcript_rows = None if state.get('transcript') is None else [
+        (session_id, index, str(line.get('line_id') or uuid.uuid4()),
+         str(line.get('speaker', '')), str(line.get('text', '')),
+         float(line.get('start', 0)), float(line.get('end', 0)), _to_json(line.get('timing')))
+        for index, line in enumerate(state['transcript'])]
     now = time.time()
     with connect(db_path) as db:
         from durable_jobs import fence, record_publication
@@ -1496,8 +1510,8 @@ def save_session(
                 state.get("job_id"),
                 state.get("current_step"),
                 1 if state.get("skipped_assignment") else 0,
-                _to_json(state.get("export_metadata") or {}),
-                _to_json(state.get("agenda_proposals")),
+                metadata_json,
+                proposals_json,
                 state.get("processing_mode", existing["processing_mode"] if existing else "slow"),
                 state.get("pdf_source_job_id", existing["pdf_source_job_id"] if existing else None),
                 created_at,
@@ -1576,8 +1590,8 @@ def save_session(
             VALUES (?, ?, ?)
             """,
             [
-                (session_id, int(top_index), _to_json(review) or "{}")
-                for top_index, review in (state.get("summary_reviews") or {}).items()
+                (session_id, top_index, review_json)
+                for top_index, review_json in reviews_json.items()
             ],
         )
 
@@ -1598,7 +1612,7 @@ def save_session(
                         if 0 <= int(top_index) < len(top_ids)
                         else f"whole-session:{session_id}"
                     )),
-                    _to_json(summary_state) or "{}",
+                    states_json[int(top_index)],
                 )
                 for top_index, summary_state in (
                     state.get("summary_states") or {}
@@ -1618,19 +1632,7 @@ def save_session(
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [
-                    (
-                        session_id,
-                        index,
-                        str(line.get("line_id") or uuid.uuid4()),
-                        str(line.get("speaker", "")),
-                        str(line.get("text", "")),
-                        float(line.get("start", 0)),
-                        float(line.get("end", 0)),
-                        _to_json(line.get('timing')),
-                    )
-                    for index, line in enumerate(state.get("transcript") or [])
-                ],
+                transcript_rows,
             )
 
         record_publication(db)

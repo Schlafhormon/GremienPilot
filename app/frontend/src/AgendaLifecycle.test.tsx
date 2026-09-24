@@ -81,6 +81,27 @@ beforeEach(() => {
 });
 
 describe('agenda proposals across real editor state transitions', () => {
+  it('stops autosaving after server timestamp updates but still saves the next manual edit', async () => {
+    stored.summary_states = { 0: { top_id: 'top-a', status: 'missing', updated_at: 1 } };
+    vi.mocked(saveSession).mockImplementation(async payload => {
+      stored = { ...structuredClone(payload), session_id: 'session-1', revision: stored.revision! + 1,
+        summary_states: Object.fromEntries(Object.entries(payload.summary_states ?? {}).map(([key, value]) =>
+          [key, { ...value, updated_at: Date.now() }])) };
+      return structuredClone(stored);
+    });
+    render(<App />);
+    await screen.findByRole('button', { name: 'Alle übernehmen' });
+    await userEvent.click(screen.getByText('TOP 1 Haushalt.'));
+    await waitFor(() => expect(saveSession).toHaveBeenCalled());
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1700)); });
+    const settled = vi.mocked(saveSession).mock.calls.length;
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1700)); });
+    expect(saveSession).toHaveBeenCalledTimes(settled);
+    await userEvent.click(screen.getByText('TOP 2 Schulbau.'));
+    await waitFor(() => expect(saveSession).toHaveBeenCalledTimes(settled + 1));
+    expect(stored.assignments).toEqual(assignments());
+  }, 15000);
+
   it.each([
     ['TOP hinzufügen', [0, 2]],
     ['TOP löschen', [null, 0]],
