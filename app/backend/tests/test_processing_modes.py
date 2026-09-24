@@ -193,6 +193,10 @@ def test_fast_context_budget_preserves_every_source_without_review(agenda_model,
     config = get_llm_config()
     for body, request in agenda_model.calls:
         assert body['phase'].startswith('fast:')
+        if body['phase'] == 'fast:detail':
+            # Condensed notes must not override the endpoint/window protocol
+            # with the numeric retrieval protocol used by preparation phases.
+            assert 'source_ranges' not in ''.join(m['content'] for m in request['messages'])
         assert fits(request['messages'], structured_output_budget(config, request['max_tokens']),
                     config, request['response_format'])
 

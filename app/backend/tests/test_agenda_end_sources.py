@@ -137,7 +137,7 @@ def test_fast_incomplete_generation_has_no_hidden_split_repairs(agenda_model):
 
 def test_prompt_projection_preserves_sources_and_questions_without_mutating_archive():
     work, _ = workflow([], n=1); work.system='System'
-    body = {'original':work.rows, 'note': {'evidence':[{'line_id':'id-0','quote':'Original 0'}],
+    body = {'original':work.rows, 'note': {'source_ranges': [], 'evidence':[{'line_id':'id-0','quote':'Original 0'}],
             'grounding':{'content_status':'contradicted','questions':['Wurde abgelehnt?'],
                          'source_ids':['id-0'], 'diagnostics':[]}}}
     before = deepcopy(body)
@@ -146,3 +146,4 @@ def test_prompt_projection_preserves_sources_and_questions_without_mutating_arch
     assert projected['original'][0]['text']=='Original 0'
     assert projected['note']['grounding']=={'content_status':'contradicted','questions':['Wurde abgelehnt?']}
     assert projected['note']['evidence'][0]['line_id']=='L1'
+    assert 'source_ranges' not in projected['note']
