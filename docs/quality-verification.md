@@ -1,5 +1,9 @@
 # Quellengebundene Qualitätsprüfung
 
+Die folgenden Prüfabläufe beschreiben **Slow**, den Standardmodus. **Fast** nutzt
+einen verkürzten Ablauf ohne unabhängige Inhaltsprüfung; Unterschiede und
+Ergebnisstatus stehen unter [Verarbeitungsmodi](processing-modes.md).
+
 ## Verbindlicher Ablauf
 
 `summary_grounding.py` ersetzt Stichwortfilter, Ähnlichkeitssuche und fachliche Python-Korrekturen. Jede Notiz enthält Kategorie, zeitliche Rolle (`current`, `proposal`, `retrospective`, `quoted_prior`, `unclear`) sowie originale Quellen-IDs und exakte Zitate. Die bisherigen Text- und Listenfelder sowie API-Endpunkte bleiben erhalten; Belege und Prüfmetadaten sind zusätzliche Felder.

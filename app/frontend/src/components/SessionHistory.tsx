@@ -196,6 +196,7 @@ export default function SessionHistory({ onOpen, onNewSession }: SessionHistoryP
                     <span>Zuletzt geändert: {formatTimestamp(session.updated_at)}</span>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-3 text-xs text-gray-500">
+                    <span>{session.processing_mode === 'fast' ? 'Fast' : 'Slow'}</span>
                     <span>{session.top_count} TOPs</span>
                     <span>{session.transcript_line_count} Transkriptzeilen</span>
                     <span>{session.summary_count} Zusammenfassungen</span>

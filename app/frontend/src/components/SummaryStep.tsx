@@ -541,7 +541,8 @@ export default function SummaryStep({
                 />
               ) : hasReviewContent ? (
                 <div className="space-y-3">
-                  {selectedReview?.llm_usage?.processing_complete === true && (
+                  {selectedReview?.llm_usage?.processing_mode === 'fast' && <p className="text-xs text-gray-600">Fast – ohne automatische Inhaltsprüfung. Ungenauere Ergebnisse möglich.</p>}
+                  {selectedReview?.llm_usage?.processing_mode !== 'fast' && selectedReview?.llm_usage?.processing_complete === true && (
                     <p className="text-xs text-gray-600">Automatische Quellen- und Vollständigkeitsprüfung abgeschlossen. Offene Prüffragen bleiben gesondert sichtbar.</p>
                   )}
                   {selectedWarnings.length > 0 && (

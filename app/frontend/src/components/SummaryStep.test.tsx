@@ -57,6 +57,14 @@ function readBlobAsText(blob: Blob): Promise<string> {
 }
 
 describe('SummaryStep', () => {
+  it('labels a completed Fast result without claiming that it was checked', () => {
+    renderSummaryStep({ summaryReviews: { 0: { source_links: [], review_warnings: [],
+      llm_usage: { processing_complete: true, processing_mode: 'fast', review_status: 'skipped' } } } });
+    expect(screen.getByText(/Fast – ohne automatische Inhaltsprüfung/)).toBeInTheDocument();
+    expect(screen.queryByText(/Automatische Quellen- und Vollständigkeitsprüfung abgeschlossen/)).not.toBeInTheDocument();
+  });
+
+
   it('seeks a transcript source by keyboard', async () => {
     const user = userEvent.setup();
     renderSummaryStep({ audioUrl: '/audio/test.wav' });

@@ -1,3 +1,4 @@
+import type { ProcessingMode } from './types';
 /**
  * API client for the GremienPilot backend
  */
@@ -140,6 +141,7 @@ export async function startPipeline(
 ): Promise<PipelineJob> {
   const formData = new FormData();
   formData.append("audio", audioFile);
+  formData.append("processing_mode", options.processingMode ?? "slow");
   if (options.autoDetectTopsFromPdf && !options.pdfFile && !options.tops?.length && !options.skipAgendaDetection) {
     throw new Error('PDF-Erkennung ist aktiviert, aber keine Einladung hochgeladen. PDF auswählen oder PDF-Erkennung ausschalten.');
   }
@@ -512,6 +514,7 @@ export async function pollTranscription(
  * Options for summary generation.
  */
 export interface SummarizeOptions {
+  processingMode?: ProcessingMode;
   model?: string;
   systemPrompt?: string;
 }
@@ -549,6 +552,7 @@ export async function generateSummary(
       lines: lines,
       model: options?.model,
       system_prompt: options?.systemPrompt,
+      processing_mode: options?.processingMode ?? "slow",
     }),
   });
 
@@ -674,6 +678,7 @@ export async function detectAgenda(
       transcript: request.transcript,
       model: request.model,
       system_prompt: request.systemPrompt,
+      processing_mode: request.processingMode ?? "slow",
       use_llm: request.useLlm,
       preserve_transcript_structure: request.preserveTranscriptStructure,
       fresh: request.fresh,
@@ -978,6 +983,7 @@ export async function createManualSpeakerObservation(
  * Options for TOP extraction from PDF.
  */
 export interface ExtractTOPsOptions {
+  processingMode?: ProcessingMode;
   signal?: AbortSignal;
   onStatus?: (job: ModelJob) => void;
   model?: string;
@@ -987,12 +993,20 @@ export interface ExtractTOPsOptions {
 /**
  * Extract TOPs and session metadata from a PDF meeting invitation.
  */
+export function pdfResultUsable(data: PdfAgendaExtractionResult, mode: ProcessingMode): boolean {
+  if (data.processing_complete !== true) return false;
+  return data.processing_mode === 'fast'
+    ? mode === 'fast' && data.review_status === 'skipped'
+    : !data.review_required;
+}
+
 export async function extractAgendaDataFromPDF(
   pdfFile: File,
   options?: ExtractTOPsOptions
 ): Promise<PdfAgendaExtractionResult> {
   const formData = new FormData();
   formData.append("pdf", pdfFile);
+  formData.append("processing_mode", options?.processingMode ?? "slow");
 
   // Add optional parameters as form fields
   if (options?.model) {
@@ -1017,7 +1031,7 @@ export async function extractAgendaDataFromPDF(
   const data = started.job_id
     ? await pollModelJob<PdfAgendaExtractionResult>(started.job_id, options?.signal, options?.onStatus)
     : started;
-  if (data.processing_complete !== true || data.review_required) {
+  if (!pdfResultUsable(data, options?.processingMode ?? "slow")) {
     throw new Error('PDF-Auswertung ist nicht vollständig geprüft. Ergebnis wurde nicht übernommen.');
   }
   return { ...data, tops: data.tops ?? [], metadata: data.metadata ?? {} };

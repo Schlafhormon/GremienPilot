@@ -138,6 +138,59 @@ async function uploadAndStart(user = userEvent.setup()) {
 }
 
 describe('App pipeline flow', () => {
+  it('persists Fast, locks it during processing and opens the unreviewed result directly', async () => {
+    const user = userEvent.setup();
+    let finish!: (job: PipelineJob) => void;
+    vi.mocked(pollPipeline).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    vi.mocked(getPipelineResult).mockResolvedValue(pipelineResult({ processing_mode: 'fast' }, completedPipeline,
+      ['Fast – ohne automatische Inhaltsprüfung.']));
+    const { container } = render(<App />);
+    expect(screen.getByRole('switch', { name: 'Slow-Modus' })).toBeChecked();
+    await user.click(screen.getByRole('switch', { name: 'Slow-Modus' }));
+    expect(screen.getByRole('switch', { name: 'Slow-Modus' })).not.toBeChecked();
+    await user.upload(container.querySelector<HTMLInputElement>('input[accept="audio/*"]')!,
+      new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+    await user.click(screen.getByRole('checkbox', { name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i }));
+    await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
+    await waitFor(() => expect(startPipeline).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({ processingMode: 'fast' })));
+    expect(saveSession).toHaveBeenCalledWith(expect.objectContaining({ processing_mode: 'fast' }));
+    expect(screen.getByRole('switch', { name: 'Slow-Modus' })).toBeDisabled();
+    await act(async () => { finish(completedPipeline); });
+    await waitFor(() => expect(screen.getByRole('button', { name: /text \(\.txt\)/i })).toBeInTheDocument());
+    expect(screen.getByRole('switch', { name: 'Slow-Modus' })).not.toBeChecked();
+  });
+
+  it('extracts the PDF again after switching its Fast result to Slow', async () => {
+    const user = userEvent.setup();
+    vi.mocked(extractAgendaDataFromPDF).mockResolvedValue({ tops: ['Haushalt'], metadata: {},
+      processing_mode: 'fast', processing_complete: true, review_status: 'skipped', review_required: true,
+      document: { job_id: 'fast-pdf', sha256: 'hash', page_count: 1 } });
+    const { container } = render(<App />);
+    await user.click(screen.getByRole('switch', { name: 'Slow-Modus' }));
+    await user.click(screen.getByRole('checkbox', { name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i }));
+    await user.upload(container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]')!,
+      new File(['pdf'], 'invitation.pdf', { type: 'application/pdf' }));
+    await waitFor(() => expect(screen.getByText(/1 TOP erfolgreich extrahiert/)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: 'Slow-Modus' }));
+    await user.upload(container.querySelector<HTMLInputElement>('input[accept="audio/*"]')!,
+      new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+    await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
+    await waitFor(() => expect(startPipeline).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({
+      processingMode: 'slow', tops: [], autoDetectTopsFromPdf: true, pdfSourceJobId: undefined,
+    })));
+  });
+
+  it('restores the saved mode and resets new sessions to Slow', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, '', '/sessions/session-1');
+    vi.mocked(loadSession).mockResolvedValue(pipelineResult({ processing_mode: 'fast' }).session);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Slow-Modus' })).not.toBeChecked());
+    await user.click(screen.getByRole('button', { name: /neue sitzung/i }));
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Slow-Modus' })).toBeChecked());
+  });
+
+
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();

@@ -1,5 +1,9 @@
 # Modellgestützte PDF-Auswertung
 
+Die folgenden Prüfabläufe beschreiben **Slow**, den Standardmodus. **Fast** nutzt
+einen verkürzten Ablauf ohne unabhängige Inhaltsprüfung; Unterschiede und
+Ergebnisstatus stehen unter [Verarbeitungsmodi](processing-modes.md).
+
 Der Browser sendet die tatsächliche Datei als Multipart-Feld `pdf`. Ein aktivierter
 PDF-Modus ohne Datei wird vor dem Pipeline-Start abgewiesen (auch im Backend).
 Manuelle TOPs haben weiterhin Vorrang. Ein angehängtes PDF ohne manuelle TOPs

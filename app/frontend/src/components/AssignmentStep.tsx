@@ -968,7 +968,7 @@ export default function AssignmentStep({
             {(agendaDetection.llm.processing_complete ?? agendaDetection.llm.status === 'success') ? 'Technisch vollständig verarbeitet' : 'Technische Verarbeitung prüfen'}
             {' · '}{agendaDetection.llm.attempted_calls} neue Modellaufrufe
             {' · '}{agendaDetection.llm.chunks.filter((c) => c.status === 'cached').length} Cache-Treffer.
-            {' '}{agendaDetection.llm.review_complete ? 'Unabhängige Modellprüfung abgeschlossen; dies ist kein Nachweis fachlicher Richtigkeit.' : 'Unabhängige Modellprüfung offen. Die fachliche Zuordnung bleibt prüfpflichtig.'}
+            {' '}{agendaDetection.llm.processing_mode === 'fast' ? 'Fast – ohne automatische Inhaltsprüfung. Ungenauere Ergebnisse möglich.' : agendaDetection.llm.review_complete ? 'Unabhängige Modellprüfung abgeschlossen; dies ist kein Nachweis fachlicher Richtigkeit.' : 'Unabhängige Modellprüfung offen. Die fachliche Zuordnung bleibt prüfpflichtig.'}
           </p>
         )}
         {!agendaDetectionStale && Boolean(agendaDetection?.llm?.reconstructions?.length) && (

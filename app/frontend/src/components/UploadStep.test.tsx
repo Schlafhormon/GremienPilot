@@ -43,6 +43,20 @@ function renderUploadStep(overrides: Partial<UploadStepProps> = {}) {
 }
 
 describe('UploadStep', () => {
+  it('uses the selected mode for PDF extraction and locks the switch while it runs', async () => {
+    let finish!: (value: { tops: string[]; metadata: object }) => void;
+    vi.mocked(extractAgendaDataFromPDF).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const { container } = renderUploadStep({ processingMode: 'fast', setProcessingMode: vi.fn() });
+    fireEvent.change(container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]')!, {
+      target: { files: [new File(['pdf'], 'invitation.pdf', { type: 'application/pdf' })] },
+    });
+    expect(extractAgendaDataFromPDF).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({ processingMode: 'fast' }));
+    expect(screen.getByRole('switch', { name: 'Slow-Modus' })).toBeDisabled();
+    await act(async () => finish({ tops: ['Haushalt'], metadata: {} }));
+    expect(screen.getByRole('switch', { name: 'Slow-Modus' })).toBeEnabled();
+  });
+
+
   beforeEach(() => {
     vi.clearAllMocks();
   });

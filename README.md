@@ -82,6 +82,25 @@ nichtöffentliche Abschnitte hinweg. Erst danach entstehen die TOP-Zusammenfassu
 Begrenzte Reparaturen und ein Cache vermeiden unnötige Neuberechnungen;
 fachliche Unsicherheiten und technische Ausfälle bleiben zur Prüfung sichtbar.
 
+## Fast und Slow pro Sitzung
+
+Auf der Startseite wählt der Schalter **Fast / Slow** den Verarbeitungsmodus der
+Sitzung. **Slow** ist der Standard und behält die gründlichen Quellenprüfungen,
+unabhängigen Modellbewertungen und Korrekturdurchläufe bei. **Fast** verarbeitet
+PDF, TOP-Zuordnung und Zusammenfassungen ohne zusätzliche inhaltliche Modellprüfung.
+Die Ergebnisse entstehen mit weniger Modellaufrufen und können ungenauer sein.
+
+Die Auswahl wird mit der Sitzung gespeichert und gilt auch für spätere
+TOP-Neuzuordnungen und einzelne Neuzusammenfassungen. Während laufender Arbeiten
+ist der Schalter gesperrt. Ein Wechsel gilt für neue Berechnungen; vorhandene
+Ergebnisse behalten ihren Prüfstand. Erfolgreiche Fast-Läufe öffnen direkt das
+bearbeitbare Protokoll. Oberfläche und Export kennzeichnen die fehlende Inhaltsprüfung.
+
+Technische Format-, Quellen-ID- und Vollständigkeitskontrollen bleiben erhalten.
+Transkription, Modellwahl und die gemeinsame Jobwarteschlange verwenden weiterhin
+die vorhandene Konfiguration. Eine feste Laufzeitersparnis ist daher nicht garantiert.
+Details zu API, Speicherung und Abläufen: [Verarbeitungsmodi](docs/processing-modes.md).
+
 ## Gemeinsamer Sitzungsverlauf
 
 Alle Sitzungen werden serverseitig in SQLite gespeichert und sind innerhalb der

@@ -29,6 +29,25 @@ import {
 } from './api';
 
 describe('api session client', () => {
+  it('sends Fast to every standalone generation endpoint and accepts its unreviewed PDF', async () => {
+    const pdf = { tops: ['Haushalt'], metadata: {}, processing_complete: true,
+      processing_mode: 'fast', review_status: 'skipped', review_required: true };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => pdf });
+    vi.stubGlobal('fetch', fetchMock);
+    const file = new File(['pdf'], 'invitation.pdf', { type: 'application/pdf' });
+    await expect(extractAgendaDataFromPDF(file, { processingMode: 'fast' })).resolves.toMatchObject(pdf);
+    expect((fetchMock.mock.calls[0]![1]!.body as FormData).get('processing_mode')).toBe('fast');
+    await expect(extractAgendaDataFromPDF(file, { processingMode: 'slow' })).rejects.toThrow(/nicht vollständig geprüft/);
+    const lines = [{ speaker: 'Rat', text: 'Beratung', start: 0, end: 2 }];
+    await detectAgenda({ transcript: lines, processingMode: 'fast' });
+    expect(JSON.parse(fetchMock.mock.calls[2]![1]!.body).processing_mode).toBe('fast');
+    await generateSummary('Haushalt', lines, { processingMode: 'fast' });
+    expect(JSON.parse(fetchMock.mock.calls[3]![1]!.body).processing_mode).toBe('fast');
+    await startPipeline(new File(['audio'], 'meeting.mp3'), { processingMode: 'fast' });
+    expect((fetchMock.mock.calls[4]![1]!.body as FormData).get('processing_mode')).toBe('fast');
+  });
+
+
   it('awaits summary result synchronization and returns partial job failures', async () => {
     const job = { summary_job_id: 'batch', session_id: 'session', top_ids: ['a', 'b'],
       total_tops: 2, current_top: 2, completed_tops: 1, processed_tops: 1, progress: 50 };

@@ -1,3 +1,5 @@
+import ProcessingModeSwitch from './components/ProcessingModeSwitch';
+import type { ProcessingMode } from './types';
 import { mergeSummarySession } from './summarySync';
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import Layout from "./components/Layout";
@@ -373,6 +375,7 @@ export default function App() {
   );
 
   // Data state
+  const [processingMode, setProcessingMode] = useState<ProcessingMode>('slow');
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfExtraction, setPdfExtraction] = useState<PdfAgendaExtractionResult | null>(null);
@@ -527,6 +530,7 @@ export default function App() {
 
   const buildSessionPayload = useCallback(
     (overrides: Partial<SessionSavePayload> = {}): SessionSavePayload => ({
+      processing_mode: overrides.processing_mode ?? processingMode,
       session_id: overrides.session_id ?? sessionId,
       revision: overrides.revision ?? sessionRevision,
       job_id: overrides.job_id ?? jobId,
@@ -544,6 +548,7 @@ export default function App() {
       skipped_assignment: overrides.skipped_assignment ?? skippedAssignment,
     }),
     [
+      processingMode,
       agendaProposals,
       assignments,
       currentStep,
@@ -571,6 +576,7 @@ export default function App() {
 
   const applySession = useCallback((session: SessionResponse | SessionDraft) => {
     summaryBaselineRef.current = session;
+    setProcessingMode(session.processing_mode ?? "slow");
     const nextSessionId = session.session_id ?? null;
     const nextRevision = session.revision ?? null;
     setSessionId(nextSessionId);
@@ -663,7 +669,9 @@ export default function App() {
       sessionWithSuggestedSpeakers,
       speakerObservations
     );
-    const shouldReviewBeforeProtocol = needsReview || needsSpeakerReview;
+    const fastComplete = result.session.processing_mode === 'fast' && completedPipeline.status === 'completed' &&
+      !hasTechnicalProcessingFailure(sessionWithSuggestedSpeakers, agendaDetectionResult) && hasFreshSessionSummaries(sessionWithSuggestedSpeakers);
+    const shouldReviewBeforeProtocol = !fastComplete && (needsReview || needsSpeakerReview);
 
     applySession(sessionWithSuggestedSpeakers);
 
@@ -681,6 +689,7 @@ export default function App() {
     setPipelineNotice(
       hasTechnicalProcessingFailure(sessionWithSuggestedSpeakers, agendaDetectionResult)
         ? INCOMPLETE_PIPELINE_NOTICE
+        : fastComplete ? "Fast-Verarbeitung abgeschlossen – ohne automatische Inhaltsprüfung. Sie können das Protokoll direkt bearbeiten."
         : shouldReviewBeforeProtocol
         ? "Automatische Verarbeitung beendet. Prüfen Sie Sprecher, Zuordnungen und Zusammenfassungen an den markierten Stellen."
         : "Automatische Verarbeitung abgeschlossen. Das Protokoll ist vorbereitet."
@@ -716,6 +725,7 @@ export default function App() {
     setAudioFile(null);
     setPdfFile(null);
     setPdfExtraction(null);
+    setProcessingMode("slow");
     setTops(EMPTY_TOPS);
     setTopIds([]);
     setTranscript([]);
@@ -999,6 +1009,7 @@ export default function App() {
       latestPayloadRef.current = merged;
       sessionRevisionRef.current = refreshed.revision ?? sessionRevisionRef.current;
       setSessionRevision(sessionRevisionRef.current);
+      setProcessingMode(merged.processing_mode ?? "slow");
       setTops(merged.tops);
       setTopIds(merged.top_ids ?? []);
       setTranscript(merged.transcript ?? []);
@@ -1198,6 +1209,7 @@ export default function App() {
       localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
 
       const pipeline = await apiStartPipeline(audioFile, {
+        processingMode,
         sessionId: activeSessionId,
         tops: submittedTops,
         pdfFile,
@@ -1258,6 +1270,20 @@ export default function App() {
       );
     } finally {
       setIsLoadingRouteSession(false);
+    }
+  };
+
+  const modeLocked = isProcessing || isDetectingAgenda || isGeneratingSummary ||
+    Boolean(pipelineJob && ['pending', 'processing'].includes(pipelineJob.status)) ||
+    Boolean(summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status));
+  const handleProcessingModeChange = (mode: ProcessingMode) => {
+    if (modeLocked) return;
+    setProcessingMode(mode);
+    // An unreviewed PDF cannot supply the verified agenda for a new Slow run.
+    if (mode === 'slow' && pdfExtraction?.processing_mode === 'fast' && !transcript.length) {
+      if (JSON.stringify(tops) === JSON.stringify(pdfExtraction.tops)) setTops(EMPTY_TOPS);
+      setPdfExtraction(null);
+      setAutoDetectTopsFromPdf(true);
     }
   };
 
@@ -1403,7 +1429,7 @@ export default function App() {
     setAgendaDetectionError(null);
     try {
       const result = await detectAgenda({
-        tops, transcript, model: llmSettings.model,
+        tops, transcript, model: llmSettings.model, processingMode,
         fresh, topIds, signal: controller.signal,
         onStatus: job => setAgendaJobPhase(job.state === 'queued' ? 'Wartet auf Verarbeitung' : job.state === 'retry_wait' ? 'Vorübergehend gestört; erneuter Versuch folgt' : (job.progress?.agenda_phase ?? job.progress?.phase)?.startsWith('independent') ? 'Unabhängige Quellenprüfung läuft …' : (job.progress?.agenda_phase ?? job.progress?.phase)?.startsWith('resolve') ? 'Abweichungen werden geklärt …' : job.progress?.phase === 'loading' ? 'Modell lädt / wartet auf erste Ausgabe' : 'Sitzungsverlauf und Zuordnungen werden ermittelt …'),
         preserveTranscriptStructure: true,
@@ -1632,6 +1658,7 @@ export default function App() {
         </div>
       )}
 
+      {(currentStep !== 1 || isProcessing) && <ProcessingModeSwitch mode={processingMode} onChange={handleProcessingModeChange} disabled={modeLocked} existingResults />}
       {isProcessing ? (
         <div>
           <ProcessingStep
@@ -1655,6 +1682,9 @@ export default function App() {
         </div>
       ) : currentStep === 1 ? (
         <UploadStep
+          processingMode={processingMode}
+          setProcessingMode={handleProcessingModeChange}
+          processingModeDisabled={modeLocked}
           onNext={handleStep1Next}
           audioFile={audioFile}
           setAudioFile={setAudioFile}

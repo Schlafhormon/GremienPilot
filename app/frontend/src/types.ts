@@ -4,6 +4,8 @@ import type { Dispatch, SetStateAction } from 'react';
  * Shared type definitions for GremienPilot
  */
 
+export type ProcessingMode = 'fast' | 'slow';
+
 // API Types
 export interface TranscriptLine {
   line_id?: string;
@@ -120,6 +122,7 @@ export interface PipelineJob {
 }
 
 export interface PipelineStartOptions {
+  processingMode?: ProcessingMode;
   agendaFresh?: boolean;
   sessionId?: string | null;
   tops?: string[];
@@ -148,6 +151,7 @@ export interface PipelineResultResponse {
 }
 
 export interface SessionSavePayload {
+  processing_mode?: ProcessingMode;
   agenda_proposals?: AgendaProposals | null;
   session_id?: string | null;
   revision?: number | null;
@@ -187,6 +191,7 @@ export type SessionHistoryStatus =
   | 'cancelled';
 
 export interface SessionHistoryItem {
+  processing_mode?: ProcessingMode;
   session_id: string;
   title: string;
   committee: string;
@@ -351,6 +356,7 @@ export interface AssignmentSuggestionsResponse {
 }
 
 export interface AgendaDetectionRequest {
+  processingMode?: ProcessingMode;
   signal?: AbortSignal;
   onStatus?: (job: import('./api').ModelJob) => void;
   topIds?: string[];
@@ -365,6 +371,8 @@ export interface AgendaDetectionRequest {
 }
 
 export interface AgendaLLMUsage {
+  processing_mode?: ProcessingMode;
+  review_status?: string;
   processing_complete?: boolean;
   review_complete?: boolean;
   review_required?: boolean;
@@ -425,6 +433,8 @@ export interface PdfAgendaMetadata {
 }
 
 export interface PdfAgendaExtractionResult {
+  processing_mode?: ProcessingMode;
+  review_status?: string;
   contract_version?: string;
   stop_reason?: string | null;
   review_questions?: Array<{ kind: string; item_ids: string[]; pages: number[]; description: string }>;
@@ -461,6 +471,9 @@ export interface LLMSettings {
 }
 
 export interface UploadStepProps {
+  processingMode?: ProcessingMode;
+  setProcessingMode?: (mode: ProcessingMode) => void;
+  processingModeDisabled?: boolean;
   onNext: () => void;
   audioFile: File | null;
   setAudioFile: (file: File | null) => void;

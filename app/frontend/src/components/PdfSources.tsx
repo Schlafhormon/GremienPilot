@@ -5,9 +5,9 @@ export default function PdfSources({ result }: { result?: PdfAgendaExtractionRes
   if (!result?.document?.url) return null;
   const url = API_BASE + result.document.url;
   return <details className="my-4 rounded border border-gray-200 bg-white p-3 text-sm">
-    <summary>PDF-Quellen und {result.processing_complete ? 'geprüfte Originalagenda' : 'prüfbarer Agendaentwurf'} ({result.document.page_count} Seiten)</summary>
+    <summary>PDF-Quellen und {result.processing_mode === 'fast' ? 'Originalagenda ohne Inhaltsprüfung' : result.processing_complete ? 'geprüfte Originalagenda' : 'prüfbarer Agendaentwurf'} ({result.document.page_count} Seiten)</summary>
     {result.review_required && <div role="alert" className="my-2 text-amber-900">
-      <p>PDF-Prüfung offen. Dieser Entwurf ist nicht vollständig bestätigt.</p>
+      <p>{result.processing_mode === 'fast' ? 'Fast – ohne automatische Inhaltsprüfung. Ungenauere Ergebnisse möglich.' : 'PDF-Prüfung offen. Dieser Entwurf ist nicht vollständig bestätigt.'}</p>
       <ul>{result.review_questions?.map((issue, index) => <li key={index}>
         {issue.description} · Seiten {issue.pages.join(', ')}
         {issue.item_ids.length > 0 && ` · Einträge: ${issue.item_ids.join(', ')}`}

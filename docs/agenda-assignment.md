@@ -1,5 +1,9 @@
 # Modellgestützte Agenda und Transkriptzuordnung
 
+Die folgenden Prüfabläufe beschreiben **Slow**, den Standardmodus. **Fast** nutzt
+einen verkürzten Ablauf ohne unabhängige Inhaltsprüfung; Unterschiede und
+Ergebnisstatus stehen unter [Verarbeitungsmodi](processing-modes.md).
+
 Bekannte Agenden und Erkennung ohne Einladung verwenden denselben Ablauf.
 Zwei getrennte Modellaufrufe ermitteln zuerst belegbare Punkte bzw. zusätzliche
 Punkte einer bekannten Agenda; Unterschiede werden anhand der Quellen
