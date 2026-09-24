@@ -21,8 +21,8 @@ def decision(start, **kwargs):
 
 
 def answer(*spans):
-    result={'kind':'assignments','changes':[dict(start_line_id=s['start_line_id'],
-        assignment={k:v for k,v in s.items() if k!='start_line_id'}) for s in spans[1:]]}
+    result={'kind':'assignments','changes':{s['start_line_id']:
+        {k:v for k,v in s.items() if k!='start_line_id'} for s in spans[1:]}}
     if spans: result['initial']={k:v for k,v in spans[0].items() if k!='start_line_id'}
     return {'response':result}
 
@@ -67,21 +67,24 @@ def test_start_order_is_source_order_not_lexicographic_and_preserves_joint_and_g
     assert [r['top_ids'] for r in rows] == [['top']]*8 + [['top','other'],[]]
 
 
-@pytest.mark.parametrize('ends', [['L1'], ['L4'], ['missing'], [False], ['L2','L2']])
-def test_unknown_first_or_duplicate_change_is_not_repaired(ends):
+@pytest.mark.parametrize('ends', [['L1'], ['L4'], ['missing'], [False]])
+def test_unknown_or_first_change_is_not_repaired(ends):
     work, calls = workflow([answer(decision('L1'),*(decision(e) for e in ends))], n=3)
     with pytest.raises(AgendaValidationError, match='incomplete_source_coverage'):
         work.compact_details('detail', {}, [{'top_id':'top'}], {}, 0,2)
     assert len(calls) == 1
 
 
-def test_duplicate_start_keys_are_rejected_before_any_assignment_can_be_overwritten():
-    raw = '{"response":{"kind":"assignments","initial":{},"initial":{},"changes":[]}}'
+@pytest.mark.parametrize('raw',[
+    '{"response":{"kind":"assignments","initial":{},"initial":{},"changes":{}}}',
+    '{"response":{"kind":"assignments","initial":{},"changes":{"L579":{},"L579":{}}}}',
+])
+def test_duplicate_start_keys_are_rejected_before_any_assignment_can_be_overwritten(raw):
     with pytest.raises(AgendaValidationError,match='duplicate_response_key'):
         parse_response(raw)
 
 
-def test_schema_requires_initial_and_explicit_change_list_and_reuses_shared_definition():
+def test_schema_requires_initial_and_unique_change_keys_and_reuses_shared_definition():
     work,calls=workflow([answer(decision('L1'))],n=80)
     work.compact_details('detail',{},[{'top_id':'top'}],{},0,79)
     schema=calls[0][1]
@@ -89,16 +92,42 @@ def test_schema_requires_initial_and_explicit_change_list_and_reuses_shared_defi
     assert response['required']==['kind','initial','changes'] and not response['additionalProperties']
     assert response['properties']['initial']=={'$ref':'#/$defs/assignment'}
     changes=response['properties']['changes']
-    assert changes['maxItems']==79
-    assert changes['items']['properties']['start_line_id']['enum']==[f'L{i}' for i in range(2,81)]
-    assert changes['items']['properties']['assignment']=={'$ref':'#/$defs/assignment'}
+    assert changes['type']=='object' and changes['required']==[] and not changes['additionalProperties']
+    assert list(changes['properties'])==[f'L{i}' for i in range(2,81)]
+    assert all(value=={'$ref':'#/$defs/assignment'} for value in changes['properties'].values())
     assert 'end_line_id' not in schema['$defs']['assignment']['properties']
 
 
 def test_missing_initial_decision_is_not_filled():
-    work,_=workflow([{'response':{'kind':'assignments','changes':[]}}],n=3)
+    work,_=workflow([{'response':{'kind':'assignments','changes':{}}}],n=3)
     with pytest.raises(AgendaValidationError,match='invalid_compact_response'):
         work.compact_details('detail',{},[{'top_id':'top'}],{},0,2)
+
+
+def test_previous_change_list_cannot_silently_overwrite_repeated_sources():
+    repeated={'start_line_id':'L2','assignment':{k:v for k,v in decision('L2').items() if k!='start_line_id'}}
+    raw=answer(decision('L1'))
+    raw['response']['changes']=[repeated,repeated]
+    work,calls=workflow([raw],n=3)
+    with pytest.raises(AgendaValidationError,match='incomplete_source_coverage'):
+        work.compact_details('detail',{},[{'top_id':'top'}],{},0,2)
+    assert len(calls)==1
+
+
+@pytest.mark.parametrize('mode',['fast','slow'])
+def test_fast_detail_uses_global_narrative_without_prior_source_labels(mode):
+    work,calls=workflow([answer(decision('L1'))],n=3)
+    reconstruction={'narrative':'Thema wurde wieder aufgenommen.',
+        'episodes':[{'start_line_id':'id-0','end_line_id':'id-2','top_ids':['wrong']}],
+        'agenda_states':[{'top_id':'wrong','status':'discussed'}]}
+    before=deepcopy(reconstruction)
+    from processing_mode import processing_scope
+    with processing_scope(mode):
+        rows=work.compact_details('detail',{'model_notes':['Globaler Verlauf']},[{'top_id':'top'}],reconstruction,0,2)
+    body=calls[0][0]
+    assert body['reconstruction']==({'narrative':reconstruction['narrative']} if mode=='fast' else reconstruction)
+    assert body['target_lines']==work.rows and body['context']=={'model_notes':['Globaler Verlauf']}
+    assert reconstruction==before and len(rows)==3 and len(calls)==1
 
 
 # All eight coverage failures and seven mixed answers from the reported job.

@@ -91,11 +91,11 @@ Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**
 
 ## Kompakter Quellenvertrag ab September 2026
 
-Fast und optional kompaktes Slow verwenden `agenda-changes-v10`. `initial`
+Fast und optional kompaktes Slow verwenden `agenda-change-map-v11`. `initial`
 enthält die ausdrückliche Zuordnung der ersten Zielzeile mit `top_ids`, `reason`,
-`evidence`, `uncertain`, `confidence`. Die verpflichtende Liste `changes` enthält
-für jeden Wechsel `start_line_id` und die neue `assignment` mit denselben Feldern.
-Sie darf nur dann leer bleiben, wenn die Zuordnung im gesamten Block gleich bleibt.
+`evidence`, `uncertain`, `confidence`. Das verpflichtende Objekt `changes` enthält
+die erste Quellen-ID jedes Wechsels als Schlüssel und die neue Zuordnung als Wert.
+Es darf nur dann leer bleiben, wenn die Zuordnung im gesamten Block gleich bleibt.
 Die Anwendung sortiert eindeutige Wechsel nach Quellenreihenfolge und berechnet
 die Enden. Eine Entscheidung gilt ausdrücklich bis unmittelbar vor den nächsten
 Wechsel; die letzte bis einschließlich der letzten Zielzeile. Fehlendes `initial`,
@@ -104,7 +104,7 @@ Doppelte JSON-Schlüssel werden bereits beim Parsen abgewiesen.
 Alte widersprüchliche Start-/Endantworten werden nicht in dieses Format repariert;
 fehlende Entscheidungen werden niemals ergänzt.
 
-`response` ist entweder `{kind: "assignments", initial: {...}, changes: [...]}` oder
+`response` ist entweder `{kind: "assignments", initial: {...}, changes: {"L14": {...}}}` oder
 `{kind: "source_request", source_window_ids: [...]}`. Beide Varianten sind in
 Schema und Validator getrennt. Quellenfenster sind technische Adressen von
 höchstens 80 Originalzeilen, keine Themenabschnitte. Nur Fenster mit noch nicht
@@ -119,6 +119,12 @@ bleibt bei einem Zuordnungsdurchgang ohne automatische Inhaltsprüfung und ohne
 Reparatur fehlerhafter Antworten. Slow behält unabhängige Prüfung und Klärung.
 Prompts enthalten weniger technische Auditmetadaten; Originaltexte, Belege,
 fachliche Fragen und Widerspruchsstatus bleiben erhalten. Archive bleiben vollständig.
+Fast-Details erhalten aus der Rekonstruktion nur den globalen Verlaufstext.
+Ungeprüfte Episodengrenzen und Statuszuordnungen konkurrieren dort nicht mehr mit
+den Originalzeilen. Slow behält die vollständigen unabhängigen Rekonstruktionen.
+Der Prompt erklärt Originale ausdrücklich zur maßgeblichen Quelle und verlangt,
+gleiche aufeinanderfolgende Zuordnungen zusammenzufassen. Das benötigt keinen
+zusätzlichen Modellaufruf und keine serverseitige fachliche Korrektur.
 
 Auch die Vorbereitungsphasen trennen Ergebnis und Quellenanforderung als
 `response={kind: "result", result: {...}}` beziehungsweise
@@ -130,7 +136,7 @@ einem Aufruf ist nicht darstellbar. Die Statusbewertung liefert `agenda_states_b
 angeforderten TOP-IDs als Pflichtschlüsseln. Der Server erzeugt daraus wieder
 die bisherige `agenda_states`-Liste; er ergänzt keinen fehlenden Status.
 Gemeinsame `$defs` vermeiden wiederholte Feld-/Belegschemata. Die lokalen
-Ollama-Schematests prüfen auch diese Referenzen und die explizite Wechselliste;
+Ollama-Schematests prüfen auch diese Referenzen und das explizite Wechselobjekt;
 andere Provider müssen diese JSON-Schema-Funktionen unterstützen.
 
 Der native Grammatikgenerator setzt Pflichtfelder vor optionale Felder. Eine
@@ -138,7 +144,10 @@ verpflichtende letzte Endquelle ist deshalb ungünstig für eine Vorwärtsauftei
 Objekte mit optionalen End- oder Anfangsschlüsseln führten im lokalen Versuch zu
 groben Zusammenfassungen statt zu den vorhandenen Themenwechseln. Das gewählte
 Format fragt zuerst nach der ersten Zeile und verlangt danach ausdrücklich
-die Wechselliste. Das ist keine Garantie fachlich richtiger Segmentierung.
+ein separates Wechselobjekt. Die zwischenzeitliche Wechselliste erlaubte im
+nativen Test wiederholte Quellen und lief ins Ausgabelimit. Quellen-Schlüssel
+verhindern solche Wiederholungen bereits im geschlossenen nativen Schema.
+Das ist keine Garantie fachlich richtiger Segmentierung.
 [llama.cpp-Grammatikgenerator](https://github.com/ggml-org/llama.cpp/blob/master/common/json-schema-to-grammar.cpp).
 
 Bei knappen Kontextbudgets werden Fenster technisch unterteilt und die Zahl der

@@ -57,8 +57,8 @@ class AgendaModel:
                 else:
                     spans.append(dict(start=index, end=index, **{k: v for k, v in row.items() if k != 'line_id'}))
             rows = {r['index']: r['line_id'] for r in body['target_lines']}
-            data = {'response': {'kind': 'assignments','changes':[
-                dict(start_line_id=rows[s['start']],assignment={k:v for k,v in s.items() if k not in {'start','end'}}) for s in spans[1:]]}}
+            data = {'response': {'kind': 'assignments','changes':{
+                rows[s['start']]:{k:v for k,v in s.items() if k not in {'start','end'}} for s in spans[1:]}}}
             if spans: data['response']['initial']={k:v for k,v in spans[0].items() if k not in {'start','end'}}
         if phase.endswith((':discover', ':trajectory:v1', ':states:v1')):
             if 'response' not in data:
