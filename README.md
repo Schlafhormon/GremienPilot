@@ -372,6 +372,7 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `AGENDA_DETECTION_TIMEOUT_SECONDS` | Veraltet; Netzwerk nutzt das gemeinsame Inaktivitätslimit | `8` |
 | `AGENDA_DETECTION_CHUNK_LINES` | Optionale zusätzliche Obergrenze für Detailausgaben; `0` plant nur nach Kontext-/Ausgabebudget | `0` |
 | `AGENDA_OUTPUT_TOKENS` / `AGENDA_OUTPUT_TOKENS_PER_LINE` | Antwortbudget und geschätzte Ausgabereserve je Detailzeile; gemeinsame Modellgrenzen gelten zusätzlich | `4096` / `256` |
+| `AGENDA_FAST_OUTPUT_TOKENS` | Maximales Antwortbudget für TOP-Verarbeitung im Fast-Modus; wird an das Kontextfenster samt Denkreserve angepasst und bei der Abschnittsplanung berücksichtigt | `8192` |
 | `AGENDA_MODEL_ATTEMPTS` / `AGENDA_REPAIR_SPLIT_DEPTH` | Maximale Versuche je ungültiger Antwort / Reparaturteilungen; keine fachlichen Ersatzregeln | `2` / `3` |
 | `AGENDA_SOURCE_REQUEST_ROUNDS` | Zusätzliche Runden für vom Modell angeforderte Originalquellen | `2` |
 | `AGENDA_DETECTION_CHUNK_OVERLAP_LINES`, `AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE/AFTER`, `AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS`, `AGENDA_DETECTION_BOUNDARY_REVIEW_MAX_CALLS` | Veraltet; vollständige unabhängige Prüfung ersetzt Stichproben und heuristische Kontextfenster | – |

@@ -101,6 +101,20 @@ Anfrage, Endergebnis und Provenienz, keinen separaten Denktext.
 
 ## Laufzeiten und Ressourcen
 
+Im Fast-Modus erlaubt `AGENDA_FAST_OUTPUT_TOKENS=8192` mehr Platz für die
+TOP-Modellantworten. Slow verwendet weiterhin `AGENDA_OUTPUT_TOKENS=4096`.
+Bei kleineren Kontextfenstern wird das Fast-Fachbudget so begrenzt, dass
+einschließlich Denkreserve höchstens die Hälfte für die Ausgabe reserviert wird.
+Ein explizites `LLM_OUTPUT_TOKENS` überschreibt beide Fachbudgets und bleibt von
+dieser Begrenzung ausgenommen. Die Planung berücksichtigt das wirksame
+Ausgabebudget einschließlich Denkreserve im
+konfigurierten Kontextfenster und bildet bei Bedarf kleinere Eingabeabschnitte;
+das Kontextfenster wird nicht automatisch vergrößert und keine Quelle gekürzt.
+Fast-Kontextnotizen enthalten höchstens acht repräsentative Quellenverweise.
+Der vollständige Quellenbereich bleibt separat erhalten und die Originalzeilen
+bleiben für die spätere Zuordnung verfügbar. Fast behält einen Versuch je
+Abschnitt ohne zusätzliche unabhängige Inhaltsprüfung oder Reparaturrunde.
+
 Für kompaktere Zuordnungen kann `AGENDA_COMPACT_ASSIGNMENTS=true` gesetzt werden.
 Das Modell gibt zusammenhängende Abschnitte mit gemeinsamer Zuordnung, kurzer
 Begründung und Originalbelegen aus. Der Server prüft lückenlose, überlappungsfreie

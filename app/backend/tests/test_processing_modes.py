@@ -142,6 +142,102 @@ def test_fast_agenda_technical_gaps_remain_failures(agenda_model):
     assert len([b for b, _ in agenda_model.calls if b['phase'] == 'fast:detail']) == 1
 
 
+@pytest.mark.parametrize('mode,fast_budget,override,expected', [
+    ('fast', None, None, 8192),
+    ('fast', '6144', None, 6144),
+    ('slow', '8192', None, 4096),
+    ('fast', '8192', '6000', 6000),
+])
+def test_agenda_mode_budget_reaches_planner_and_model(agenda_model, monkeypatch, mode, fast_budget, override, expected):
+    monkeypatch.setenv('AGENDA_OUTPUT_TOKENS', '4096')
+    for name, value in [('AGENDA_FAST_OUTPUT_TOKENS', fast_budget), ('LLM_OUTPUT_TOKENS', override)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    result = agenda_detection.segment_known_agenda([TranscriptUtterance('Rat', 'Beratung.')],
+        ['Haushalt'], processing_mode=mode)
+    assert result.llm.processing_complete
+    assert result.llm.provenance['planner']['output'] == expected
+    assert all(request['max_tokens'] == expected for _, request in agenda_model.calls)
+    if mode == 'fast':
+        assert result.llm.provenance['planner']['attempts'] == 1
+        assert result.llm.provenance['planner']['split_depth'] == 0
+        assert not result.llm.review_complete
+
+
+def test_fast_context_budget_preserves_every_source_without_review(agenda_model, monkeypatch):
+    from llm_transport import fits, structured_output_budget
+    from llm_config import get_llm_config
+    monkeypatch.setenv('LLM_CONTEXT_TOKENS', '16384')
+    monkeypatch.delenv('LLM_THINKING', raising=False)
+    monkeypatch.setenv('AGENDA_FAST_OUTPUT_TOKENS', '8192')
+    monkeypatch.delenv('LLM_OUTPUT_TOKENS', raising=False)
+    rows = [TranscriptUtterance('Rat', f'Beitrag {i}: ' + 'Beratung zum Haushalt. '*12,
+        line_id=f'line-{i}') for i in range(40)]
+    result = agenda_detection.segment_known_agenda(rows, ['Haushalt'], processing_mode='fast')
+    assert result.llm.processing_complete and result.assignments == [0]*len(rows)
+    assert not result.llm.review_complete and result.llm.review_status == 'skipped'
+    context_calls = [(body, request) for body, request in agenda_model.calls if body['phase'] == 'fast:context']
+    assert len(context_calls) > 1  # Input must split when the larger output reserve is included.
+    assert [r['index'] for body, _ in context_calls for r in body['sources'] if 'index' in r] == list(range(len(rows)))
+    assert [r['index'] for body, _ in agenda_model.calls if body['phase'] == 'fast:detail'
+            for r in body['target_lines']] == list(range(len(rows)))
+    archive = result.llm.provenance['context_archive']
+    assert [i for node in archive if node['level'] == 0
+            for i in range(node['coverage'][0], node['coverage'][1]+1)] == list(range(len(rows)))
+    assert len({json.dumps(body, sort_keys=True) for body, _ in context_calls}) == len(context_calls)
+    for _, request in context_calls:
+        schema = request['response_format']['json_schema']['schema']
+        assert schema['properties']['evidence']['maxItems'] == 8
+    config = get_llm_config()
+    for body, request in agenda_model.calls:
+        assert body['phase'].startswith('fast:')
+        assert fits(request['messages'], structured_output_budget(config, request['max_tokens']),
+                    config, request['response_format'])
+
+
+@pytest.mark.parametrize('context,thinking,thinking_tokens,expected', [
+    ('16384', '', '0', 4096),
+    ('16384', 'true', '1024', 3072),
+    ('32768', 'false', '0', 8192),
+    ('12288', 'false', '0', 6144),
+])
+def test_fast_native_budget_leaves_room_for_sources(agenda_model, monkeypatch, context, thinking, thinking_tokens, expected):
+    monkeypatch.setenv('LLM_PROVIDER', 'ollama')
+    monkeypatch.setenv('LLM_THINKING', thinking)
+    monkeypatch.setenv('LLM_THINKING_TOKENS', thinking_tokens)
+    monkeypatch.setenv('LLM_CONTEXT_TOKENS', context)
+    monkeypatch.setenv('AGENDA_FAST_OUTPUT_TOKENS', '8192')
+    monkeypatch.delenv('LLM_OUTPUT_TOKENS', raising=False)
+    result = agenda_detection.segment_known_agenda([TranscriptUtterance('Rat', 'Beratung.')],
+        ['Haushalt'], processing_mode='fast')
+    assert result.llm.processing_complete
+    assert result.llm.provenance['planner']['output'] == expected
+    assert all(c['reserved_output_tokens'] <= int(context)//2 for c in result.llm.chunks)
+    assert all(request['max_tokens'] == expected for _, request in agenda_model.calls)
+    assert all(body['phase'].startswith('fast:') for body, _ in agenda_model.calls)
+
+
+@pytest.mark.parametrize('failure', ['length', 'too_many_anchors'])
+def test_fast_context_failure_has_no_extra_attempt_or_review(agenda_model, monkeypatch, failure):
+    from llm_transport import IncompleteResponseError
+    monkeypatch.setenv('LLM_CONTEXT_TOKENS', '16384')
+    monkeypatch.delenv('LLM_THINKING', raising=False)
+    rows = [TranscriptUtterance('Rat', 'Beratung zum Haushalt. '*12, line_id=f'line-{i}') for i in range(40)]
+    if failure == 'length':
+        agenda_model.overrides['fast:context'] = IncompleteResponseError('LLM output incomplete (length)')
+    else:
+        agenda_model.overrides['fast:context'] = lambda body: {
+            'narrative': 'Verlauf', 'evidence': [{'line_id': r['line_id']} for r in body['sources'][:9]]}
+    result = agenda_detection.segment_known_agenda(rows, ['Haushalt'], processing_mode='fast')
+    assert not result.llm.processing_complete
+    assert result.assignments == [None]*len(rows)
+    assert [body['phase'] for body, _ in agenda_model.calls] == ['fast:context']
+    assert result.llm.failure_reasons == [
+        'IncompleteResponseError' if failure == 'length' else 'context_evidence_limit_exceeded']
+
+
 def test_fast_summary_is_one_call_and_export_is_labelled(summary_model):
     result = summarize.summarize_segment('Haushalt', 'Rat: Der Haushalt wird beraten.', processing_mode='fast')
     assert [body['phase'] for body, _ in summary_model.calls] == ['generate']

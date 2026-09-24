@@ -45,6 +45,22 @@ def test_kubernetes_default_endpoint_has_a_matching_internal_service():
     assert 'key: LLM_MODEL' in text
 
 
+def test_fast_agenda_budget_reaches_every_deployment_and_job_snapshot(monkeypatch):
+    import durable_jobs
+    name, default = 'AGENDA_FAST_OUTPUT_TOKENS', '8192'
+    for path in ['.env.example', 'app/backend/.env.example']:
+        assert f'{name}={default}' in (ROOT / path).read_text()
+    assert f'{name}=${{{name}:-{default}}}' in (ROOT / 'docker-compose.yml').read_text()
+    assert f'{name}: "{default}"' in (ROOT / 'k8s/backend/configmap.yaml').read_text()
+    monkeypatch.setenv(name, default)
+    before = durable_jobs.version_snapshot({'processing_mode': 'fast'})
+    monkeypatch.setenv(name, '6144')
+    after = durable_jobs.version_snapshot({'processing_mode': 'fast'})
+    assert before['policy'][name] == default
+    assert after['policy'][name] == '6144'
+    assert before != after
+
+
 def test_docker_sqlite_lives_on_linux_volume_not_windows_bind_mount():
     compose = (ROOT / 'docker-compose.yml').read_text()
     assert 'backend_state:/app/state' in compose

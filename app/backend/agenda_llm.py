@@ -77,6 +77,10 @@ STATES = ['treated', 'deferred', 'removed', 'not_evidenced']
 INVENTORY = obj({'items': array(obj({'title': TEXT, 'number': {'type': ['string', 'null']},
     'section': {'enum': ['public', 'nonpublic', None]}, 'evidence': EVIDENCE})), 'reason': TEXT})
 NOTES = obj({'narrative': TEXT, 'evidence': EVIDENCE})
+# Context notes retain full source coverage separately. Fast needs representative
+# anchors, not a token-expensive enumeration of every original line.
+FAST_CONTEXT_ANCHORS = 8
+FAST_NOTES = obj({'narrative': TEXT, 'evidence': dict(EVIDENCE, maxItems=FAST_CONTEXT_ANCHORS)})
 
 
 def _positive(name, default, minimum=1):
@@ -98,7 +102,17 @@ class Workflow:
         self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key,
                              timeout=self.config.http_timeout, max_retries=0)
         self.system = BASE + ('\nZusätzlicher Fachkontext:\n' + prompt if prompt else '')
-        self.output = self.config.output_budget(_positive('AGENDA_OUTPUT_TOKENS', 4096))
+        output = (_positive('AGENDA_FAST_OUTPUT_TOKENS', 8192) if policy().fast
+                  else _positive('AGENDA_OUTPUT_TOKENS', 4096))
+        if policy().fast and self.config.output_tokens is None:
+            # Leave at least half the context for sources, including when native
+            # structured thinking reserves twice the generation budget.
+            multiplier = structured_output_budget(replace(self.config, thinking_tokens=0), 1)
+            available = self.config.context_tokens // 2 // multiplier - self.config.thinking_tokens
+            if available < 1:
+                raise ContextBudgetError('agenda_thinking_reserve_exceeds_budget')
+            output = min(output, available)
+        self.output = self.config.output_budget(output)
         self.reserve = structured_output_budget(self.config, self.output)
         self.per_line = _positive('AGENDA_OUTPUT_TOKENS_PER_LINE', 256)
         self.compact = policy().fast or os.environ.get('AGENDA_COMPACT_ASSIGNMENTS', 'false').lower() == 'true'
@@ -277,14 +291,21 @@ class Workflow:
             'Originalnummern nur bei Nachweis, Sitzungsteilen, Status, indirekten Wechseln, Wiederaufnahmen, '
             'gemeinsamen Beratungen und Unklarheiten. Erhalte Quellverweise und zeitliche Reihenfolge. '
             'Verdichte ohne offene Fragen oder wesentliche Übergänge zu verlieren. Keine Detailzuordnung.')
+        notes_schema = FAST_NOTES if policy().fast else NOTES
+        if policy().fast:
+            instruction += (f' Schreibe kompakte Verlaufsnotizen. Wähle höchstens {FAST_CONTEXT_ANCHORS} '
+                'repräsentative Quellenverweise als Anker für die wichtigsten Übergänge. '
+                'Zähle nicht jede Quellzeile auf. Der vollständige Quellenbereich bleibt separat erhalten.')
         def validate(data):
             self.text(data['narrative'])
             self.evidence(data['evidence'], required=False)
+            if policy().fast and len(data['evidence']) > FAST_CONTEXT_ANCHORS:
+                raise AgendaValidationError('context_evidence_limit_exceeded')
         def summarize(units, level):
             packed, current = [], []
             for unit in units:
                 body = {'agenda': agenda, 'sources': current + [unit]}
-                if current and not self.fits(role + ':context', instruction, body, NOTES):
+                if current and not self.fits(role + ':context', instruction, body, notes_schema):
                     packed.append(current)
                     current = []
                 current.append(unit)
@@ -292,7 +313,7 @@ class Workflow:
                 packed.append(current)
             nodes = []
             for group in packed:
-                data = self.call(role + ':context', instruction, {'agenda': agenda, 'sources': group}, NOTES, validate)
+                data = self.call(role + ':context', instruction, {'agenda': agenda, 'sources': group}, notes_schema, validate)
                 start = group[0]['index'] if level == 0 else group[0]['coverage'][0]
                 end = group[-1]['index'] if level == 0 else group[-1]['coverage'][1]
                 node = dict(data, coverage=[start, end], level=level, role=role)
