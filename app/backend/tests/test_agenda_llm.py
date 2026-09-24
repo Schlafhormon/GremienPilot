@@ -223,6 +223,23 @@ def test_discovery_precedes_common_reconstruction_without_invented_numbers(agend
     assert phases[-2:] == ['primary:detail', 'independent:detail']
 
 
+@pytest.mark.parametrize('mode', ['fast','slow'])
+@pytest.mark.parametrize('known', [True,False])
+def test_discovery_request_distinguishes_additions_from_full_inventory(agenda_model, mode, known):
+    result = segment_known_agenda(transcript(['Beratung.']), ['1 Haushalt'] if known else [],
+        use_llm=True, processing_mode=mode)
+    assert result.llm.processing_complete
+    requests = [(b,r) for b,r in agenda_model.calls if b['phase'].endswith(':discover')]
+    assert requests
+    for body, request in requests:
+        assert body['inventory_task'] == ('additional_topics_only' if known else 'full_inventory')
+        assert bool(body['known_agenda']) == known
+        properties = request['response_format']['json_schema']['schema']['properties']
+        assert list(properties)[:2] == ['reason','items']
+    if known:
+        assert result.tops == ['1 Haushalt']
+
+
 def test_reconstruction_can_request_original_sources(agenda_model):
     def reconstruct(body):
         if 'requested_originals' not in body:
