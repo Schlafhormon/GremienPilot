@@ -7,7 +7,7 @@ from copy import deepcopy
 import json
 import pytest
 
-from agenda_llm import Workflow, AgendaValidationError
+from agenda_llm import Workflow, AgendaValidationError, parse_response
 from source_contract import SourceCatalog
 from processing_mode import processing_scope
 from llm_transport import IncompleteResponseError
@@ -20,7 +20,8 @@ def decision(end, **kwargs):
 
 
 def answer(*spans):
-    return {'response': {'kind': 'assignments', 'spans': list(spans)}}
+    return {'response': {'kind': 'assignments', 'spans_by_end': {
+        s['end_line_id']: {k:v for k,v in s.items() if k!='end_line_id'} for s in spans}}}
 
 
 def workflow(responses, n=160):
@@ -53,17 +54,34 @@ def test_exact_endpoints_expand_without_changing_source_identities(start, end):
 def test_endpoint_order_is_source_order_not_lexicographic_and_preserves_joint_and_gap():
     joint = decision('L9'); joint['top_ids'] = ['top','other']
     gap = decision('L10'); gap['top_ids'] = []
-    work, _ = workflow([answer(joint, gap)], n=10)
+    work, _ = workflow([answer(gap, joint)], n=10)  # Object key order has no semantic meaning.
     rows = work.compact_details('detail', {}, [{'top_id':'top'},{'top_id':'other'}], {}, 0,9)
     assert [r['top_ids'] for r in rows] == [['top','other']]*9 + [[]]
 
 
-@pytest.mark.parametrize('ends', [[], ['L2'], ['L3','L2'], ['L2','L2','L3'], ['L4'], ['missing'], [False]])
-def test_unknown_duplicate_reversed_or_missing_final_end_is_not_repaired(ends):
+@pytest.mark.parametrize('ends', [[], ['L2'], ['L4'], ['missing'], [False]])
+def test_unknown_or_missing_final_end_is_not_repaired(ends):
     work, calls = workflow([answer(*(decision(e) for e in ends))], n=3)
     with pytest.raises(AgendaValidationError, match='incomplete_source_coverage'):
         work.compact_details('detail', {}, [{'top_id':'top'}], {}, 0,2)
     assert len(calls) == 1
+
+
+def test_duplicate_endpoint_keys_are_rejected_before_any_assignment_can_be_overwritten():
+    raw = '{"response":{"kind":"assignments","spans_by_end":{"L2":{},"L2":{},"L3":{}}}}'
+    with pytest.raises(AgendaValidationError,match='duplicate_response_key'):
+        parse_response(raw)
+
+
+def test_schema_requires_explicit_last_decision_and_reuses_shared_assignment_definition():
+    work,calls=workflow([answer(decision('L80'))],n=80)
+    work.compact_details('detail',{},[{'top_id':'top'}],{},0,79)
+    schema=calls[0][1]
+    ends=schema['properties']['response']['anyOf'][0]['properties']['spans_by_end']
+    assert ends['required']==['L80'] and not ends['additionalProperties']
+    assert list(ends['properties'])==[f'L{i}' for i in range(1,81)]
+    assert all(v=={'$ref':'#/$defs/assignment'} for v in ends['properties'].values())
+    assert 'end_line_id' not in schema['$defs']['assignment']['properties']
 
 
 # All eight coverage failures and seven mixed answers from the reported job.
@@ -114,7 +132,7 @@ def test_retrieval_offers_only_missing_original_windows_and_deduplicates():
     assert [r['index'] for r in calls[1][0]['requested_originals']] == list(range(80,160))
     assert calls[1][0]['source_windows'] == []
     variants = calls[0][1]['properties']['response']['anyOf']
-    assert set(variants[0]['properties']) == {'kind','spans'}
+    assert set(variants[0]['properties']) == {'kind','spans_by_end'}
     assert set(variants[1]['properties']) == {'kind','source_window_ids'}
 
 

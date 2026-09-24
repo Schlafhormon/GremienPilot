@@ -1,5 +1,6 @@
 """Scripted model answers, not a semantic oracle. No model or network access."""
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 import agenda_llm
 
@@ -29,6 +30,9 @@ class AgendaModel:
             data = value(body) if callable(value) else value
         else:
             data = self.answer(body)
+        if isinstance(data,str):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=data))])
+        data = deepcopy(data)
         schema = kwargs['response_format']['json_schema']['schema']
         if phase.endswith(':trajectory:v1'):
             data.pop('agenda_states', None)
@@ -46,10 +50,25 @@ class AgendaModel:
                 else:
                     spans.append(dict(start=index, end=index, **{k: v for k, v in row.items() if k != 'line_id'}))
             rows = {r['index']: r['line_id'] for r in body['target_lines']}
-            data = {'response': {'kind': 'assignments', 'spans': [dict(end_line_id=rows[s['end']],
-                **{k: v for k, v in s.items() if k not in {'start', 'end'}}) for s in spans]}}
+            data = {'response': {'kind': 'assignments', 'spans_by_end': {rows[s['end']]:
+                {k: v for k, v in s.items() if k not in {'start', 'end'}} for s in spans}}}
         if phase.endswith((':discover', ':trajectory:v1', ':states:v1')):
-            data.setdefault('source_ranges', [])
+            if 'response' not in data:
+                ranges = data.pop('source_ranges', [])
+                if phase.endswith(':states:v1') and isinstance(data.get('agenda_states'),list):
+                    states = data.pop('agenda_states')
+                    # Preserve deliberately malformed legacy duplicate fixtures as
+                    # unreadable maps; never silently overwrite one decision.
+                    if len({s['top_id'] for s in states}) != len(states):
+                        data['agenda_states_by_id'] = states
+                    else:
+                        data['agenda_states_by_id'] = {s['top_id']:{k:v for k,v in s.items() if k!='top_id'} for s in states}
+                if ranges:
+                    response = {'kind':'source_request','source_ranges':ranges}
+                    if any(isinstance(v,(list,dict)) and v for v in data.values()): response['result']=data
+                else:
+                    response = {'kind':'result','result':data}
+                data = {'response':response}
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(data)))])
 
     def evidence(self, row):

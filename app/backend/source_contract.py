@@ -9,6 +9,7 @@ import json
 import re
 
 VERSION = 'graded-sources-v1'
+KEYED_DECISIONS = {'agenda_states_by_id', 'spans_by_end'}
 
 
 def digest(value):
@@ -105,7 +106,12 @@ class SourceCatalog:
                     node.pop('grounding', None)
                     node['evidence'], node['grounding'] = self.inspect(node['evidence'])
                 for key, item in list(node.items()):
-                    if key not in {'grounding', 'evidence'}:
+                    if key in KEYED_DECISIONS and isinstance(item,dict):
+                        # Keys are identities, even when a TOP ID happens to be
+                        # "evidence" or "grounding". Inspect the decisions only.
+                        for decision in item.values():
+                            walk(decision)
+                    elif key not in {'grounding', 'evidence'}:
                         walk(item)
         walk(value)
         return value

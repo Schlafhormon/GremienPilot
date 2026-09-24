@@ -91,16 +91,20 @@ Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**
 
 ## Kompakter Quellenvertrag ab September 2026
 
-Fast und optional kompaktes Slow verwenden `agenda-end-sources-v6`. Jede
-Zuordnung enthält nur `end_line_id` und die fachlichen Felder `top_ids`,
-`reason`, `evidence`, `uncertain`, `confidence`. Ein Abschnitt gilt ausdrücklich
-für jede noch nicht zugeordnete Zielzeile bis einschließlich seiner Endquelle.
-Die Anwendung berechnet den Anfang aus der Quellenreihenfolge. Endquellen
-müssen im Zielblock liegen und streng aufsteigen; die letzte Endquelle muss
-explizit die letzte Zielzeile sein. Ein fehlendes Ende wird niemals ergänzt.
-Alte widersprüchliche Start-/Endantworten werden nicht in dieses Format repariert.
+Fast und optional kompaktes Slow verwenden `agenda-end-sources-v7`. Das Objekt
+`spans_by_end` verwendet die Endquellen-IDs als eindeutige Schlüssel; jeder Wert
+enthält `top_ids`, `reason`, `evidence`, `uncertain`, `confidence`. Die letzte
+Zielquelle ist ein Pflichtschlüssel und benötigt eine ausdrückliche Entscheidung.
+Alle anderen Zielquellen sind optionale Abschnittsenden. Die Anwendung sortiert
+die Schlüssel nach Quellenreihenfolge und berechnet daraus die Anfänge. Ein
+Abschnitt gilt ausdrücklich für jede Zeile nach dem vorherigen Ende bis
+einschließlich seiner Endquelle. Die Reihenfolge der JSON-Objektschlüssel trägt
+keine Bedeutung. Ein fehlender Pflichtschlüssel oder eine unbekannte Endquelle
+wird abgewiesen. Doppelte JSON-Schlüssel werden bereits beim Parsen abgewiesen.
+Alte widersprüchliche Start-/Endantworten werden nicht in dieses Format repariert;
+fehlende Entscheidungen werden niemals ergänzt.
 
-`response` ist entweder `{kind: "assignments", spans: [...]}` oder
+`response` ist entweder `{kind: "assignments", spans_by_end: {...}}` oder
 `{kind: "source_request", source_window_ids: [...]}`. Beide Varianten sind in
 Schema und Validator getrennt. Quellenfenster sind technische Adressen von
 höchstens 80 Originalzeilen, keine Themenabschnitte. Nur Fenster mit noch nicht
@@ -115,6 +119,17 @@ bleibt bei einem Zuordnungsdurchgang ohne automatische Inhaltsprüfung und ohne
 Reparatur fehlerhafter Antworten. Slow behält unabhängige Prüfung und Klärung.
 Prompts enthalten weniger technische Auditmetadaten; Originaltexte, Belege,
 fachliche Fragen und Widerspruchsstatus bleiben erhalten. Archive bleiben vollständig.
+
+Auch die Vorbereitungsphasen trennen Ergebnis und Quellenanforderung als
+`response={kind: "result", result: {...}}` beziehungsweise
+`response={kind: "source_request", source_ranges: [...]}`. Dort bleiben die
+technischen Abrufbereiche nullbasiert und durch die vorhandene Quellenzahl
+begrenzt. Die Statusbewertung liefert `agenda_states_by_id` mit genau den
+angeforderten TOP-IDs als Pflichtschlüsseln. Der Server erzeugt daraus wieder
+die bisherige `agenda_states`-Liste; er ergänzt keinen fehlenden Status.
+Gemeinsame `$defs` vermeiden wiederholte Feld-/Belegschemata. Die lokalen
+Ollama-Schematests prüfen auch diese Referenzen und optionale Endquellenfelder;
+andere Provider müssen diese JSON-Schema-Funktionen unterstützen.
 
 Die öffentliche zeilenweise API und gespeicherte Vorschläge ändern sich nicht.
 Manuelle Zuordnungen, Quellen-IDs und Originalzeiten bleiben unverändert.
