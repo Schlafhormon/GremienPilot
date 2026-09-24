@@ -527,7 +527,7 @@ def test_extract_tops_endpoint_returns_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(
         main,
         "extract_agenda_data_from_pdf",
-        lambda pdf_path, model=None, system_prompt=None: fake_pdf_result(
+        lambda pdf_path, model=None, system_prompt=None, processing_mode=None: fake_pdf_result(
             tops=["Eröffnung", "Haushalt"],
             metadata=SimpleNamespace(
                 to_dict=lambda: {
@@ -744,7 +744,7 @@ def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clea
             audio_duration_seconds=7.0,
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None, processing_mode=None):
         structured = summarize.StructuredSummary(
             discussion=[f"{top_title} wurde beraten."]
         )
@@ -886,7 +886,7 @@ def test_selective_summary_job_updates_requested_top_with_speaker_names(
         },
     )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None, processing_mode=None):
         captured.append(
             {
                 "top_title": top_title,
@@ -1129,7 +1129,7 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
             audio_duration_seconds=4.0,
         )
 
-    def fake_extract_agenda_data_from_pdf(pdf_path, model=None, system_prompt=None):
+    def fake_extract_agenda_data_from_pdf(pdf_path, model=None, system_prompt=None, processing_mode=None):
         extracted_calls.append(
             {
                 "pdf_path": pdf_path,
@@ -1149,7 +1149,7 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
             ),
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None, processing_mode=None):
         return summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary=f"Zusammenfassung {top_title}",
             duration_seconds=0.01,
@@ -1222,14 +1222,14 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
             audio_duration_seconds=2.0,
         )
 
-    def fake_extract_agenda_data_from_pdf(pdf_path, model=None, system_prompt=None):
+    def fake_extract_agenda_data_from_pdf(pdf_path, model=None, system_prompt=None, processing_mode=None):
         extracted_calls.append(pdf_path)
         return fake_pdf_result(
             tops=["TOP I. Öffentlicher Teil", "01 Eröffnung", "02 Haushalt"],
             metadata=SimpleNamespace(to_dict=lambda: {"committee": "Nicht genutzt"}),
         )
 
-    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None, processing_mode=None):
         return summarize.SummarizationResult(llm_usage={'processing_complete': True},
             summary=f"Zusammenfassung {top_title}",
             duration_seconds=0.01,
@@ -1497,7 +1497,7 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
         ),
     )
 
-    def maybe_fail_summary(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None):
+    def maybe_fail_summary(top_title, transcript_text, model=None, system_prompt=None, meeting_context=None, source_lines=None, processing_mode=None):
         if "Fehler" in top_title:
             raise RuntimeError("LLM nicht verfügbar")
         return summarize.SummarizationResult(llm_usage={'processing_complete': True},

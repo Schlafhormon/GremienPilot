@@ -26,6 +26,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlparse
+from processing_mode import policy, FAST_NOTICE
 from llm_transport import complete, fits, structured_output_budget, ContextBudgetError, cache_key, cache_read, cache_write
 
 # Compatibility exports for integrations importing configuration from summarize.
@@ -565,6 +566,8 @@ def build_summary_review(
             message='Für diese Text- und Quellenfassung liegt keine vollständige automatische Prüfung vor. '
                     'Bitte neu generieren oder die manuelle Fassung fachlich prüfen.'))
         return review
+    if verification.get('processing_mode') == 'fast':
+        review.warnings.append(SummaryReviewWarning(kind='review_skipped', message=FAST_NOTICE, severity='info'))
     if not verification.get('processing_complete'):
         review.warnings.append(SummaryReviewWarning(kind='technical_incomplete',
             message='Entwurf erhalten; erforderliche unabhängige Prüfungen sind technisch unvollständig.', severity='error'))
@@ -654,11 +657,12 @@ def summarize_segment(
     system_prompt: Optional[str] = None,
     meeting_context: Optional[str] = None,
     source_lines: list[str] | None = None,
+    processing_mode: str | None = None,
 ) -> SummarizationResult:
-    """Generate, independently verify, reconcile and verify the final minutes.
+    """Generate structured minutes; Slow independently verifies and reconciles them.
 
-    Existing editable text/list fields remain compatible. Source evidence and
-    verification are additive. There is no unverified free-text fallback.
+    Fast retains source references with explicit unreviewed provenance. It never
+    inherits a Slow certificate; technical failures remain failures in both modes.
     """
     from summary_grounding import Workflow, digest
     config = get_llm_config(model)
@@ -709,14 +713,16 @@ def summarize_segment(
         section = claim['section']
         items = getattr(structured, section)
         structured.evidence.append(dict(section=section, item_index=len(items),
-            item_text=marked_text(claim['text'], claim['grounding']), scope=claim['scope'], sources=claim['evidence'],
+            item_text=claim['text'] if policy().fast else marked_text(claim['text'], claim['grounding']), scope=claim['scope'], sources=claim['evidence'],
             grounding=claim['grounding'], original_text=claim['text']))
-        items.append(marked_text(claim['text'], claim['grounding']))
+        items.append(claim['text'] if policy().fast else marked_text(claim['text'], claim['grounding']))
     structured.rejected_candidates = usage.get('rejected_candidates', [])
     for claim in structured.rejected_candidates:
         structured.uncertainties.append(marked_text(claim['text'], claim['grounding']))
     structured.review_questions = issues
-    structured.verification = dict(processing_complete=True, source_sha256=digest(lines),
+    structured.verification = dict(**policy().snapshot(), review_complete=not policy().fast,
+        review_status='skipped' if policy().fast else 'completed',
+        processing_complete=True, source_sha256=digest(lines),
         sources=rows, checks=usage['required_checks'], prompt_version=usage['prompt_version'],
         source_contract='graded-sources-v1')
     summary = render_structured_summary(structured)

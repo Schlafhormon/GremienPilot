@@ -12,6 +12,7 @@ import time
 import uuid
 from copy import deepcopy
 from source_contract import SourceCatalog, reviewed
+from processing_mode import policy
 from dataclasses import replace
 
 import durable_jobs as durable
@@ -100,13 +101,13 @@ class Workflow:
         self.output = self.config.output_budget(_positive('AGENDA_OUTPUT_TOKENS', 4096))
         self.reserve = structured_output_budget(self.config, self.output)
         self.per_line = _positive('AGENDA_OUTPUT_TOKENS_PER_LINE', 256)
-        self.compact = os.environ.get('AGENDA_COMPACT_ASSIGNMENTS', 'false').lower() == 'true'
-        self.depth = _positive('AGENDA_REPAIR_SPLIT_DEPTH', 3, 0)
+        self.compact = policy().fast or os.environ.get('AGENDA_COMPACT_ASSIGNMENTS', 'false').lower() == 'true'
+        self.depth = 0 if policy().fast else _positive('AGENDA_REPAIR_SPLIT_DEPTH', 3, 0)
         self.retrieval_rounds = _positive('AGENDA_SOURCE_REQUEST_ROUNDS', 2, 0)
-        self.attempts = _positive('AGENDA_MODEL_ATTEMPTS', 2)
+        self.attempts = policy().attempts(_positive('AGENDA_MODEL_ATTEMPTS', 2))
         # No metadata request when explicitly disabled, or for an empty transcript.
         fingerprint = model_fingerprint(self.config) if usage.enabled and self.rows else {}
-        usage.provenance = {**fingerprint, 'prompt_version': VERSION,
+        usage.provenance = {**policy().snapshot(), **fingerprint, 'prompt_version': VERSION,
             'source_sha256': hashlib.sha256(json.dumps(self.rows, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
             'configuration': self.config.public_snapshot(), 'cache_namespace': namespace,
             'planner': {'output': self.output, 'per_line': self.per_line, 'compact': self.compact, 'split_depth': self.depth,
@@ -630,6 +631,35 @@ class Workflow:
             return {}
 
 
+def classify_fast(work, agenda, usage):
+    context = work.context('fast', agenda)
+    selected = work.discover('fast:discover', context, known_agenda=agenda)
+    usage.provenance['agenda_discovery'] = {'selected': selected}
+    for i, item in enumerate(selected['items']):
+        title = item['title']
+        if item['number'] is not None:
+            title = f"{item['number']}. {title}"
+        if item['section']:
+            title = f"[{'Öffentlich' if item['section'] == 'public' else 'Nichtöffentlich'}] {title}"
+        identity = str(uuid.uuid5(uuid.NAMESPACE_URL, usage.provenance['source_sha256'] + ':' + str(i)))
+        if identity in {t['top_id'] for t in agenda}:
+            raise AgendaValidationError('duplicate_discovered_identity')
+        agenda.append(dict(item, title=title, top_id=identity))
+    reconstruction = work.reconstruction('fast:reconstruct', context, agenda)
+    usage.reconstructions = [reconstruction]
+    usage.agenda_states = [dict(s, review_status='skipped') for s in reconstruction['agenda_states']]
+    for start, end in work.plan(context, agenda, reconstruction):
+        output = work.run_details('fast:detail', context, agenda, reconstruction, start, end)
+        for row in usage.line_results[start:end+1]:
+            value = output.get(row['line_id'])
+            if value:
+                row.update(value, status='assigned' if value['top_ids'] else 'unassigned', review_status='skipped')
+            else:
+                row['reason'] = 'Technisch nicht verarbeitet: ' + work.failures.get(('fast:detail', row['index']), 'missing_model_result')
+        usage.processed_lines = [r['index'] for r in usage.line_results if r['status'] != 'not_processed']
+        work.notify('fast:detail')
+
+
 def classify(transcript, tops, usage, model=None, system_prompt=None, progress_callback=None, *, cache_namespace='', top_ids=None):
     rows = source_rows(transcript)
     usage.line_results = [dict(line_id=r['line_id'], index=r['index'], top_ids=[], status='not_processed',
@@ -644,10 +674,11 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         usage.review_complete = (all(r['review_status'] in {'agreed', 'resolved', 'unresolved'} for r in usage.line_results)
                                  and all(s.get('review_status') in {'agreed', 'resolved', 'unresolved'} for s in usage.agenda_states)
                                  and len(usage.reconstructions) >= 2)
+        usage.review_status = 'skipped' if policy().fast else 'completed' if usage.review_complete else 'pending'
         usage.review_required = (not usage.review_complete or any(r['status'] != 'assigned' or r.get('uncertain')
             or r['review_status'] == 'unresolved' for r in usage.line_results) or
             any(s.get('review_status') == 'unresolved' for s in usage.agenda_states))
-        usage.status = ('disabled' if not usage.enabled else 'success' if usage.processing_complete and usage.review_complete
+        usage.status = ('disabled' if not usage.enabled else 'success' if usage.processing_complete and (usage.review_complete or policy().fast)
                         else 'partial_failure' if usage.processed_lines else 'failed')
         usage.provenance['identities'] = [dict(item, top_index=i) for i, item in enumerate(agenda)]
         indices = {item['top_id']: i for i, item in enumerate(agenda)}
@@ -662,7 +693,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
             evidence = row['evidence'][0] if row['evidence'] else {'quote': ''}
             evidence_index = next((r['index'] for r in rows if r['line_id'] == evidence.get('line_id')), row['index'])
             segment = AssignmentSegment(index, agenda[index]['title'], row['index'], row['index'],
-                row['confidence'], uncertain, 'llm_review', row['reason'], evidence_index, evidence['quote'])
+                row['confidence'], uncertain, 'llm_fast' if policy().fast else 'llm_review', row['reason'], evidence_index, evidence['quote'])
             if (segments and segments[-1].end_index == row['index']-1 and segments[-1].top_index == index
                     and segments[-1].uncertain == uncertain and segments[-1].reason == row['reason']
                     and segments[-1].confidence == row['confidence']):
@@ -678,6 +709,9 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         return finish()
     try:
         work = Workflow(transcript, usage, model, system_prompt, progress_callback, cache_namespace)
+        if policy().fast:
+            classify_fast(work, agenda, usage)
+            return finish()
         contexts = [work.context(role, agenda) for role in ('primary', 'independent')]
         inventories = [work.discover(role + ':discover', context, known_agenda=agenda)
                        for role, context in zip(('primary', 'independent'), contexts)]

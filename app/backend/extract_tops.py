@@ -17,6 +17,7 @@ import copy
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import durable_jobs as durable
 from llm_config import configured, get_llm_config
+from processing_mode import policy
 from llm_transport import complete, IncompleteResponseError, LLMCancelledError
 from summarize import LLM_MAX_RETRIES  # compatibility for existing callers
 
@@ -173,6 +174,8 @@ class PdfSessionMetadata:
 class PdfAgendaExtractionResult:
     tops: list[str] = field(default_factory=list)
     metadata: PdfSessionMetadata = field(default_factory=PdfSessionMetadata)
+    processing_mode: str = 'slow'
+    review_status: str = 'pending'
     processing_complete: bool = False
     review_required: bool = True
     items: list[dict] = field(default_factory=list)
@@ -255,6 +258,7 @@ def _result(data, document=None, pages=None, audits=None, verified=False, issues
     return PdfAgendaExtractionResult(
         tops=[label(i) for i in items if i['kind'] == 'agenda'],
         metadata=PdfSessionMetadata(**data['metadata']), processing_complete=verified,
+        processing_mode=policy().mode, review_status='completed' if verified else 'pending',
         review_required=not verified, items=items, metadata_sources=data['metadata_sources'],
         document=document or {}, pages=pages or [], audits=audits or [],
         review_questions=issues or [], stop_reason=stop_reason)
@@ -287,7 +291,7 @@ def _call(key, config, prompt, content, schema, validate):
     """Retain every attempt, including invalid responses; resume at next attempt."""
     errors = []
     invalid_answers = set()
-    for attempt in range(_limit('PDF_MODEL_ATTEMPTS', '3')):
+    for attempt in range(policy().attempts(_limit('PDF_MODEL_ATTEMPTS', '3'))):
         durable.check()
         def run():
             try:
@@ -337,7 +341,7 @@ def _content(pages, instruction):
     for page in pages:
         content.extend([
             {'type': 'text', 'text': f"Originalseite {page['page']}; unveränderter Textlayer:\n{page['text']}"},
-            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + page['image'], 'detail': 'high'}},
+            *([{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + page['image'], 'detail': 'high'}}] if page.get('image') else []),
         ])
     return content
 
@@ -454,8 +458,76 @@ def apply_patch(candidate, patch, issues):
     return _validate(data, data['pages'])
 
 
+def extract_fast_pdf(path, document, model, system_prompt):
+    """Read every page once, preferring text; no audit or corrective model pass."""
+    import pdfplumber
+    from llm_transport import fits, structured_output_budget
+    config = get_llm_config(model)
+    prompt = build_extraction_system_prompt(system_prompt)
+    prefix = 'pdf:fast:v1:' + document['sha256']
+    pages = []
+    with pdfplumber.open(path) as pdf:
+        count = len(pdf.pages)
+        if not count or count > _limit('PDF_MAX_PAGES', '100'):
+            raise ExtractionError('PDF-Seitenanzahl unzulässig; keine Seiten ausgelassen')
+        document['page_count'] = count
+        for number, page in enumerate(pdf.pages, 1):
+            durable.check()
+            durable.progress({'phase': 'pdf_extract', 'page': number, 'total_pages': count})
+            def read_page():
+                try:
+                    text = page.extract_text() or ''
+                except Exception:
+                    text = ''
+                if text.strip():
+                    return {'page': number, 'text': text, 'source': 'text'}
+                return {**_render_page(page, number), 'source': 'image'}
+            pages.append(durable.checkpoint(f'{prefix}:page:{number}', read_page))
+    instruction = ('Erfasse diese Originalseiten vollständig in Dokumentreihenfolge. '
+        'Erhalte Nummern, Sitzungsteile, Unterordnung und Metadatenquellen. '
+        'IDs mit der Quellseite beginnen lassen, z.B. p1-item1.')
+    schema = {'type': 'json_schema', 'json_schema': {
+        'name': 'Agenda', 'strict': True, 'schema': Agenda.model_json_schema()}}
+    reserve = structured_output_budget(config, _limit('PDF_OUTPUT_TOKENS', '8192'))
+    def batch_fits(batch):
+        return fits([{'role': 'system', 'content': prompt},
+                     {'role': 'user', 'content': _content(batch, instruction)}], reserve + 256, config, schema)
+    batches, batch = [], []
+    for page in pages:
+        if batch and not batch_fits(batch + [page]):
+            batches.append(batch)
+            batch = []
+        batch.append(page)
+    if batch:
+        batches.append(batch)
+    inventories = []
+    for index, batch in enumerate(batches):
+        numbers = [p['page'] for p in batch]
+        key = f'{prefix}:extract:{index}'
+        inventories.append(durable.checkpoint(key, lambda: _call(key, config, prompt,
+            _content(batch, instruction), Agenda,
+            lambda data: _validate(data, numbers, allow_empty=True))))
+    candidate = inventories[0]
+    if len(inventories) > 1:
+        durable.progress({'phase': 'pdf_merge', 'total_pages': len(pages)})
+        candidate = durable.checkpoint(prefix + ':merge', lambda: _call(prefix + ':merge', config, prompt,
+            [{'type': 'text', 'text': 'Führe die Seiteninventare vollständig zusammen; löse Fortsetzungen '
+              'und seitenübergreifende Unterordnung. Erhalte Quellen und Originalnummern.\n' +
+              json.dumps(inventories, ensure_ascii=False)}], Agenda,
+            lambda data: _validate(data, [p['page'] for p in pages], allow_empty=True)))
+    if hashlib.sha256(path.read_bytes()).hexdigest() != document['sha256']:
+        raise ExtractionError('Original-PDF während Verarbeitung verändert')
+    result = _result(candidate, document, [dict(page=p['page'], status='unreviewed',
+        source=p['source'], text_characters=len(p['text'])) for p in pages])
+    result.processing_complete = True
+    result.review_status = 'skipped'
+    result.contract_version = 'fast-extraction-v1'
+    durable.progress({'phase': 'pdf_unreviewed', 'total_pages': len(pages)})
+    return result
+
+
 @configured
-def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_prompt: Optional[str] = None):
+def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_prompt: Optional[str] = None, *, processing_mode=None):
     import pdfplumber
     durable.check()
     path = Path(pdf_path)
@@ -465,6 +537,8 @@ def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_p
     if durable.CURRENT.get():
         document['job_id'] = durable.CURRENT.get().job_id
         document['url'] = f"/api/model-jobs/{durable.CURRENT.get().job_id}/documents/{document['sha256']}"
+    if policy().fast:
+        return extract_fast_pdf(path, document, model, system_prompt)
     prefix = 'pdf:v2:' + document['sha256']
     config = get_llm_config(model)
     prompt = build_extraction_system_prompt(system_prompt)

@@ -1,4 +1,4 @@
-"""Mandatory source-bound minutes generation and independent full-source review.
+"""Source-bound minutes generation with independent full-source review in Slow.
 
 Python validates schemas, coverage, exact quotes and revisions only. All semantic
 selection, temporal classification, corrections and reconciliation are model work.
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from copy import deepcopy
 from source_contract import SourceCatalog, reviewed
+from processing_mode import policy
 
 from llm_transport import (complete, fits, structured_output_budget, cache_key,
                            cache_read, cache_write, ContextBudgetError, model_fingerprint)
@@ -106,10 +107,10 @@ class Workflow:
         self.context = context or ''
         self.output = config.output_budget(positive('SUMMARY_OUTPUT_TOKENS', 4096))
         self.reserve = structured_output_budget(config, self.output)
-        self.attempts = positive('SUMMARY_MODEL_ATTEMPTS', 2)
+        self.attempts = policy().attempts(positive('SUMMARY_MODEL_ATTEMPTS', 2))
         self.rounds = positive('SUMMARY_RECONCILIATION_ROUNDS', 2)
         self.chunk_chars = positive('LLM_CHUNK_CHARS', 12000)
-        self.policy = dict(digest=model_fingerprint(config).get("digest"), output=self.output, attempts=self.attempts, rounds=self.rounds,
+        self.policy = dict(**policy().snapshot(), digest=model_fingerprint(config).get("digest"), output=self.output, attempts=self.attempts, rounds=self.rounds,
                            chunk_chars=self.chunk_chars, code=digest(Path(__file__).read_text()))
         self.rows = []
         self.open_drafts = {}
@@ -283,9 +284,38 @@ class Workflow:
             return self.review(claims, rows[:middle], phase) + self.review(claims, rows[middle:], phase)
         return self.call(phase, instruction, body, REVIEW, validate)['issues']
 
+    def finish_fast(self, primary, lines):
+        self.rows = [row for rows, _ in primary for row in rows]
+        claims = [claim for _, group in primary for claim in group]
+        allowed = {r['source_id']: r for r in self.rows}
+        # One optional consolidation, never an independent review or repair.
+        if len(primary) > 1:
+            instruction = ('Fasse diese Teilnotizen ohne Dubletten zu einer strukturierten '
+                'Zusammenfassung zusammen. Erhalte wesentliche Inhalte und Quellenbezüge. '
+                'considered_source_ids enthält alle IDs aus source_catalog.')
+            body = dict(candidate=claims, source_catalog=list(allowed))
+            if fits(self.messages('fast_consolidate', instruction, body), self.reserve,
+                    self.config, self.format(DRAFT)):
+                claims = self.call('fast_consolidate', instruction, body, DRAFT,
+                                   self.draft_validator(self.rows))['claims']
+            else:
+                # Retain all block results when a single consolidation cannot fit.
+                self.usage['consolidation'] = 'retained_blocks'
+        for claim in claims:
+            claim['grounding']['content_status'] = 'unreviewed'
+        self.usage.update(**policy().snapshot(), processing_complete=True,
+            review_complete=False, review_status='skipped', review_required=True,
+            grounding_incomplete=False, source_line_count=len(lines),
+            considered_source_ids=list(allowed), source_sha256=digest(lines),
+            prompt_version=VERSION, policy=self.policy, required_checks=['generate'],
+            reconciliation_rounds=0)
+        return claims, [], self.rows, len(primary)
+
     def run(self, lines):
         initial = self.sources(lines)
         primary = self.extract(initial, 'generate')
+        if policy().fast:
+            return self.finish_fast(primary, lines)
         # Independent reviewer gets originals only, never the first draft.
         blind = []
         for rows, _ in primary:
@@ -389,7 +419,8 @@ class Workflow:
         for claim in final:
             if claim['grounding']['evidence_status'] != 'exact' and not claim['grounding']['questions']:
                 claim['grounding']['questions'] = ['Stützt die Originalquelle diese Aussage in diesem Sitzungskontext?']
-        self.usage.update(processing_complete=True, grounding_incomplete=False,
+        self.usage.update(**policy().snapshot(), review_complete=True, review_status='completed',
+            processing_complete=True, grounding_incomplete=False,
             source_line_count=len(lines), considered_source_ids=list(allowed),
             source_sha256=digest(lines), prompt_version=VERSION, policy=self.policy,
             required_checks=['generate', 'blind_inventory', 'draft_review', 'final_review', 'consolidated_review'],

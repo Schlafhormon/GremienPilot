@@ -50,6 +50,7 @@ from summarize import (
     meeting_context_from_transcript,
     summarize_segment,
 )
+from processing_mode import ProcessingMode, agenda_complete as agenda_processing_complete, pdf_usable
 from extract_tops import extract_agenda_data_from_pdf, PdfReviewRequired
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
@@ -659,6 +660,7 @@ class SummaryJobResponse(BaseModel):
 
 
 class SessionSaveRequest(BaseModel):
+    processing_mode: ProcessingMode = "slow"
     agenda_proposals: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
     revision: Optional[int] = None
@@ -677,6 +679,7 @@ class SessionSaveRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    processing_mode: ProcessingMode = "slow"
     agenda_proposals: Optional[Dict[str, Any]] = None
     session_id: str
     revision: int = 1
@@ -703,6 +706,7 @@ class SessionResponse(BaseModel):
 
 
 class SessionListItem(BaseModel):
+    processing_mode: ProcessingMode = "slow"
     session_id: str
     title: str
     committee: str = ""
@@ -840,6 +844,7 @@ class SpeakerObservationManualRequest(BaseModel):
 
 
 class SummarizeRequest(BaseModel):
+    processing_mode: ProcessingMode = "slow"
     top_title: str
     lines: List[TranscriptLine]
     model: Optional[str] = None  # LLM model to use (e.g., "qwen3:8b")
@@ -922,6 +927,8 @@ class LLMDiagnosticsResponse(BaseModel):
 
 
 class ExtractTOPsResponse(BaseModel):
+    processing_mode: ProcessingMode = "slow"
+    review_status: str = "pending"
     tops: List[str]
     metadata: Dict[str, Any] = Field(default_factory=dict)
     processing_complete: bool = False
@@ -937,11 +944,13 @@ class ExtractTOPsResponse(BaseModel):
 
 
 class AssignmentSuggestionsRequest(BaseModel):
+    processing_mode: ProcessingMode = "slow"
     transcript: List[TranscriptLine]
     tops: List[str]
 
 
 class AgendaDetectionRequest(BaseModel):
+    processing_mode: ProcessingMode = "slow"
     fresh: StrictBool = False
     cache_namespace: str = Field(default='', max_length=128)
     top_ids: List[str] = Field(default_factory=list)
@@ -976,6 +985,8 @@ class AssignmentSuggestionsResponse(BaseModel):
 
 
 class AgendaLLMUsageResponse(BaseModel):
+    processing_mode: ProcessingMode = "slow"
+    review_status: str = "pending"
     line_results: List[Dict[str, Any]] = Field(default_factory=list)
     agenda_states: List[Dict[str, Any]] = Field(default_factory=list)
     reconstructions: List[Dict[str, Any]] = Field(default_factory=list)
@@ -1141,6 +1152,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
             summary_states.setdefault(top_index, fallback_state)
 
     return SessionResponse(
+        processing_mode=session.get("processing_mode", "slow"),
         session_id=session["session_id"],
         revision=int(session.get("revision") or 1),
         created_at=session.get("created_at"),
@@ -2038,10 +2050,12 @@ def preserve_assignment_questions(result, session, source_indices):
     question = 'Gehören diese Originalbeiträge tatsächlich zu diesem TOP, einschließlich gemeinsamer Beratung oder Wiederaufnahme?'
     for item in result.structured.evidence:
         g = item.get('grounding') or {'reference_status': 'exact', 'source_ids': [r['source_id'] for r in item['sources']]}
-        item['grounding'] = reviewed(g, questions=[question])
+        item['grounding'] = ({**g, 'content_status': 'unreviewed'}
+            if result.llm_usage.get('processing_mode') == 'fast' else reviewed(g, questions=[question]))
         item['grounding']['assignment_origins'] = [dict(line_id=r['line_id'], index=r['index'],
             grounding=r.get('grounding'), review_status=r.get('review_status')) for r in open_rows]
-        text = marked_text(item.get('original_text', item['item_text']), item['grounding'])
+        text = (item.get('original_text', item['item_text']) if result.llm_usage.get('processing_mode') == 'fast'
+                else marked_text(item.get('original_text', item['item_text']), item['grounding']))
         item['item_text'] = text
         getattr(result.structured, item['section'])[item['item_index']] = text
     result.summary = render_structured_summary(result.structured)
@@ -2230,7 +2244,21 @@ def reconcile_session_summaries(
             if review_was_edited
             else expected_review or requested_review
         )
-        if (summary_was_edited and not review_was_edited) or (manually_edited and
+        fast_manual = (manually_edited and (old_review.get('llm_usage') or {}).get('processing_mode') == 'fast'
+                       and (old_review.get('llm_usage') or {}).get('processing_complete') is True)
+        if fast_manual:
+            from export_protocol import parse_summary_sections
+            from summarize import StructuredSummary
+            from processing_mode import FAST_NOTICE
+            manual = StructuredSummary(**parse_summary_sections(summary))
+            manual.verification = dict(processing_mode='fast', review_status='skipped',
+                review_complete=False, processing_complete=True, origin='manual_edit', sources=[], checks=[])
+            review = dict(old_review, structured=manual.to_dict(), source_links=[],
+                retained_evidence=(old_review.get('structured') or {}).get('evidence', []),
+                llm_usage={**old_review.get('llm_usage', {}), 'origin': 'manual_edit'},
+                review_warnings=[dict(kind='review_skipped', severity='info', line_indices=[], excerpt='',
+                    message=FAST_NOTICE + ' Manuell bearbeitet; frühere Quellenzuordnungen wurden entfernt.')])
+        elif (summary_was_edited and not review_was_edited) or (manually_edited and
                 (old_review.get('structured') or {}).get('verification', {}).get('source_contract') == 'graded-sources-v1'):
             # Generated claims and source links no longer describe manual text.
             if (old_review.get('structured') or {}).get('verification', {}).get('source_contract') == 'graded-sources-v1':
@@ -2264,6 +2292,8 @@ def reconcile_session_summaries(
             names = state.get('speaker_names') or {}
             source_lines = [format_line_for_summary(line_to_dict(state['transcript'][i]), names)
                             for i in summary_line_indices(state, index)]
+            if fast_manual:
+                proof.update(summary_sha256=digest(summary), source_sha256=digest(source_lines))
             if proof.get('summary_sha256') != digest(summary) or proof.get('source_sha256') != digest(source_lines):
                 review['source_links'] = []
                 review['structured']['verification']['processing_complete'] = False
@@ -2513,6 +2543,7 @@ def _run_summary_job(summary_job_id: str) -> None:
             with work_slot(LLM_WORK_LOCK):
                 result = summarize_segment(title, text, model=refs.get("model"),
                     system_prompt=refs.get("system_prompt"),
+                    processing_mode=refs.get("processing_mode", "slow"),
                     meeting_context=meeting_context_from_transcript(transcript),
                     source_lines=[format_line_for_summary(line, names) for line in lines])
             result.llm_usage["original_line_indices"] = source_indices
@@ -2600,6 +2631,7 @@ def save_pipeline_session(
     current_step: int | None = None,
     skipped_assignment: bool | None = None,
     draft_phase: str | None = None,
+    processing_mode: ProcessingMode | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id) or {"session_id": session_id}
     ctx = durable.CURRENT.get()
@@ -2609,6 +2641,8 @@ def save_pipeline_session(
     if ctx and durable.published(publication_key):
         return session
     state = dict(session)
+    if processing_mode is not None:
+        state["processing_mode"] = processing_mode
     if job_id is not None:
         state["job_id"] = job_id
     if transcript is not None:
@@ -2700,17 +2734,19 @@ def detect_pipeline_agenda(
 
     pdf_extraction = options.get("pdf_source_extraction")
     if pdf_extraction:
+        save_pipeline_state(pipeline_id, result_refs={"pdf_extraction": pdf_extraction})
         pdf_metadata = pdf_extraction["metadata"]
         if not agenda_tops:
             agenda_tops = pdf_extraction["tops"]
     if not agenda_tops and (pdf_path or options.get("auto_detect_tops_from_pdf")):
         if not pdf_path or not Path(pdf_path).is_file():
             raise ValueError("Vorgesehenes PDF fehlt; keine Ersatzagenda aus dem Transkript")
-        extracted = durable.checkpoint("pipeline:pdf:page-evidence-v3", lambda:
+        extracted = durable.checkpoint("pipeline:pdf:" + ("fast-extraction-v1" if options.get("processing_mode") == "fast" else "page-evidence-v3"), lambda:
             extract_agenda_data_from_pdf(pdf_path, model=model,
+                processing_mode=options.get("processing_mode", "slow"),
                 system_prompt=options.get("pdf_system_prompt")).to_dict())
         save_pipeline_state(pipeline_id, result_refs={"pdf_extraction": extracted, "processing_complete": False})
-        if not extracted["processing_complete"] or extracted["review_required"] or not extracted["tops"]:
+        if not pdf_usable(extracted, options.get("processing_mode", "slow")):
             raise PdfReviewRequired(extracted)
         agenda_tops = extracted["tops"]
         pdf_metadata = extracted["metadata"]
@@ -2726,6 +2762,7 @@ def detect_pipeline_agenda(
                 agenda_tops,
                 model=model,
                 system_prompt=system_prompt,
+                processing_mode=options.get("processing_mode", "slow"),
                 use_llm=options.get("agenda_use_llm"),
                 cache_namespace=options.get('agenda_cache_namespace', ''),
                 progress_callback=lambda usage: save_pipeline_state(
@@ -2736,6 +2773,7 @@ def detect_pipeline_agenda(
                 utterances,
                 model=model,
                 system_prompt=system_prompt,
+                processing_mode=options.get("processing_mode", "slow"),
                 use_llm=options.get("agenda_use_llm"),
                 cache_namespace=options.get('agenda_cache_namespace', ''),
                 progress_callback=lambda usage: save_pipeline_state(
@@ -2812,6 +2850,7 @@ def summarize_pipeline_segments(
                     source_lines=[format_line_for_summary(line, speaker_names) for line in transcript],
                     model=model,
                     system_prompt=system_prompt,
+                    processing_mode=options.get("processing_mode", "slow"),
                 )
             review = build_summary_review(
                 structured=result.structured,
@@ -2904,6 +2943,7 @@ def summarize_pipeline_segments(
                     source_lines=[format_line_for_summary(line, speaker_names) for line in lines],
                     model=model,
                     system_prompt=system_prompt,
+                    processing_mode=options.get("processing_mode", "slow"),
                     meeting_context=meeting_context_from_transcript(transcript),
                 )
             preserve_assignment_questions(result, source_session, source_indices)
@@ -3061,7 +3101,7 @@ def _run_pipeline_job(
             info = value[2]
             usage = info.get('llm') or {}
             return not info.get('pdf_incomplete') and (options.get('skip_agenda_detection') or
-                (usage.get('processing_complete') and usage.get('review_complete')))
+                agenda_processing_complete(usage))
         agenda_result = durable.draft_checkpoint("pipeline:agenda", lambda: detect_pipeline_agenda(
             pipeline_id, transcript, known_tops=known_tops, pdf_path=pdf_path, options=options), agenda_complete)
         tops, assignments, agenda_info, pdf_metadata = agenda_result
@@ -3169,7 +3209,7 @@ def _run_pipeline_job(
         agenda_usage = agenda_info.get("llm") or {}
         complete = (not agenda_info.get("pdf_incomplete")
                     and (options.get('skip_agenda_detection') or
-                         (agenda_usage.get('processing_complete') and agenda_usage.get('review_complete')))
+                         agenda_processing_complete(agenda_usage))
                     and expected <= set(summary_reviews)
                     and all(not summary_reviews[i].get("error")
                             and (summary_reviews[i].get("llm_usage") or {}).get("processing_complete")
@@ -3323,6 +3363,7 @@ async def start_pipeline(
     remember_speakers: bool = Form(False),
     skip_agenda_detection: bool = Form(False),
     auto_detect_tops_from_pdf: bool = Form(False),
+    processing_mode: Optional[ProcessingMode] = Form(None),
 ):
     """Start an unattended upload-to-review pipeline job."""
     if (
@@ -3342,16 +3383,24 @@ async def start_pipeline(
         if not is_allowed_pdf_file(pdf.filename, pdf.content_type):
             raise HTTPException(status_code=400, detail="Nur PDF-Dateien sind erlaubt")
 
+    parsed_options = parse_pipeline_options(options)
+    effective_mode = processing_mode or parsed_options.get('processing_mode') or (
+        (load_session(session_id) or {}).get('processing_mode', 'slow') if session_id else 'slow')
+    if effective_mode not in ('fast', 'slow'):
+        raise HTTPException(422, 'processing_mode muss fast oder slow sein')
+    parsed_options['processing_mode'] = effective_mode
+    if session_id:
+        ensure_mode_change_allowed(session_id)
     source_extraction = None
     if pdf_source_job_id:
         source_job = durable.load(pdf_source_job_id)
-        if not source_job or source_job['kind'] != 'pdf' or source_job['state'] != 'completed':
+        if not source_job or source_job['kind'] != 'pdf' or source_job['state'] not in {'completed', 'review_required'}:
             raise HTTPException(422, 'PDF-Quelljob ist nicht vollständig abgeschlossen')
         source_extraction = source_job.get('result')
-        if not source_extraction or source_extraction.get('contract_version') != 'page-evidence-v3' or not source_extraction.get('processing_complete') or source_extraction.get('review_required'):
+        if not pdf_usable(source_extraction, effective_mode) or source_extraction.get('contract_version') not in {'page-evidence-v3', 'fast-extraction-v1'}:
             raise HTTPException(422, 'PDF-Quelljob hat keine vollständige visuelle Quellenprüfung nach aktuellem Vertrag; neue Auswertung erforderlich')
         source_hash = (source_extraction.get('document') or {}).get('sha256')
-        if not source_hash or not source_extraction.get('items') or not source_extraction.get('audits') or not any(
+        if not source_hash or not source_extraction.get('items') or (source_extraction.get('processing_mode', 'slow') == 'slow' and not source_extraction.get('audits')) or not any(
             doc['sha256'] == source_hash for doc in source_job.get('documents') or []
         ):
             raise HTTPException(422, 'PDF-Quelljob hat keine vollständige visuelle Quellenprüfung; neue Auswertung erforderlich')
@@ -3362,7 +3411,6 @@ async def start_pipeline(
     pipeline_id = str(uuid.uuid4())
     transcription_job_id = str(uuid.uuid4())
     effective_session_id = session_id or str(uuid.uuid4())
-    parsed_options = parse_pipeline_options(options)
     parsed_options.pop("pdf_source_extraction", None)  # only verified server-owned provenance
     if agenda_fresh:
         parsed_options['agenda_cache_namespace'] = str(uuid.uuid4())
@@ -3446,6 +3494,7 @@ async def start_pipeline(
     persist_job_state(transcription_job_id)
     save_pipeline_session(
         effective_session_id,
+        processing_mode=effective_mode,
         job_id=transcription_job_id,
         tops=known_tops,
         skipped_assignment=skip_agenda_detection,
@@ -3575,6 +3624,14 @@ async def list_sessions_endpoint(
     )
 
 
+def ensure_mode_change_allowed(session_id):
+    pipeline = load_latest_pipeline_job_for_session(session_id)
+    summary = load_latest_summary_job_for_session(session_id)
+    if (pipeline and pipeline.get('status') in {'pending', 'processing'}) or (
+            summary and summary.get('status') in {'pending', 'processing', 'cancelling'}):
+        raise HTTPException(409, 'Verarbeitungsmodus kann während einer laufenden Verarbeitung nicht geändert werden')
+
+
 def save_session_or_conflict(
     session_id: str,
     state: dict[str, Any],
@@ -3613,6 +3670,10 @@ async def create_or_save_session(request: SessionSaveRequest):
     state = model_to_dict(request)
     state["session_id"] = session_id
     existing = load_session(session_id)
+    if existing and "processing_mode" not in request.model_fields_set:
+        state["processing_mode"] = existing.get("processing_mode", "slow")
+    if existing and state['processing_mode'] != existing.get('processing_mode', 'slow'):
+        ensure_mode_change_allowed(session_id)
     if "agenda_proposals" not in request.model_fields_set and existing:
         state["agenda_proposals"] = session_agenda_proposals(
             existing, load_latest_pipeline_job_for_session(session_id)
@@ -3632,6 +3693,10 @@ async def save_existing_session(session_id: str, request: SessionSaveRequest):
     state = model_to_dict(request)
     state["session_id"] = session_id
     existing = load_session(session_id)
+    if existing and "processing_mode" not in request.model_fields_set:
+        state["processing_mode"] = existing.get("processing_mode", "slow")
+    if existing and state['processing_mode'] != existing.get('processing_mode', 'slow'):
+        ensure_mode_change_allowed(session_id)
     if "agenda_proposals" not in request.model_fields_set and existing:
         state["agenda_proposals"] = session_agenda_proposals(
             existing, load_latest_pipeline_job_for_session(session_id)
@@ -3759,6 +3824,7 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
                 "edit_fingerprints": edit_fingerprints,
                 "previous_statuses": previous_statuses,
                 "model": request.model,
+                "processing_mode": session.get("processing_mode", "slow"),
                 "system_prompt": request.system_prompt,
                 "session_revision": saved.get("revision"),
                 "input_snapshot": saved,
@@ -4467,6 +4533,7 @@ async def generate_summary(request: SummarizeRequest):
                     source_lines=[f"{line.speaker}: {line.text}" for line in request.lines],
                     model=request.model,
                     system_prompt=request.system_prompt,
+                    processing_mode=request.processing_mode,
                 )
 
         result = await loop.run_in_executor(None, run_guarded_summary)
@@ -4519,6 +4586,7 @@ async def extract_tops_endpoint(
     pdf: UploadFile = File(...),
     model: Optional[str] = Form(None),
     system_prompt: Optional[str] = Form(None),
+    processing_mode: ProcessingMode = Form("slow"),
 ):
     """
     Extract TOPs (agenda items) from a German municipal meeting invitation PDF.
@@ -4547,7 +4615,7 @@ async def extract_tops_endpoint(
         logger.info("Saved uploaded PDF for TOP extraction (%s bytes)", size_bytes)
 
         job = durable.submit("pdf", {"path": str(file_path.resolve()), "model": model,
-            "system_prompt": system_prompt}, documents=[durable.document(file_path)])
+            "system_prompt": system_prompt, "processing_mode": processing_mode}, documents=[durable.document(file_path)])
         if respond_async:
             return Response(content=json.dumps(durable.public(job)), status_code=202,
                 media_type="application/json", headers={"Location": f"/api/model-jobs/{job['job_id']}"})
@@ -4574,7 +4642,7 @@ async def assignment_suggestions_endpoint(request: AssignmentSuggestionsRequest)
     if not request.transcript or not request.tops:
         raise HTTPException(400, 'Transkript und TOPs erforderlich')
     job = await start_agenda_job(AgendaDetectionRequest(
-        transcript=request.transcript, tops=request.tops, use_llm=True,
+        transcript=request.transcript, tops=request.tops, use_llm=True, processing_mode=request.processing_mode,
         preserve_transcript_structure=True))
     result = await await_durable_result(job['job_id'])
     return AssignmentSuggestionsResponse(
@@ -4590,7 +4658,7 @@ def calculate_agenda(request: AgendaDetectionRequest):
     This synchronous endpoint runs in FastAPI's thread pool: model requests and
     CPU-bound detection must not block autosaves, health checks or cancellation.
 
-    Known and unknown agendas use the same model-only reconstruction and
+    Known and unknown agendas use model-only reconstruction. Slow adds an
     independent complete review. Without TOPs, models first establish the agenda.
     """
     if not request.transcript:
@@ -4614,6 +4682,7 @@ def calculate_agenda(request: AgendaDetectionRequest):
             valid_tops,
             model=request.model,
             system_prompt=request.system_prompt,
+            processing_mode=request.processing_mode,
             use_llm=request.use_llm,
             cache_namespace=str(uuid.uuid4()) if request.fresh else request.cache_namespace,
             top_ids=request.top_ids,
@@ -4623,6 +4692,7 @@ def calculate_agenda(request: AgendaDetectionRequest):
             transcript,
             model=request.model,
             system_prompt=request.system_prompt,
+            processing_mode=request.processing_mode,
             use_llm=request.use_llm,
             cache_namespace=str(uuid.uuid4()) if request.fresh else request.cache_namespace,
         )
@@ -4875,15 +4945,16 @@ def run_durable_job(job):
     if job['kind'] == 'pdf':
         def extract():
             value = extract_agenda_data_from_pdf(payload['path'], model=payload.get('model'),
-                                                system_prompt=payload.get('system_prompt'))
+                                                system_prompt=payload.get('system_prompt'),
+                                                processing_mode=payload.get('processing_mode', 'slow'))
             return value.to_dict()
-        result = durable.checkpoint('pdf:validated:page-evidence-v3', extract)
+        result = durable.checkpoint('pdf:validated:' + ('fast-extraction-v1' if payload.get('processing_mode') == 'fast' else 'page-evidence-v3'), extract)
         state = 'review_required' if result['review_required'] or not result['tops'] else 'completed'
         return result, state if result['processing_complete'] or result.get('review_questions') else 'failed'
     if job['kind'] == 'agenda':
         result = durable.draft_checkpoint('agenda:validated', lambda: calculate_agenda(
             AgendaDetectionRequest(**payload['request'])).model_dump(), lambda value:
-                (value.get('llm') or {}).get('processing_complete') and (value.get('llm') or {}).get('review_complete'))
+                agenda_processing_complete(value.get('llm') or {}))
         state = (result.get('llm') or {}).get('status')
         if state in {'disabled', 'failed', 'partial_failure', 'fallback', 'partial_fallback'}:
             return result, 'failed'

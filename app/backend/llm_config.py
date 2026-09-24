@@ -194,13 +194,15 @@ def configured(function):
     signature = inspect.signature(function)
     @wraps(function)
     def wrapped(*args, **kwargs):
-        model = signature.bind(*args, **kwargs).arguments.get('model')
-        config = get_llm_config(model)
-        token = _CURRENT.set(config)
-        try:
-            return function(*args, **kwargs)
-        finally:
-            _CURRENT.reset(token)
+        from processing_mode import processing_scope
+        arguments = signature.bind(*args, **kwargs).arguments
+        with processing_scope(arguments.get('processing_mode')):
+            config = get_llm_config(arguments.get('model'))
+            token = _CURRENT.set(config)
+            try:
+                return function(*args, **kwargs)
+            finally:
+                _CURRENT.reset(token)
     return wrapped
 
 

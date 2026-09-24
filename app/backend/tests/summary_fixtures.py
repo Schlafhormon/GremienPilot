@@ -23,7 +23,7 @@ class SummaryModel:
             claims = [] if row is None else [dict(section='discussion', text='Der Sachverhalt wurde beraten.',
                 scope='current', evidence=[dict(source_id=row['source_id'], quote=row['text'])])]
             answer = dict(claims=claims, considered_source_ids=ids)
-        elif phase in {'consolidate', 'reconcile'}:
+        elif phase in {'consolidate', 'reconcile', 'fast_consolidate'}:
             answer = dict(claims=body['candidate'], considered_source_ids=body['source_catalog'])
         else:
             answer = dict(checked_claim_ids=[c['claim_id'] for c in body['candidate']],

@@ -314,6 +314,8 @@ def init_db(db_path: Path | None = None) -> None:
                 ADD COLUMN export_metadata_json TEXT
                 """
             )
+        if "processing_mode" not in session_columns:
+            db.execute("ALTER TABLE sessions ADD COLUMN processing_mode TEXT NOT NULL DEFAULT 'slow' CHECK (processing_mode IN ('fast', 'slow'))")
         if "agenda_proposals_json" not in session_columns:
             db.execute("ALTER TABLE sessions ADD COLUMN agenda_proposals_json TEXT")
         if "revision" not in session_columns:
@@ -1456,7 +1458,7 @@ def save_session(
         db.execute("BEGIN IMMEDIATE")
         fence(db)
         existing = db.execute(
-            "SELECT created_at, revision FROM sessions WHERE session_id = ?",
+            "SELECT created_at, revision, processing_mode FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         created_at = float(existing["created_at"]) if existing else now
@@ -1473,15 +1475,16 @@ def save_session(
             """
             INSERT INTO sessions (
                 session_id, job_id, current_step, skipped_assignment, export_metadata_json,
-                agenda_proposals_json, revision, created_at, updated_at
+                agenda_proposals_json, processing_mode, revision, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 job_id = excluded.job_id,
                 current_step = excluded.current_step,
                 skipped_assignment = excluded.skipped_assignment,
                 export_metadata_json = excluded.export_metadata_json,
                 agenda_proposals_json = excluded.agenda_proposals_json,
+                processing_mode = excluded.processing_mode,
                 revision = sessions.revision + ?,
                 updated_at = excluded.updated_at
             """,
@@ -1492,6 +1495,7 @@ def save_session(
                 1 if state.get("skipped_assignment") else 0,
                 _to_json(state.get("export_metadata") or {}),
                 _to_json(state.get("agenda_proposals")),
+                state.get("processing_mode", existing["processing_mode"] if existing else "slow"),
                 created_at,
                 now,
                 1 if bump_revision else 0,
@@ -1774,6 +1778,7 @@ def list_sessions(
                 s.session_id,
                 s.job_id,
                 s.current_step,
+                s.processing_mode,
                 s.export_metadata_json,
                 s.revision,
                 s.created_at,

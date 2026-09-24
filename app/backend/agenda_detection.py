@@ -4,6 +4,7 @@ import math
 import os
 from assignment_suggestions import AssignmentSegment, assignments_from_segments
 from llm_config import configured, get_llm_config
+from processing_mode import policy, FAST_NOTICE
 
 _mode = os.environ.get('AGENDA_DETECTION_USE_LLM', 'true').strip().lower()
 if _mode not in {'true', 'false'}:
@@ -38,6 +39,8 @@ class AgendaLLMUsage:
     agenda_states: list = field(default_factory=list)
     reconstructions: list = field(default_factory=list)
     processing_complete: bool = False
+    processing_mode: str = 'slow'
+    review_status: str = 'pending'
     review_complete: bool = False
     review_required: bool = True
 
@@ -53,7 +56,9 @@ class AgendaLLMUsage:
             warnings.append(f'TOP-Zuordnung technisch unvollständig: {technical} Zeilen nicht verarbeitet.')
         if semantic:
             warnings.append(f'TOP-Zuordnung: {semantic} fachlich begründet unzugeordnete Zeilen; Gründe prüfen.')
-        if not self.review_complete:
+        if self.processing_mode == 'fast' and self.review_status == 'skipped':
+            warnings.append(FAST_NOTICE)
+        elif not self.review_complete:
             warnings.append('Unabhängige Modellprüfung nicht vollständig abgeschlossen; keine nachgewiesene fachliche Qualität.')
         if any(r['review_status'] == 'unresolved' for r in self.line_results):
             warnings.append('Modellprüfung durchgeführt; fachliche Abweichungen bleiben ungeklärt.')
@@ -80,10 +85,10 @@ def _should_use_llm(use_llm=None):
 
 @configured
 def segment_known_agenda(transcript, tops, model=None, system_prompt=None, *, use_llm=None,
-                         progress_callback=None, cache_namespace='', top_ids=None):
+                         progress_callback=None, cache_namespace='', top_ids=None, processing_mode=None):
     from agenda_llm import classify
     usage = AgendaLLMUsage(_should_use_llm(use_llm), 'server_default' if use_llm is None else 'request',
-                           timeout_seconds=get_llm_config(model).timeout_seconds)
+                           timeout_seconds=get_llm_config(model).timeout_seconds, processing_mode=policy().mode)
     if any(not isinstance(t, str) or not t.strip() for t in tops):
         raise ValueError('invalid_agenda_title')
     titles, segments = classify(transcript, list(tops), usage, model, system_prompt, progress_callback,
@@ -94,6 +99,6 @@ def segment_known_agenda(transcript, tops, model=None, system_prompt=None, *, us
 
 @configured
 def detect_agenda_from_transcript(transcript, model=None, system_prompt=None, *, use_llm=None,
-                                   progress_callback=None, cache_namespace=''):
+                                   progress_callback=None, cache_namespace='', processing_mode=None):
     return segment_known_agenda(transcript, [], model, system_prompt, use_llm=use_llm,
                                  progress_callback=progress_callback, cache_namespace=cache_namespace)

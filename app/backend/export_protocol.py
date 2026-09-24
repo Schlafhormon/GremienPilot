@@ -190,6 +190,10 @@ def build_protocol_document(
         else:
             sections = parse_summary_sections(editable_summary)
 
+        if structured and structured.get('verification', {}).get('processing_mode') == 'fast':
+            if 'Fast – ohne automatische Inhaltsprüfung' not in metadata.title:
+                metadata.title = (metadata.title or 'Sitzungsprotokoll') + ' – Fast – ohne automatische Inhaltsprüfung'
+
         if structured and structured.get('verification', {}).get('source_contract') == 'graded-sources-v1':
             from source_contract import marked_text, digest
             verification = structured['verification']
