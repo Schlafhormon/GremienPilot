@@ -374,9 +374,9 @@ class Workflow:
             'Fordere nur gezielt benötigte, noch fehlende Originalfenster an, höchstens drei je Antwort. '
             'Ein Fenster enthält höchstens 80 Originalzeilen. Bereits gelieferte Originale bleiben verfügbar. '
             'Keine numerischen Bereiche und keine erneute Anforderung des gesamten Transkripts.')
-        windows = {f'W{i//80+1}': self.rows[i:i+80] for i in range(0,len(self.rows),80)}
         available = self.available_sources(body)
         offered = {}
+        max_requests = 3
         def check(data):
             if not isinstance(data, dict) or set(data) != {'response'} or not isinstance(data['response'],dict):
                 raise AgendaValidationError('invalid_source_response')
@@ -392,21 +392,14 @@ class Workflow:
             if response.get('kind') != 'source_request' or set(response) != {'kind','source_window_ids'}:
                 raise AgendaValidationError('invalid_source_response')
             requests = response['source_window_ids']
-            if (not isinstance(requests,list) or not 1 <= len(requests) <= 3
+            if (not isinstance(requests,list) or not 1 <= len(requests) <= max_requests
                     or any(not isinstance(w,str) or w not in offered for w in requests)
                     or len(set(requests)) != len(requests)):
                 raise AgendaValidationError('invalid_source_request')
         requested = set()
         for round_index in range(self.retrieval_rounds + 1):
-            offered = {key:rows for key,rows in windows.items() if any(r['line_id'] not in available for r in rows)}
-            body = dict(body, source_windows=[dict(window_id=key,start_line_id=rows[0]['line_id'],
-                end_line_id=rows[-1]['line_id']) for key,rows in offered.items()])
-            variants = [result_variant]
-            if offered:
-                variants.append(obj({'kind':{'enum':['source_request']},'source_window_ids':
-                    dict(array({'enum':list(offered)}),minItems=1,maxItems=min(3,len(offered)))}))
-            wire_schema = obj({'response':{'anyOf':variants}})
-            if '$defs' in schema: wire_schema['$defs'] = schema['$defs']
+            body,wire_schema,offered,max_requests = self.retrieval_offer(
+                phase,instruction,body,result_variant,schema.get('$defs'),available)
             response = self.call(phase, instruction, body, wire_schema, check)['response']
             if response['kind'] == 'result':
                 return dict(response['result'], source_ranges=[])
@@ -682,9 +675,9 @@ class Workflow:
                 'target_start': start, 'target_end': end, 'target_lines': targets,
                 'opinions': opinions, 'source_count': len(self.rows)}
         # Windows are technical source addresses, not inferred topic boundaries.
-        windows = {f'W{i//80+1}': self.rows[i:i+80] for i in range(0, len(self.rows), 80)}
         available = self.available_sources(body)
         offered = {}
+        max_requests = 3
         def validate(data):
             if not isinstance(data, dict) or set(data) != {'response'}:
                 if isinstance(data, dict) and data.get('spans') and data.get('source_ranges'):
@@ -698,7 +691,7 @@ class Workflow:
                     raise AgendaValidationError('mixed_source_request')
                 requests = response.get('source_window_ids')
                 if (set(response) != {'kind', 'source_window_ids'} or not isinstance(requests, list)
-                        or not 1 <= len(requests) <= 3 or any(not isinstance(w, str) or w not in offered for w in requests)
+                        or not 1 <= len(requests) <= max_requests or any(not isinstance(w, str) or w not in offered for w in requests)
                         or len(set(requests)) != len(requests)):
                     raise AgendaValidationError('invalid_source_request')
                 return
@@ -729,16 +722,8 @@ class Workflow:
 
         requested = set()
         for round_index in range(self.retrieval_rounds + 1):
-            offered = {key: rows for key, rows in windows.items()
-                       if any(r['line_id'] not in available for r in rows)}
-            body['source_windows'] = [dict(window_id=key, start_line_id=rows[0]['line_id'],
-                end_line_id=rows[-1]['line_id']) for key, rows in offered.items()]
-            variants = [result_schema]
-            if offered:
-                variants.append(obj({'kind': {'enum': ['source_request']}, 'source_window_ids':
-                    dict(array({'enum': list(offered)}), minItems=1, maxItems=min(3,len(offered)))}))
-            schema = obj({'response': {'anyOf': variants}})
-            schema['$defs'] = {'assignment': span_schema}
+            body,schema,offered,max_requests = self.retrieval_offer(
+                role,instruction,body,result_schema,{'assignment':span_schema},available)
             data = self.call(role, instruction, body, schema, validate)
             response = data['response']
             if response['kind'] == 'assignments':
@@ -761,6 +746,58 @@ class Workflow:
             available.update(self.rows[i]['line_id'] for i in additional)
             body['requested_originals'] = [self.rows[i] for i in sorted(requested)]
         raise AssertionError('unreachable')
+
+    def retrieval_offer(self, phase, instruction, body, result_schema, definitions, available):
+        """Size source windows against the remaining request budget.
+
+        UTF-8 sizes bound incremental originals and repeated evidence enums. This
+        avoids repeatedly tokenizing every possible subset of a long transcript.
+        Splitting is purely technical and performs no model calls.
+        """
+        offered = {f'W{i//80+1}': self.rows[i:i+80] for i in range(0,len(self.rows),80)
+                   if any(r['line_id'] not in available for r in self.rows[i:i+80])}
+        original_offered=offered.copy()
+        def address_body():
+            return dict(body,source_windows=[dict(window_id=key,start_line_id=rows[0]['line_id'],
+                end_line_id=rows[-1]['line_id']) for key,rows in offered.items()])
+        def wire(limit):
+            variants=[result_schema]
+            if offered:
+                variants.append(obj({'kind':{'enum':['source_request']},'source_window_ids':
+                    dict(array({'enum':list(offered)}),minItems=1,maxItems=limit)}))
+            schema=obj({'response':{'anyOf':variants}})
+            if definitions: schema['$defs']=definitions
+            return schema
+        while True:
+            offered=dict(sorted(offered.items(),key=lambda item:item[1][0]['index']))
+            proposed=address_body()
+            schema=wire(min(3,len(offered)))
+            if not offered: return proposed,schema,offered,0
+            remaining=self.config.context_tokens-self.reserve-1024-input_bound(
+                self.messages(phase,instruction,proposed),self.config,self.selection_schema(proposed,schema))
+            evidence_fields=json.dumps(schema).count('"evidence"')
+            costs={}
+            for key,rows in offered.items():
+                missing=[r for r in rows if r['line_id'] not in available]
+                costs[key]=len(json.dumps(missing,ensure_ascii=False).encode('utf-8'))+256+evidence_fields*sum(
+                    len(self.catalog.reverse[r['line_id']])+8 for r in missing)
+            large=[key for key,cost in costs.items() if cost>remaining]
+            if remaining<=0 or any(len(offered[key])==1 for key in large):
+                # A final answer can still fit even if more originals cannot.
+                # Do not fail an unrequested retrieval or inflate the address
+                # list indefinitely. An actual follow-up retains the strict
+                # budget check; no source is truncated or silently omitted.
+                offered=original_offered
+                return address_body(),wire(1),offered,1
+            if not large:
+                largest=sorted(costs.values(),reverse=True)
+                limit=max(n for n in range(1,min(3,len(largest))+1) if sum(largest[:n])<=remaining)
+                return proposed,wire(limit),offered,limit
+            for key in large:
+                rows=offered.pop(key)
+                midpoint=len(rows)//2
+                for suffix,part in (('a',rows[:midpoint]),('b',rows[midpoint:])):
+                    if any(r['line_id'] not in available for r in part): offered[key+suffix]=part
 
     def available_sources(self, body):
         """Only complete original text counts as supplied, never a note's ID."""

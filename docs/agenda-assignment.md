@@ -133,6 +133,14 @@ Gemeinsame `$defs` vermeiden wiederholte Feld-/Belegschemata. Die lokalen
 Ollama-Schematests prüfen auch diese Referenzen und optionale Endquellenfelder;
 andere Provider müssen diese JSON-Schema-Funktionen unterstützen.
 
+Bei knappen Kontextbudgets werden Fenster technisch unterteilt und die Zahl der
+gleichzeitig anforderbaren Fenster reduziert. Dafür werden keine Modellaufrufe
+ausgeführt. Ein bereits passendes Ergebnis darf auch dann ausgegeben werden,
+wenn zusätzliche Originale nicht mehr passen würden. Tatsächlich angeforderte
+Originale unterliegen weiterhin der strengen Budgetprüfung; zu große Eingaben
+werden nicht gekürzt. Lange Einzelquellen oder ausgeschöpfte Abrufrunden können
+deshalb weiterhin zu einem ausdrücklichen technischen Fehler führen.
+
 Die öffentliche zeilenweise API und gespeicherte Vorschläge ändern sich nicht.
 Manuelle Zuordnungen, Quellen-IDs und Originalzeiten bleiben unverändert.
 Neue Code-/Promptversionen verwenden neue Checkpoints; bestehende Ergebnisse

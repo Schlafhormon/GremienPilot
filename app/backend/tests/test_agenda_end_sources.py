@@ -4,6 +4,7 @@ Only ranges/diagnostic codes are retained from the private job, never transcript
 content or inferred corrections. Scripted answers do not establish model quality.
 """
 from copy import deepcopy
+from dataclasses import replace
 import json
 import pytest
 
@@ -29,6 +30,11 @@ def workflow(responses, n=160):
     work.rows = [dict(line_id=f'id-{i}', index=i, text=f'Original {i}') for i in range(n)]
     work.by_id = {r['line_id']: r for r in work.rows}
     work.catalog = SourceCatalog(work.rows)
+    from llm_config import get_llm_config
+    from agenda_llm import BASE
+    work.config=replace(get_llm_config(),context_tokens=131072)
+    work.reserve=4096
+    work.system=BASE
     work.retrieval_rounds = 2
     calls = []
     def call(phase, instruction, body, schema, validate):
@@ -173,6 +179,20 @@ def test_actual_full_transcript_request_and_excessive_windows_are_rejected(respo
     with pytest.raises(AgendaValidationError):
         work.source_call('states','',{}, {'type':'object','properties':{}},lambda data:None)
     assert len(calls)==1
+
+
+def test_small_context_subdivides_source_windows_without_model_calls_or_text_loss():
+    work,_=workflow([],n=90)
+    work.config=replace(work.config,context_tokens=16384)
+    for row in work.rows: row['text']='Beratung und Wiederaufnahme. '*10
+    result_schema={'type':'object','properties':{'items':{'type':'array','items':{'type':'string'}}}}
+    body,schema,offered,limit=work.retrieval_offer('states','',{},result_schema,None,set())
+    assert any(len(rows)<80 for rows in offered.values()) and 1<=limit<=3
+    assert [r for rows in offered.values() for r in rows]==work.rows
+    assert all(r['text']=='Beratung und Wiederaufnahme. '*10 for rows in offered.values() for r in rows)
+    largest=sorted(offered.values(),key=lambda rows:len(json.dumps(rows)),reverse=True)[:limit]
+    followup=dict(body,requested_originals=[r for rows in largest for r in rows])
+    assert work.fits('states','',followup,schema)
 
 
 def test_fast_incomplete_generation_has_no_hidden_split_repairs(agenda_model):
