@@ -91,7 +91,7 @@ Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**
 
 ## Kompakter Quellenvertrag ab September 2026
 
-Fast und optional kompaktes Slow verwenden `agenda-change-map-v11`. `initial`
+Fast und optional kompaktes Slow verwenden `agenda-change-map-v12`. `initial`
 enthält die ausdrückliche Zuordnung der ersten Zielzeile mit `top_ids`, `reason`,
 `evidence`, `uncertain`, `confidence`. Das verpflichtende Objekt `changes` enthält
 die erste Quellen-ID jedes Wechsels als Schlüssel und die neue Zuordnung als Wert.
@@ -114,7 +114,12 @@ vorhanden. Weitere Abrufe liefern nur fehlende Originale. Doppelte oder unbekann
 Anforderungen sind Fehler; ein ausgeschöpftes Abrufbudget erzeugt keine neue
 Aufteilung in Modellaufträge.
 
-Fast begrenzt Abschnittsbegründungen auf 240 Zeichen und drei Beleg-IDs. Es
+Fast begrenzt Abschnittsbegründungen auf 96 Zeichen und eine Beleg-ID. Kurze
+TOP-Kennungen (`T1`, `T2`, …) ersetzen im Detailprompt und Antwortschema lange
+UUIDs. Die Anwendung übersetzt sie verlustfrei in die bestehenden TOP-IDs zurück;
+Cache und Checkpoints berücksichtigen die konkrete Übersetzung. Kollidiert eine
+Kurzkennung mit einer bestehenden TOP-ID, wird ein anderer Präfix verwendet.
+Slow behält seine kanonischen TOP-IDs und ausführlicheren Belege. Fast
 bleibt bei einem Zuordnungsdurchgang ohne automatische Inhaltsprüfung und ohne
 Reparatur fehlerhafter Antworten. Slow behält unabhängige Prüfung und Klärung.
 Prompts enthalten weniger technische Auditmetadaten; Originaltexte, Belege,

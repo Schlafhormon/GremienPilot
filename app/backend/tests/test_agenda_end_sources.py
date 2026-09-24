@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import replace
 import json
 import pytest
+from types import SimpleNamespace
 
 from agenda_llm import Workflow, AgendaValidationError, parse_response
 from source_contract import SourceCatalog
@@ -29,6 +30,8 @@ def answer(*spans):
 
 def workflow(responses, n=160):
     work = Workflow.__new__(Workflow)
+    work.provenance = {}
+    work.usage = SimpleNamespace(provenance={})
     work.rows = [dict(line_id=f'id-{i}', index=i, text=f'Original {i}') for i in range(n)]
     work.by_id = {r['line_id']: r for r in work.rows}
     work.catalog = SourceCatalog(work.rows)
@@ -45,6 +48,7 @@ def workflow(responses, n=160):
         if callable(raw): raw = raw(body)
         data = work.catalog.prepare(work.catalog.translate(raw, decode=True))
         validate(data)
+        validate(data)  # Durable checkpoint reads validate canonical IDs again.
         return data
     work.call = call
     return work, calls
@@ -128,6 +132,49 @@ def test_fast_detail_uses_global_narrative_without_prior_source_labels(mode):
     assert body['reconstruction']==({'narrative':reconstruction['narrative']} if mode=='fast' else reconstruction)
     assert body['target_lines']==work.rows and body['context']=={'model_notes':['Globaler Verlauf']}
     assert reconstruction==before and len(rows)==3 and len(calls)==1
+
+
+@pytest.mark.parametrize('identities', [['uuid-a','uuid-b'], ['T1','TT2'], []])
+def test_fast_short_top_ids_roundtrip_without_collisions_or_mutating_agenda(identities):
+    agenda=[{'top_id':t,'title':f'Topic {i}'} for i,t in enumerate(identities)]
+    original=deepcopy(agenda)
+    def response(body):
+        raw=answer(decision('L1'))
+        raw['response']['initial']['top_ids']=[t['top_id'] for t in body['agenda']]
+        assert not set(raw['response']['initial']['top_ids']) & set(identities)
+        return raw
+    work,calls=workflow([response],n=3)
+    with processing_scope('fast'):
+        rows=work.compact_details('fast:detail',{},agenda,{},0,2)
+    assert agenda==original and all(r['top_ids']==identities for r in rows)
+    mapping=work.provenance['model_top_aliases']
+    assert list(mapping.values())==identities and work.usage.provenance['model_top_aliases']==mapping
+    schema=calls[0][1]['$defs']['assignment']['properties']
+    assert schema['reason']['maxLength']==96 and schema['evidence']['maxItems']==1
+    if identities: assert schema['top_ids']['items']['enum']==list(mapping)
+
+
+def test_short_top_alias_mapping_distinguishes_cache_identity():
+    snapshots=[]
+    for identity in ['uuid-a','uuid-b']:
+        raw=answer(decision('L1'));raw['response']['initial']['top_ids']=['T1']
+        work,calls=workflow([raw],n=1)
+        with processing_scope('fast'):
+            work.compact_details('fast:detail',{},[{'top_id':identity,'title':'Same title'}],{},0,0)
+        snapshots.append((calls[0][0],deepcopy(work.provenance)))
+    assert snapshots[0][0]==snapshots[1][0]
+    assert snapshots[0][1]!=snapshots[1][1]
+
+
+def test_slow_keeps_canonical_top_ids_and_full_evidence_budget():
+    work,calls=workflow([answer(decision('L1'))],n=1)
+    with processing_scope('slow'):
+        work.compact_details('detail',{},[{'top_id':'top'}],{},0,0)
+    assert calls[0][0]['agenda']==[{'top_id':'top'}]
+    schema=calls[0][1]['$defs']['assignment']['properties']
+    assert schema['top_ids']['items']['enum']==['top']
+    assert 'maxLength' not in schema['reason'] and 'maxItems' not in schema['evidence']
+    assert 'model_top_aliases' not in work.provenance
 
 
 # All eight coverage failures and seven mixed answers from the reported job.
