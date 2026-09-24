@@ -50,7 +50,9 @@ $OLLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "qwen3.5:9b" }
 $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
 $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
 $env:BACKEND_GPU_IMAGE = $BACKEND_GPU_IMAGE
-$env:OLLAMA_IMAGE = $OLLAMA_IMAGE
+# Let Compose honor OLLAMA_IMAGE in .env. Export only an explicit shell tag;
+# an existing shell OLLAMA_IMAGE already has precedence and stays unchanged.
+if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE = $OLLAMA_IMAGE }
 
 # Ports used by the application
 $PORT_FRONTEND = 3000

@@ -52,7 +52,10 @@ BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
 OLLAMA_IMAGE="${OLLAMA_IMAGE:-ollama/ollama:${OLLAMA_IMAGE_TAG:-0.34.4}}"
 OLLAMA_MODEL="${LLM_MODEL:-qwen3.5:9b}"
 
-export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE OLLAMA_IMAGE
+# Compose must still honor OLLAMA_IMAGE from .env. A shell override remains
+# exported naturally; only an explicitly selected tag needs a new export.
+if [ -n "${OLLAMA_IMAGE_TAG:-}" ]; then export OLLAMA_IMAGE; fi
+export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 
 # Global state
 MISSING_ITEMS=()

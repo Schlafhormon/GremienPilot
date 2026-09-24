@@ -1,7 +1,7 @@
 # Modell- und Transportvertrag
 
 Stand der Prüfung: 24. September 2026. Neue Installationen verwenden den
-Qualitätskandidaten `gemma4:31b-it-q4_K_M`; explizite Modellnamen, einschließlich
+Standard `qwen3.5:9b`; explizite Modellnamen, einschließlich
 Browser-/API-Überschreibungen, bleiben unverändert. Die Quantisierung muss zum
 Speicher des Betreibers passen. Es gibt keinen automatischen Modellwechsel,
 keine automatische Kontextverkleinerung und keine Schema-/Thinking-Fallbacks
@@ -16,13 +16,25 @@ bleiben erhalten; eine Datenbankmigration ist nicht erforderlich.
 Ein externer Ollama-Server sollte ausdrücklich `ollama` setzen. Ein lokaler
 vLLM-/anderer OpenAI-kompatibler Server setzt `openai-compatible`.
 
-Gemma 4 31B Instruct unterstützt Text/Bilder und optionales Thinking; 256K ist
-die Architekturgrenze, keine Zusage über freien Laufzeitspeicher. Die dokumentierte
-Sampling-Empfehlung ist Temperatur 1.0, top_p 0.95, top_k 64. Diese Werte lassen
-sich mit `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K` setzen; leere Werte erhalten
-die bestehenden fachlichen Temperaturvorgaben bzw. Providerdefaults.
-[Offizielle Modellbeschreibung](https://ollama.com/library/gemma4),
-[Google-Modellübersicht](https://ai.google.dev/gemma/docs/core).
+Qwen3.5:9b unterstützt Text/Bilder und optionales Thinking. Das Ollama-Modell ist
+etwa 6,6 GB groß und unterstützt 256K Kontext. Die Anwendung reserviert bewusst
+131.072 Tokens: lange Sitzungen bleiben vollständig durch Abschnittsverarbeitung
+zugänglich, ohne überall das größte Fenster zu belegen. Das Fenster ist keine
+Garantie für reine GPU-Ausführung; auf kleineren GPUs wird RAM mitbenutzt.
+[Offizielle Ollama-Modellbeschreibung](https://ollama.com/library/qwen3.5/tags).
+
+Leere Sampling-Variablen verwenden für genau `qwen3.5:9b` unter Ollama Temperatur
+1.0, top_p 0.95 und top_k 20, entsprechend dem lokal geprüften Profil und den
+Qwen-Empfehlungen für Thinking beziehungsweise Reasoning ohne Thinking.
+Explizite Werte haben Vorrang. Andere Modelle und externe Provider erben dieses
+Profil nicht; dort bleiben bisherige Aufgaben-/Providerwerte maßgeblich.
+[Qwen-Modellkarte](https://huggingface.co/Qwen/Qwen3.5-9B).
+
+Die Standardinstallation verwendet die bereits lokal geprüfte Ollama-Version
+0.34.4. Setup-Skripte, Compose und Kubernetes verwenden denselben Stand.
+Der Ollama-Ladewatchdog erlaubt 30 Minuten, entsprechend der bestehenden
+Backend-Grenze für Laden/erstes Token. Aktive Generierung hat keine pauschale
+Gesamtlaufzeitgrenze; die Inaktivitätsgrenze bleibt 120 Sekunden.
 
 Die Thinking-Einstellung wird pro Verarbeitungsmodus aufgelöst:
 
@@ -51,7 +63,11 @@ Endergebnis interpretiert.
 
 `LLM_OUTPUT_TOKENS` überschreibt ausdrücklich die bisherigen aufgabenspezifischen
 Ausgabebudgets; leer behält sie bei. `LLM_THINKING_TOKENS` ist eine zusätzliche
-Reservierung, **kein separat durchsetzbares Denklimit**. Ollama bietet hier nur
+Reservierung, **kein separat durchsetzbares Denklimit**. Leer/fehlend bedeutet
+bei Ollama 4.096 Tokens, bei externen APIs 0. Ohne Thinking ist die Reserve immer
+0. Agenda (Fast und Slow), Zusammenfassungen und PDF verwenden standardmäßig je
+8.192 Ausgabetokens. Das sind Obergrenzen, keine Mindestlängen oder zusätzlichen
+Modellaufrufe. Ollama bietet hier nur
 `num_predict`; OpenAI-kompatible Reasoning-Server können den gemeinsamen Deckel
 über `LLM_OUTPUT_PARAMETER=max_completion_tokens` erhalten. Standard bleibt
 `max_tokens` für bestehende kompatible Server. Bei Ollamas schemaabhängigem
@@ -70,7 +86,7 @@ beträgt **131072 Tokens** und gilt gemeinsam für **Fast und Slow**. Auch lokal
 `.env`-Dateien müssen auf diesen Wert angepasst werden, da bestehende Werte die
 Deployment-Defaults überschreiben. Das größere Fenster gibt TOP-Liste,
 Verlaufsnotizen und Rekonstruktionen einschließlich der Slow-Vergleiche mehr
-Platz; die Ausgabelimits und die Anzahl der Inhaltsprüfungen ändern sich nicht.
+Platz; die Anzahl der Inhaltsprüfungen wird dadurch nicht erhöht.
 Modell und Server müssen diese Kontextgröße unterstützen. Der größere
 Kontext kann mehr Arbeitsspeicher beziehungsweise VRAM beanspruchen.
 Native Anfragen
@@ -87,10 +103,18 @@ Server setzen; gemeldete Tokenverwendung wird zusätzlich geprüft. Die Provenie
 kennzeichnet den effektiven Kontext deshalb als nicht verifiziert. Ein Provider,
 der Eingaben intern still kürzt, erfüllt diesen Vertrag nicht.
 
-Optional: `LLM_TOKENIZER_PATH` zeigt auf einen **lokalen**, modellpassenden
+Die Docker-Images enthalten den offiziellen Qwen3.5:9b-Tokenizer. Beim Image-Bau
+wird nur die öffentliche JSON-Datei (rund 13 MB) aus der in `llm_assets.py`
+festgelegten Revision geladen und gegen ihre SHA-256 geprüft. Es werden keine
+Modellgewichte und kein fremder Python-Code geladen; kein HF-Token ist nötig.
+Ohne explizite Tokenizer-Einstellungen wird diese Datei ausschließlich für
+`qwen3.5:9b` unter Ollama automatisch ausgewählt. Ein Modellwechsel verwendet
+diesen Tokenizer nicht versehentlich weiter.
+
+Optional: `LLM_TOKENIZER_PATH` zeigt auf einen eigenen **lokalen**, modellpassenden
 Hugging-Face-`tokenizer.json` (Bibliothek `tokenizers`, bereits Teil der ML-Abhängigkeiten); `LLM_TOKENIZER_MODEL` muss
 mit dem tatsächlichen Modellnamen übereinstimmen. Bei Modellüberschreibungen
-wird ein unpassender Tokenizer abgewiesen. Kein Download und kein fremder
+wird ein ausdrücklich konfigurierter unpassender Tokenizer abgewiesen. Kein Download und kein fremder
 Python-Code im Job. Die modellpassende Text-/Schema-Zählung wird um 32 Tokens je Nachricht und
 512 Tokens für Chat-Template/Steuerzeichen ergänzt; Provider-Templates können abweichen. Ohne Tokenizer gilt die konservative
 UTF-8-Bytezahl plus 32 Tokens je Nachricht und 512 globale Reservetokens.
@@ -99,12 +123,15 @@ Garantie für beliebige Tokenizer; die native Laufzeitprüfung bleibt maßgeblic
 
 Nachrichten akzeptieren Text, OpenAI-Content-Parts (`text`, `image_url`) und
 native `images`. Ollama benötigt Base64, externe APIs dürfen Bild-URLs erhalten;
-der Backend-Transport lädt solche URLs nicht selbst. `LLM_IMAGE_TOKENS=0`
-verweigert Bilder, bis eine passende obere Schranke pro Bild konfiguriert wurde.
-Gemma dokumentiert bis 1120 visuelle Tokens je Bild; zusätzliche Marker/Crops
-und abweichende Providerprozessoren müssen berücksichtigt werden. Der gewählte
-Wert ist eine **Reservierung**, kein Befehl zur Bildskalierung.
-[Gemma-Bildverarbeitung](https://ollama.com/library/gemma4).
+der Backend-Transport lädt solche URLs nicht selbst. Leeres `LLM_IMAGE_TOKENS`
+reserviert für Qwen3.5:9b/Ollama **17.408 Tokens je Bild**, für andere Modelle 0.
+Die Qwen-Reserve basiert auf maximal 16.777.216 Pixeln bei 16er-Patches und
+2-facher räumlicher Zusammenfassung (16.384 Positionen), plus 1.024 Tokens
+Spielraum. Der native Laufzeitcheck bleibt maßgeblich. Explizites `0` verweigert
+Bilder; ein expliziter anderer Wert überschreibt die Reserve. Andere Modelle
+benötigen weiterhin eine passende Einstellung. Der Wert ist eine **Reservierung**,
+kein Befehl zur Bildskalierung.
+[Offizielle Qwen-Bildkonfiguration](https://huggingface.co/Qwen/Qwen3.5-9B/blob/c202236235762e1c871ad0ccb60c8ee5ba337b9a/preprocessor_config.json).
 
 Pro Fachoperation wird die Umgebung einmal aufgelöst. Diagnose und
 Zusammenfassungs-/Agenda-Provenienz enthalten die wirksame Konfiguration,
@@ -125,7 +152,7 @@ Anfrage, Endergebnis und Provenienz, keinen separaten Denktext.
 ## Laufzeiten und Ressourcen
 
 Im Fast-Modus erlaubt `AGENDA_FAST_OUTPUT_TOKENS=8192` mehr Platz für die
-TOP-Modellantworten. Slow verwendet weiterhin `AGENDA_OUTPUT_TOKENS=4096`.
+TOP-Modellantworten. Slow verwendet ebenfalls `AGENDA_OUTPUT_TOKENS=8192`.
 Bei kleineren Kontextfenstern wird das Fast-Fachbudget so begrenzt, dass
 einschließlich Denkreserve höchstens die Hälfte für die Ausgabe reserviert wird.
 Ein explizites `LLM_OUTPUT_TOKENS` überschreibt beide Fachbudgets und bleibt von
@@ -138,13 +165,14 @@ Der vollständige Quellenbereich bleibt separat erhalten und die Originalzeilen
 bleiben für die spätere Zuordnung verfügbar. Fast behält einen Versuch je
 Abschnitt ohne zusätzliche unabhängige Inhaltsprüfung oder Reparaturrunde.
 
-Für kompaktere Zuordnungen kann `AGENDA_COMPACT_ASSIGNMENTS=true` gesetzt werden.
+Kompakte Zuordnungen sind mit `AGENDA_COMPACT_ASSIGNMENTS=true` der Standard.
 Das Modell gibt zusammenhängende Abschnitte mit gemeinsamer Zuordnung, kurzer
 Begründung und Originalbelegen aus. Der Server prüft lückenlose, überlappungsfreie
 Abdeckung und bildet jeden Abschnitt wieder auf die einzelnen Zeilen ab.
 Die unabhängige Gegenprüfung und die Klärung von Abweichungen bleiben bestehen.
-`AGENDA_OUTPUT_TOKENS_PER_LINE=40` und `AGENDA_DETECTION_CHUNK_LINES=80` sind ein
-möglicher Ausgangspunkt. Fast teilt nur vor der Generierung zu große Eingaben;
+`AGENDA_OUTPUT_TOKENS_PER_LINE=40` und `AGENDA_DETECTION_CHUNK_LINES=80` sind die
+passenden Standardwerte. Ohne kompakte Ausgabe und ohne expliziten Planungswert
+reserviert die Anwendung weiterhin 256 Tokens je Zeile. Fast teilt nur vor der Generierung zu große Eingaben;
 fehlerhafte oder abgeschnittene Modellantworten lösen keine Reparaturaufteilung aus.
 Slow behält seine begrenzten Reparaturversuche.
 Diese Planungswerte garantieren weder eine bestimmte Qualität noch Laufzeit.

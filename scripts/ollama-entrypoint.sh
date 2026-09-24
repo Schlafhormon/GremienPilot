@@ -34,7 +34,7 @@ echo "Ollama is ready!"
 
 # Check if model is already downloaded
 echo "Checking if model '$MODEL' is available..."
-if ollama list | grep -q "^$MODEL"; then
+if ollama show "$MODEL" > /dev/null 2>&1; then
     echo "Model '$MODEL' is already downloaded."
 else
     echo "Model '$MODEL' not found. Downloading..."

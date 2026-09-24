@@ -128,7 +128,7 @@ einen Gesamt-TOP zusammenfassen.
 | --- | --- | --- |
 | Betriebssystem | Windows 10/11, macOS 11+, Linux | Windows/Linux für GPU |
 | Docker | Docker Desktop oder Docker Engine mit Compose | aktuelle Docker-Version |
-| RAM | modell- und kontextabhängig | lokale 31B-Modelle: Gewichte, KV-Cache und Laufzeitreserve gemeinsam planen |
+| RAM | modell- und kontextabhängig | 32 GB für lange lokale Sitzungen als Ausgangspunkt; Modell, Kontext und Transkription teilen sich den Speicher |
 | Speicherplatz | Images, Modellgewichte und Audiodaten | Reserve für weitere Modelle und Sitzungen |
 | Internet | für Installation, Images und Modell-Downloads | stabile Verbindung |
 | GPU | optional | NVIDIA-GPU mit Container Toolkit |
@@ -142,8 +142,8 @@ Diarisierung ein HuggingFace-Token über `HF_TOKEN` benötigt.
 ### 1. Repository beziehen
 
 ```bash
-git clone https://github.com/Schlafhormon/ki-protokollierung.git
-cd ki-protokollierung
+git clone https://github.com/Schlafhormon/GremienPilot.git
+cd GremienPilot
 ```
 
 Alternativ kann das Repository als ZIP von GitHub heruntergeladen und entpackt
@@ -161,12 +161,14 @@ Starten Sie Docker, bevor Sie das Setup ausführen.
 
 ### 3. Optional `.env` anlegen
 
-Für viele lokale Tests reichen die Standardwerte. Wenn Sie lokale Images ohne
+Das Setup legt `.env` automatisch an, falls sie fehlt. **Modell, Kontext und
+Tokenbudgets sind für lange Sitzungen voreingestellt.** Bestehende `.env`-Dateien
+werden nicht überschrieben. Wenn Sie lokale Images ohne
 vorinstallierte Modelle verwenden, setzen Sie für die Sprecherdiarisierung einen
 HuggingFace-Token:
 
 ```bash
-cp .env.example .env
+test -e .env || cp .env.example .env
 # In .env setzen:
 # HF_TOKEN=hf_...
 ```
@@ -174,7 +176,7 @@ cp .env.example .env
 Unter PowerShell:
 
 ```powershell
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Danach .env bearbeiten und HF_TOKEN setzen, falls erforderlich.
 ```
 
@@ -183,20 +185,42 @@ Copy-Item .env.example .env
 Windows:
 
 ```powershell
-.\setup.ps1 build
+.\setup.ps1
 ```
 
 macOS/Linux:
 
 ```bash
 chmod +x ./setup.sh
-./setup.sh build
+./setup.sh
 ```
 
-Der Build-Befehl prüft Docker, erkennt optional eine NVIDIA-GPU, baut lokale
+Beim ersten Start prüft das Setup Docker, erkennt optional eine NVIDIA-GPU, baut lokale
 Docker-Images aus diesem Repository und startet Frontend, Backend und Ollama per
-Docker Compose. Wenn bereits Container vorhanden sind, entfernt das Skript diese
-automatisch vor dem Neuerstellen.
+Docker Compose. Qwen3.5:9b wird automatisch heruntergeladen; der passende Tokenizer
+wird bereits beim Image-Bau mitgeliefert. Dafür ist kein HuggingFace-Token nötig.
+Vorhandene Container werden mit `start` ohne Neubau gestartet. Nach Code- oder
+Konfigurationsänderungen baut `setup.ps1 build` beziehungsweise `./setup.sh build`
+neu; Modell-Volumes bleiben standardmäßig erhalten.
+
+Die Standardwerte im Überblick:
+
+| Einstellung | Standard |
+| --- | --- |
+| Sprachmodell | Qwen3.5:9b, lokales Ollama 0.34.4 |
+| Kontext für beide Modi | 131.072 Tokens; längere Sitzungen werden in Abschnitten verarbeitet |
+| Ausgabe je Agenda-, Zusammenfassungs- und PDF-Aufruf | bis zu 8.192 Tokens |
+| Thinking | Fast aus, Slow an; Slow erhält bei Ollama zusätzlich 4.096 Tokens Reserve |
+| Zuordnungsblöcke | bis zu 80 Zeilen, kompaktes Antwortformat |
+| Audio-Upload | bis zu 2 GiB |
+
+Diese Budgets sind Obergrenzen, keine vorgegebene Antwortlänge. Fast bleibt ohne
+zusätzliche Inhaltsprüfung. Slow kann mit Thinking deutlich länger dauern.
+131.072 Tokens sind bewusst großzügig, ohne das größtmögliche Modellfenster
+auf jeder Installation zu reservieren. Auf kleineren Grafikkarten nutzt Ollama
+zusätzlich den Arbeitsspeicher; das kann langsamer sein. Es wird kein Quelltext
+still abgeschnitten. Details und optionale Anpassungen stehen im
+[Konfigurationsleitfaden](docs/llm-configuration.md).
 
 Nach erfolgreichem Start ist die Anwendung erreichbar unter:
 
@@ -221,7 +245,7 @@ oder unter macOS/Linux:
 | Befehl | Windows | macOS/Linux |
 | --- | --- | --- |
 | Lokale Images bauen und Container neu erstellen | `.\setup.ps1 build` | `./setup.sh build` |
-| Vorhandene Container ohne Neubau starten | `.\setup.ps1 start` oder `.\setup.ps1` | `./setup.sh start` oder `./setup.sh` |
+| Starten; beim ersten Mal automatisch installieren | `.\setup.ps1 start` oder `.\setup.ps1` | `./setup.sh start` oder `./setup.sh` |
 | Stoppen, Container behalten | `.\setup.ps1 stop` | `./setup.sh stop` |
 | Stoppen und Container entfernen | `.\setup.ps1 remove` | `./setup.sh remove` |
 | Status prüfen | `.\setup.ps1 status` | `./setup.sh status` |
@@ -329,21 +353,22 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `GPU_MODEL_UNLOAD_TIMEOUT_SECONDS` | Positives, endliches Zeitlimit für die bestätigte Ollama-Speicherfreigabe vor der Transkription | `120` |
 | `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://ollama:11434/v1`, lokale Backend-Entwicklung: `http://localhost:11434/v1` |
 | `PROTOKOLL_MODEL_DISK_GB` | Setup-Umgebungsvariable: Modell-Speicherplatzreserve in GB, keine RAM-Messung | `40` |
-| `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `gemma4:31b-it-q4_K_M` |
+| `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3.5:9b` |
 | `LLM_PROVIDER` | `ollama` oder `openai-compatible`; leer erhält bisherige Erkennung | leer |
-| `LLM_THINKING` / `LLM_THINKING_TOKENS` | Nativer Denk-Schalter / zusätzliche Tokenreserve, kein separates hartes Denklimit | leer / `0` |
+| `LLM_FAST_REASONING_EFFORT` / `LLM_SLOW_REASONING_EFFORT` | Thinking je Modus; leere Werte verwenden den Modusstandard | Fast `none`, Slow `medium` |
+| `LLM_THINKING_TOKENS` | Zusätzliche Reserve, kein separates hartes Denklimit; leer wählt Providerstandard | Ollama `4096`, externe API `0`; Fast ohne Thinking immer `0` |
 | `LLM_OUTPUT_TOKENS` / `LLM_OUTPUT_PARAMETER` | Ausgabe überschreiben / externe API: `max_tokens` oder `max_completion_tokens` | leer / `max_tokens` |
 | `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K`, `LLM_SEED` | Sampling; `top_k` nur natives Ollama | leer |
 | `LLM_CONNECT_TIMEOUT_SECONDS`, `LLM_READ_TIMEOUT_SECONDS`, `LLM_TOTAL_TIMEOUT_SECONDS` | Verbindung / Inaktivität / Gesamtlimit; Gesamtwert `0` erlaubt lange Streams | `10` / Legacy-Alias / `0` |
 | `LLM_GPU_LAYERS` / `LLM_KEEP_ALIVE` | Native GPU-Layer (`0`: CPU) / Modellhaltezeit | Providerwahl / Ollama-Wert |
-| `LLM_IMAGE_TOKENS` | Konservative Reserve je Bild; `0` verweigert Bilder | `0` |
-| `LLM_TOKENIZER_PATH` / `LLM_TOKENIZER_MODEL` | Optionaler lokaler Tokenizer mit exakt passendem Modellnamen | leer |
+| `LLM_IMAGE_TOKENS` | Reserve je Bild; leer modellabhängig, explizit `0` verweigert Bilder | Qwen3.5:9b/Ollama `17408`, sonst `0` |
+| `LLM_TOKENIZER_PATH` / `LLM_TOKENIZER_MODEL` | Leer: mitgelieferter Qwen-Tokenizer; explizite Pfade müssen zum Modell passen | automatisch für Qwen3.5:9b/Ollama |
 | `LLM_MODEL_REVISION` | Unveränderliche externe Modellrevision für Cache; Ollama nutzt Digest | leer |
-| `OLLAMA_LOAD_TIMEOUT` | Serverseitiger Watchdog für das Modellladen | `5m` |
-| `LLM_REASONING_EFFORT` | Reasoning für alle LLM-Aufgaben: leer = bisheriges Verhalten, `none` = aus, `low`/`medium`/`high`/`max` = an (modell-/serverabhängig) | leer |
+| `OLLAMA_LOAD_TIMEOUT` | Serverseitiger Watchdog für das Modellladen | `30m` |
+| `LLM_REASONING_EFFORT` / `LLM_THINKING` | Veraltete globale Schalter; die getrennten Moduseinstellungen haben Vorrang | nicht mehr für Fast/Slow verwenden |
 | `LLM_TIMEOUT_SECONDS` | Veralteter Alias für das gemeinsame Lese-/Inaktivitätslimit | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
-| `SUMMARY_OUTPUT_TOKENS` | Ausgabe je Zusammenfassungs-/Prüfaufruf; alle Prüfungen verpflichtend | `4096` |
+| `SUMMARY_OUTPUT_TOKENS` | Ausgabebudget je Zusammenfassungs-/Prüfaufruf | `8192` |
 | `SUMMARY_MODEL_ATTEMPTS` | Versuche für ungültige strukturierte Modellantworten | `2` |
 | `SUMMARY_RECONCILIATION_ROUNDS` | Gezielte Modellklärung, danach konkrete Prüffragen | `2` |
 | `LLM_OLLAMA_NATIVE` | Veraltete Providerwahl; `LLM_PROVIDER` hat Vorrang | leer |
@@ -370,14 +395,15 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL` | maximale globale Referenz-Embeddings je Profil und Modell | `16` |
 | `AGENDA_DETECTION_USE_LLM` | Modellgestützte TOP-Erkennung; `false` lässt technische Lücken, ohne Ersatzzuordnung | `true` |
 | `AGENDA_DETECTION_TIMEOUT_SECONDS` | Veraltet; Netzwerk nutzt das gemeinsame Inaktivitätslimit | `8` |
-| `AGENDA_DETECTION_CHUNK_LINES` | Optionale zusätzliche Obergrenze für Detailausgaben; `0` plant nur nach Kontext-/Ausgabebudget | `0` |
-| `AGENDA_OUTPUT_TOKENS` / `AGENDA_OUTPUT_TOKENS_PER_LINE` | Antwortbudget und geschätzte Ausgabereserve je Detailzeile; gemeinsame Modellgrenzen gelten zusätzlich | `4096` / `256` |
+| `AGENDA_DETECTION_CHUNK_LINES` | Zielzeilen je Detailblock; `0` plant nur nach Kontext-/Ausgabebudget | `80` |
+| `AGENDA_COMPACT_ASSIGNMENTS` | Kompakte Quellenwechsel auch für Slow; unabhängige Prüfung bleibt erhalten | `true` |
+| `AGENDA_OUTPUT_TOKENS` / `AGENDA_OUTPUT_TOKENS_PER_LINE` | Slow-Antwortbudget und geschätzte Ausgabereserve je Detailzeile; gemeinsame Modellgrenzen gelten zusätzlich | `8192` / `40` |
 | `AGENDA_FAST_OUTPUT_TOKENS` | Maximales Antwortbudget für TOP-Verarbeitung im Fast-Modus; wird an das Kontextfenster samt Denkreserve angepasst und bei der Abschnittsplanung berücksichtigt | `8192` |
 | `AGENDA_MODEL_ATTEMPTS` / `AGENDA_REPAIR_SPLIT_DEPTH` | Maximale Versuche je ungültiger Antwort / Reparaturteilungen; keine fachlichen Ersatzregeln | `2` / `3` |
 | `AGENDA_SOURCE_REQUEST_ROUNDS` | Zusätzliche Runden für vom Modell angeforderte Originalquellen | `2` |
 | `AGENDA_DETECTION_CHUNK_OVERLAP_LINES`, `AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE/AFTER`, `AGENDA_DETECTION_GAP_REVIEW_MAX_CALLS`, `AGENDA_DETECTION_BOUNDARY_REVIEW_MAX_CALLS` | Veraltet; vollständige unabhängige Prüfung ersetzt Stichproben und heuristische Kontextfenster | – |
 | `PERSISTENCE_DB_PATH` | SQLite-Pfad im Backend-Container | `/app/data/sessions.sqlite3` |
-| `MAX_UPLOAD_BYTES` | maximale Uploadgröße | `524288000` |
+| `MAX_UPLOAD_BYTES` | maximale Uploadgröße | `2147483648` |
 | `TRANSCRIPTION_CONCURRENCY` | Legacy-Einstellung; dauerhafte Jobs verwenden die gemeinsame serielle Warteschlange | `1` |
 | `PIPELINE_CONCURRENCY` | Legacy-Einstellung; dauerhafte Jobs verwenden die gemeinsame serielle Warteschlange | `1` |
 | `SUMMARY_CONCURRENCY` | Legacy-Einstellung; dauerhafte Modelljobs werden gemeinsam seriell verarbeitet | `1` |
@@ -496,7 +522,7 @@ HF_TOKEN=hf_...
 ### Zusammenfassung meldet LLM-/Ollama-Fehler
 
 Docker Compose startet einen internen Ollama-Dienst und lädt standardmäßig
-`LLM_MODEL=gemma4:31b-it-q4_K_M`. Prüfen Sie die LLM-Diagnose mit:
+`LLM_MODEL=qwen3.5:9b`. Prüfen Sie die LLM-Diagnose mit:
 
 ```bash
 curl http://localhost:8010/api/llm/diagnostics
@@ -505,7 +531,7 @@ curl http://localhost:8010/api/llm/diagnostics
 Wenn das Modell fehlt, laden Sie es nach:
 
 ```bash
-docker compose exec ollama ollama pull gemma4:31b-it-q4_K_M
+docker compose exec ollama ollama pull qwen3.5:9b
 ```
 
 Für lokale Backend-Entwicklung ohne Docker muss Ollama lokal laufen und

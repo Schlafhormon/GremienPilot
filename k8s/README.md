@@ -61,7 +61,7 @@ The base includes a CPU Ollama StatefulSet with persistent model storage. Set cl
 | `WHISPER_BATCH_SIZE` | `16` | Transcription batch size |
 | `WHISPER_LANGUAGE` | `de` | Audio language |
 | `LLM_BASE_URL` | `http://ollama:11434/v1` | Internal Ollama endpoint |
-| `LLM_MODEL` | `gemma4:31b-it-q4_K_M` | Model name for summarization |
+| `LLM_MODEL` | `qwen3.5:9b` | Model name for summarization |
 | `LLM_PROVIDER` | `ollama` | Provider contract; model IDs must exist on that server |
 | `LLM_TIMEOUT_SECONDS` | `120` | Summary/diagnostics request timeout (not transcript agenda detection) |
 | `LLM_MAX_RETRIES` | `2` | Retries for transient LLM errors |
@@ -70,7 +70,7 @@ The base includes a CPU Ollama StatefulSet with persistent model storage. Set cl
 | `PERSISTENCE_DB_PATH` | `/app/data/sessions.sqlite3` | SQLite session database path |
 | `JOB_MAX_AGE_SECONDS` | `7200` | Max age for in-memory job cache cleanup |
 | `JOB_MAX_COUNT` | `100` | Max jobs retained in memory |
-| `MAX_UPLOAD_BYTES` | `524288000` | Maximum upload size |
+| `MAX_UPLOAD_BYTES` | `2147483648` | Maximum upload size |
 | `TRANSCRIPTION_CONCURRENCY` | `1` | Concurrent transcription workers |
 
 ### Storage

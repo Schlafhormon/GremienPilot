@@ -42,3 +42,25 @@ docker(){
     assert ('BUILD' in result.stdout)==(scenario=='fresh')
     assert ('START' in result.stdout)==(scenario=='existing')
     assert result.returncode==(1 if scenario=='invalid' else 0)
+
+
+@pytest.mark.parametrize('present',['yes','no'])
+def test_ollama_bootstrap_checks_exact_model_not_similar_cached_tag(tmp_path,present):
+    executable=tmp_path/'ollama'
+    executable.write_text('''#!/bin/bash
+case "$1" in
+  serve) exit 0;;
+  list) echo 'qwen3.5:9b-other';;
+  show) printf '%s' "$2" > "$CHECKED"; test "$PRESENT" = yes;;
+  pull) printf '%s' "$2" > "$PULLED";;
+esac
+''')
+    executable.chmod(0o755)
+    result=subprocess.run(['bash',str(ROOT/'scripts/ollama-entrypoint.sh')],
+        env=dict(os.environ,PATH=str(tmp_path)+os.pathsep+os.environ['PATH'],
+                 OLLAMA_MODEL='qwen3.5:9b',PRESENT=present,CHECKED=str(tmp_path/'checked'),PULLED=str(tmp_path/'pulled')),
+        text=True,capture_output=True,timeout=10)
+    assert result.returncode==0,result.stderr
+    assert (tmp_path/'checked').read_text()=='qwen3.5:9b'
+    assert (tmp_path/'pulled').exists()==(present=='no')
+    if present=='no': assert (tmp_path/'pulled').read_text()=='qwen3.5:9b'
