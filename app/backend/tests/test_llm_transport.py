@@ -45,6 +45,8 @@ def terminal(**kwargs):
 
 @pytest.fixture
 def server(monkeypatch):
+    # These synthetic responses exercise a fixed 100-token provider cap.
+    monkeypatch.setenv('LLM_THINKING_TOKENS', '0')
     monkeypatch.setenv('LLM_PROVIDER', 'ollama')
     monkeypatch.setenv('LLM_MODEL', 'gemma4:31b-it-q8_0')
     monkeypatch.setenv('LLM_BASE_URL', 'http://provider.test/v1')

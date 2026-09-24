@@ -49,8 +49,8 @@ else
 fi
 
 BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
-OLLAMA_IMAGE="${OLLAMA_IMAGE:-ollama/ollama:${OLLAMA_IMAGE_TAG:-latest}}"
-OLLAMA_MODEL="${LLM_MODEL:-gemma4:31b-it-q4_K_M}"
+OLLAMA_IMAGE="${OLLAMA_IMAGE:-ollama/ollama:${OLLAMA_IMAGE_TAG:-0.34.4}}"
+OLLAMA_MODEL="${LLM_MODEL:-qwen3.5:9b}"
 
 export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE OLLAMA_IMAGE
 
@@ -71,6 +71,18 @@ error() { echo -e "${RED}[FEHLER]${NC} $1"; }
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
+
+initialize_configuration() {
+    # Never overwrite existing settings or secrets.
+    if [ -e "$SCRIPT_DIR/.env" ]; then return 0; fi
+    if ! cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"; then
+        error ".env konnte nicht angelegt werden."
+        return 1
+    fi
+    info ".env mit den Standardwerten fuer lange Sitzungen angelegt."
+    echo "Qwen3.5:9b wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
+    echo "Fuer Audio mit Sprechererkennung ggf. HF_TOKEN in .env setzen (Anleitung in README.md)."
+}
 
 truthy() {
     local value
@@ -129,7 +141,7 @@ show_help() {
     echo "Verwendung: ./setup.sh [BEFEHL]"
     echo ""
     echo "Befehle:"
-    echo "  (ohne)      Vorhandene Container starten"
+    echo "  (ohne)      Starten; bei der ersten Nutzung automatisch installieren"
     echo "  start       Vorhandene Container starten, ohne neu zu bauen"
     echo "  build       Lokale Images neu bauen und Container neu erstellen"
     echo "  stop        Anwendung stoppen, Container bleiben erhalten"
@@ -879,6 +891,7 @@ do_build() {
 
     # Pre-flight checks
     check_docker || exit 1
+    initialize_configuration || exit 1
     remove_existing_containers_for_rebuild || exit 1
     check_disk_space || exit 1
     check_ram
@@ -930,13 +943,15 @@ do_start() {
 
     check_docker || exit 1
 
-    if ! docker compose ps -a -q 2>/dev/null | grep -q .; then
-        error "Keine vorhandenen Container gefunden."
-        echo ""
-        echo "Fuehren Sie zuerst aus:"
-        echo "  ./setup.sh build"
-        echo ""
-        exit 1
+    local containers
+    if ! containers=$(docker compose ps -a -q); then
+        error "Compose-Konfiguration konnte nicht gelesen werden. Bitte .env und Docker pruefen."
+        return 1
+    fi
+    if [ -z "$containers" ]; then
+        info "Erste Installation: Konfiguration anlegen, Images bauen und Modelle laden."
+        do_build
+        return $?
     fi
 
     info "Starte vorhandene Container ohne Neubau..."

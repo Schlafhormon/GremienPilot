@@ -58,6 +58,10 @@ RUN uv pip install --system -e .
 # discovery does not treat them as Python packages.
 RUN mkdir -p uploads data
 
+# Public tokenizer only (~13 MB); no Hugging Face token or model weights needed.
+COPY third_party ./third_party
+RUN python llm_assets.py
+
 # Install nvidia-cudnn-cu12 for WhisperX GPU support
 # This provides the cuDNN libraries needed for faster-whisper
 RUN pip install --no-cache-dir nvidia-cudnn-cu12

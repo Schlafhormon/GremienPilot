@@ -10,7 +10,8 @@ if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 
 # Load only the functions under test, without executing the setup entrypoint.
 foreach ($name in @("Test-Truthy", "Invoke-BuildLocalImages", "Remove-ExistingContainersForRebuild",
-                    "Get-ProjectVolumeName", "Wait-ForServices", "Show-StartupProgress", "Show-FailureDiagnostics")) {
+                    "Get-ProjectVolumeName", "Wait-ForServices", "Show-StartupProgress", "Show-FailureDiagnostics",
+                    "Initialize-Configuration", "Invoke-Start")) {
     $definition = $ast.Find({ param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
@@ -106,4 +107,39 @@ $messages = $captured | Out-String
 if ($messages -notmatch '38%' -or $messages.Contains([string][char]27)) {
     throw "Download progress is missing or still contains terminal escape sequences"
 }
-Write-Host "PASS: 11 setup regression cases and PowerShell syntax"
+$testDirectory = Join-Path ([IO.Path]::GetTempPath()) ('gp-setup-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $testDirectory | Out-Null
+$ScriptDir = $testDirectory
+$testTemplate = Join-Path $testDirectory '.env.example'
+$testEnv = Join-Path $testDirectory '.env'
+try {
+    [IO.File]::WriteAllText($testTemplate, 'LLM_MODEL=qwen3.5:9b')
+    if (-not (Initialize-Configuration)) { throw 'Fresh configuration failed' }
+    if ([IO.File]::ReadAllText($testEnv) -ne 'LLM_MODEL=qwen3.5:9b') { throw 'Wrong defaults copied' }
+    [IO.File]::WriteAllText($testEnv, 'LLM_MODEL=custom-model')
+    if (-not (Initialize-Configuration)) { throw 'Existing configuration failed' }
+    if ([IO.File]::ReadAllText($testEnv) -ne 'LLM_MODEL=custom-model') { throw 'Existing settings overwritten' }
+} finally {
+    Remove-Item -LiteralPath $testEnv,$testTemplate -Force -ErrorAction SilentlyContinue
+    [IO.Directory]::Delete($testDirectory)
+    $ScriptDir = $repoRoot
+}
+
+function Test-Docker { return $true }
+function Invoke-Build { $script:Built = $true }
+function Wait-ForServices { return $true }
+foreach ($scenario in @('fresh','existing','invalid')) {
+    $script:Built = $false
+    $script:Started = $false
+    function docker {
+        $global:LASTEXITCODE = 0
+        if ($args -contains 'ps') {
+            if ($scenario -eq 'existing') { 'container-id' }
+            if ($scenario -eq 'invalid') { $global:LASTEXITCODE = 1 }
+        } elseif ($args -contains 'start') { $script:Started = $true }
+    }
+    Invoke-Start | Out-Null
+    if ($script:Built -ne ($scenario -eq 'fresh')) { throw "Wrong initial installation: $scenario" }
+    if ($script:Started -ne ($scenario -eq 'existing')) { throw "Wrong existing start: $scenario" }
+}
+Write-Host "PASS: setup regressions, fresh installation, settings preservation and PowerShell syntax"

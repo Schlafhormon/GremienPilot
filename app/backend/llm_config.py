@@ -10,6 +10,7 @@ from functools import wraps
 from dataclasses import asdict, dataclass, field
 from urllib.parse import urlparse
 import httpx
+from llm_assets import bundled_tokenizer
 
 LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DOCKER_OLLAMA_BASE_URL = "http://ollama:11434/v1"
@@ -228,20 +229,28 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
     effort = os.environ.get(effort_key, '').strip().lower() or ('none' if mode == 'fast' else 'medium')
     if effort not in {'none', 'low', 'medium', 'high', 'max'}:
         raise ModelConfigurationError(f'Invalid {effort_key}')
-    def optional(name, *, integer=False, minimum=0):
-        return _number(name, 0, integer=integer, minimum=minimum) if os.environ.get(name, '').strip() else None
+    effective_model = model if model else os.environ.get('LLM_MODEL', '').strip() or 'qwen3.5:9b'
+    qwen_default = provider == 'ollama' and effective_model == 'qwen3.5:9b'
+    tokenizer_path = os.environ.get('LLM_TOKENIZER_PATH', '').strip()
+    tokenizer_model = os.environ.get('LLM_TOKENIZER_MODEL', '').strip()
+    if not tokenizer_path and not tokenizer_model and qwen_default:
+        tokenizer_path = bundled_tokenizer(effective_model)
+        tokenizer_model = effective_model if tokenizer_path else ''
+    def optional(name, *, integer=False, minimum=0, default=None):
+        return _number(name, 0, integer=integer, minimum=minimum) if os.environ.get(name, '').strip() else default
     return LLMConfig(
         base_url=base, base_url_source=source, provider=provider,
-        model=model if model else os.environ.get('LLM_MODEL', 'gemma4:31b-it-q4_K_M'),
+        model=effective_model,
         model_source='request' if model else 'environment',
         ollama_endpoint=not os.environ.get("LLM_PROVIDER", "").strip() and _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS,
         api_key=os.environ.get('LLM_API_KEY', 'ollama'),
         reasoning_effort=effort, processing_mode=mode,
         context_tokens=_number('LLM_CONTEXT_TOKENS', 131072, integer=True, minimum=4096),
         output_tokens=optional('LLM_OUTPUT_TOKENS', integer=True, minimum=1),
-        thinking_tokens=0 if effort == 'none' else _number('LLM_THINKING_TOKENS', 0, integer=True),
-        temperature=optional('LLM_TEMPERATURE'), top_p=optional('LLM_TOP_P'),
-        top_k=optional('LLM_TOP_K', integer=True, minimum=1), seed=optional('LLM_SEED', integer=True),
+        thinking_tokens=0 if effort == 'none' else _number('LLM_THINKING_TOKENS', 4096 if provider == 'ollama' else 0, integer=True),
+        temperature=optional('LLM_TEMPERATURE', default=1.0 if qwen_default else None),
+        top_p=optional('LLM_TOP_P', default=0.95 if qwen_default else None),
+        top_k=optional('LLM_TOP_K', integer=True, minimum=1, default=20 if qwen_default else None), seed=optional('LLM_SEED', integer=True),
         cpu_threads=optional('LLM_CPU_THREADS', integer=True, minimum=1),
         gpu_layers=optional('LLM_GPU_LAYERS', integer=True),
         keep_alive=os.environ.get('LLM_KEEP_ALIVE') or os.environ.get('OLLAMA_KEEP_ALIVE', '5m'),
@@ -251,9 +260,9 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
         total_seconds=_number('LLM_TOTAL_TIMEOUT_SECONDS', 0),
         max_retries=_number('LLM_MAX_RETRIES', 2, integer=True),
         retry_backoff_seconds=_number('LLM_RETRY_BACKOFF_SECONDS', 0.5),
-        image_tokens=_number('LLM_IMAGE_TOKENS', 0, integer=True),
-        tokenizer_path=os.environ.get('LLM_TOKENIZER_PATH', ''),
-        tokenizer_model=os.environ.get('LLM_TOKENIZER_MODEL', ''),
+        image_tokens=_number('LLM_IMAGE_TOKENS', 17408 if qwen_default else 0, integer=True),
+        tokenizer_path=tokenizer_path,
+        tokenizer_model=tokenizer_model,
         model_revision=os.environ.get('LLM_MODEL_REVISION', ''),
         output_parameter=os.environ.get('LLM_OUTPUT_PARAMETER') or 'max_tokens',
     )

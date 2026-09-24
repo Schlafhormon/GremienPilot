@@ -184,7 +184,7 @@ JOB_MAX_COUNT = int(os.environ.get("JOB_MAX_COUNT", "100"))
 DELETE_UPLOADS_ON_JOB_CLEANUP = (
     os.environ.get("DELETE_UPLOADS_ON_JOB_CLEANUP", "false").lower() == "true"
 )
-MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
 UPLOAD_CHUNK_SIZE = int(os.environ.get("UPLOAD_CHUNK_SIZE", str(1024 * 1024)))
 TRANSCRIPTION_CONCURRENCY = int(os.environ.get("TRANSCRIPTION_CONCURRENCY", "1"))
 PIPELINE_CONCURRENCY = int(os.environ.get("PIPELINE_CONCURRENCY", "1"))

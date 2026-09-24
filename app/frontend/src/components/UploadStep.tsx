@@ -374,7 +374,7 @@ export default function UploadStep({
                   Datei hierher ziehen oder klicken zum Auswählen
                 </p>
                 <p className="text-gray-400 text-sm mt-1">
-                  MP3, WAV, M4A (max 500MB)
+                  MP3, WAV, M4A (standardmäßig bis 2 GiB)
                 </p>
               </div>
             )}

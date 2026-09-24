@@ -105,7 +105,7 @@ class Workflow:
         self.client, self.config, self.usage = client, config, usage
         self.system = BASE + '\n' + system
         self.context = context or ''
-        self.output = config.output_budget(positive('SUMMARY_OUTPUT_TOKENS', 4096))
+        self.output = config.output_budget(positive('SUMMARY_OUTPUT_TOKENS', 8192))
         self.reserve = structured_output_budget(config, self.output)
         self.attempts = policy().attempts(positive('SUMMARY_MODEL_ATTEMPTS', 2))
         self.rounds = positive('SUMMARY_RECONCILIATION_ROUNDS', 2)

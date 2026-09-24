@@ -16,6 +16,11 @@ def isolated_llm_transport(monkeypatch, request):
     # Keep boundary/splitting fixtures deterministic; deployment-default tests
     # explicitly remove this override to exercise the production configuration.
     monkeypatch.setenv("LLM_CONTEXT_TOKENS", "16384")
+    # Historical per-line/repair fixtures exercise the still supported legacy
+    # contract. Fresh-install integration tests explicitly clear these settings.
+    monkeypatch.setenv("AGENDA_COMPACT_ASSIGNMENTS", "false")
+    monkeypatch.setenv("AGENDA_OUTPUT_TOKENS", "4096")
+    monkeypatch.setenv("SUMMARY_OUTPUT_TOKENS", "4096")
     monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0")
     monkeypatch.setenv("LLM_MAX_RETRIES", "0")
     monkeypatch.setenv("LLM_MODEL_REVISION", "test-revision")

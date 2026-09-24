@@ -3,7 +3,7 @@ kind: Ingress
 metadata:
   name: tops-frontend
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+    nginx.ingress.kubernetes.io/proxy-body-size: "2050m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
 spec:
   ingressClassName: nginx

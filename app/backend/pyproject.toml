@@ -36,6 +36,7 @@ py-modules = [
     "agenda_context",
     "llm_transport",
     "llm_config",
+    "llm_assets",
     "processing_mode",
     "gpu_resources",
     "summary_grounding",

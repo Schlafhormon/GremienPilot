@@ -84,7 +84,7 @@ FAST_NOTES = obj({'narrative': TEXT, 'evidence': dict(EVIDENCE, maxItems=FAST_CO
 
 
 def _positive(name, default, minimum=1):
-    value = int(os.environ.get(name, str(default)))
+    value = int(os.environ.get(name, '').strip() or str(default))
     if value < minimum:
         raise ValueError(f'{name} must be >= {minimum}')
     return value
@@ -103,7 +103,7 @@ class Workflow:
                              timeout=self.config.http_timeout, max_retries=0)
         self.system = BASE + ('\nZusätzlicher Fachkontext:\n' + prompt if prompt else '')
         output = (_positive('AGENDA_FAST_OUTPUT_TOKENS', 8192) if policy().fast
-                  else _positive('AGENDA_OUTPUT_TOKENS', 4096))
+                  else _positive('AGENDA_OUTPUT_TOKENS', 8192))
         if policy().fast and self.config.output_tokens is None:
             # Leave at least half the context for sources, including when native
             # structured thinking reserves twice the generation budget.
@@ -114,8 +114,8 @@ class Workflow:
             output = min(output, available)
         self.output = self.config.output_budget(output)
         self.reserve = structured_output_budget(self.config, self.output)
-        self.per_line = _positive('AGENDA_OUTPUT_TOKENS_PER_LINE', 256)
-        self.compact = policy().fast or os.environ.get('AGENDA_COMPACT_ASSIGNMENTS', 'false').lower() == 'true'
+        self.compact = policy().fast or os.environ.get('AGENDA_COMPACT_ASSIGNMENTS', 'true').lower() == 'true'
+        self.per_line = _positive('AGENDA_OUTPUT_TOKENS_PER_LINE', 40 if self.compact else 256)
         self.depth = 0 if policy().fast else _positive('AGENDA_REPAIR_SPLIT_DEPTH', 3, 0)
         self.retrieval_rounds = _positive('AGENDA_SOURCE_REQUEST_ROUNDS', 2, 0)
         self.attempts = policy().attempts(_positive('AGENDA_MODEL_ATTEMPTS', 2))
@@ -853,7 +853,7 @@ class Workflow:
     def plan(self, context, agenda, reconstruction):
         # Output budget sets initial ownership; context fitting further splits it.
         size = max(1, (self.output - 512) // self.per_line)
-        cap = _positive('AGENDA_DETECTION_CHUNK_LINES', 0, 0)
+        cap = _positive('AGENDA_DETECTION_CHUNK_LINES', 80, 0)
         if cap:
             size = min(size, cap)
         return [(start, min(start+size-1, len(self.rows)-1)) for start in range(0, len(self.rows), size)]

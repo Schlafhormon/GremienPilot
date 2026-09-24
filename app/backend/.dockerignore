@@ -12,6 +12,7 @@ data/
 telemetry_backup/
 .cache/
 tests/
+model_assets/
 *.pyc
 *.pyo
 *.pyd

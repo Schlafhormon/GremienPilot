@@ -44,6 +44,10 @@ RUN uv pip install --system -e .
 # discovery does not treat them as Python packages.
 RUN mkdir -p uploads data
 
+# Public tokenizer only (~13 MB); no Hugging Face token or model weights needed.
+COPY third_party ./third_party
+RUN python llm_assets.py
+
 # Set cache directories inside the container
 ENV HF_HOME=/app/.cache/huggingface
 ENV TORCH_HOME=/app/.cache/torch

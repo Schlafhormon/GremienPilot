@@ -43,9 +43,9 @@ if ($PROTOKOLL_IMAGE_TAG) {
     $BACKEND_GPU_IMAGE = if ($env:BACKEND_GPU_IMAGE) { $env:BACKEND_GPU_IMAGE } else { "${IMAGE_BASE}/backend:gpu-latest" }
 }
 
-$OLLAMA_IMAGE_TAG = if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE_TAG } else { "latest" }
+$OLLAMA_IMAGE_TAG = if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE_TAG } else { "0.34.4" }
 $OLLAMA_IMAGE = if ($env:OLLAMA_IMAGE) { $env:OLLAMA_IMAGE } else { "ollama/ollama:${OLLAMA_IMAGE_TAG}" }
-$OLLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "gemma4:31b-it-q4_K_M" }
+$OLLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "qwen3.5:9b" }
 
 $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
 $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
@@ -82,6 +82,21 @@ function Test-Falsy {
     return $Value -match "^(0|false|no|nein|off)$"
 }
 
+function Initialize-Configuration {
+    $destination = Join-Path $ScriptDir '.env'
+    if (Test-Path -LiteralPath $destination) { return $true }
+    try {
+        Copy-Item -LiteralPath (Join-Path $ScriptDir '.env.example') -Destination $destination -ErrorAction Stop
+        Write-Info ".env mit den Standardwerten fuer lange Sitzungen angelegt."
+        Write-Host "Qwen3.5:9b wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
+        Write-Host "Fuer Audio mit Sprechererkennung ggf. HF_TOKEN in .env setzen (Anleitung in README.md)."
+        return $true
+    } catch {
+        Write-Err ".env konnte nicht angelegt werden: $_"
+        return $false
+    }
+}
+
 $hasLocalDockerfiles = (Test-Path "app\backend\Dockerfile") -and (Test-Path "app\frontend\Dockerfile")
 $explicitApplicationImage =
     $USER_FRONTEND_IMAGE -or $USER_BACKEND_IMAGE -or $USER_BACKEND_GPU_IMAGE -or $PROTOKOLL_IMAGE_TAG
@@ -113,7 +128,7 @@ function Show-Help {
     Write-Host "Verwendung: .\setup.ps1 [BEFEHL]"
     Write-Host ""
     Write-Host "Befehle:"
-    Write-Host "  (ohne)     Vorhandene Container starten"
+    Write-Host "  (ohne)     Starten; bei der ersten Nutzung automatisch installieren"
     Write-Host "  start      Vorhandene Container starten, ohne neu zu bauen"
     Write-Host "  build      Lokale Images neu bauen und Container neu erstellen"
     Write-Host "  stop       Anwendung stoppen, Container bleiben erhalten"
@@ -177,6 +192,10 @@ function Test-VolumeExists {
 
 function Remove-ExistingContainersForRebuild {
     $containers = docker compose ps -a -q 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Compose-Konfiguration konnte nicht gelesen werden. Bitte .env und Docker pruefen."
+        return $false
+    }
     if (-not $containers -or $containers.Count -eq 0) {
         return $true
     }
@@ -895,6 +914,8 @@ function Invoke-Build {
         exit 1
     }
 
+    if (-not (Initialize-Configuration)) { exit 1 }
+
     if (-not (Remove-ExistingContainersForRebuild)) {
         exit 1
     }
@@ -980,13 +1001,14 @@ function Invoke-Start {
     }
 
     $containers = docker compose ps -a -q 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Compose-Konfiguration konnte nicht gelesen werden. Bitte .env und Docker pruefen."
+        return $false
+    }
     if (-not $containers -or $containers.Count -eq 0) {
-        Write-Err "Keine vorhandenen Container gefunden."
-        Write-Host ""
-        Write-Host "Fuehren Sie zuerst aus:"
-        Write-Host "  .\setup.ps1 build"
-        Write-Host ""
-        exit 1
+        Write-Info "Erste Installation: Konfiguration anlegen, Images bauen und Modelle laden."
+        Invoke-Build
+        return
     }
 
     Write-Info "Starte vorhandene Container ohne Neubau..."

@@ -8,7 +8,7 @@ the backend internally works with structured minutes fields.
 Configuration via environment variables:
 - LLM_BASE_URL: API endpoint (local default: http://localhost:11434/v1,
   Docker default: http://ollama:11434/v1)
-- LLM_MODEL: Model name (default: gemma4:31b-it-q4_K_M)
+- LLM_MODEL: Model name (default: qwen3.5:9b)
 - LLM_REASONING_EFFORT: empty for server default, none to disable, or low/medium/high/max
 - LLM_TIMEOUT_SECONDS: request timeout per LLM call (default: 120)
 - LLM_MAX_RETRIES: retry count for transient LLM errors (default: 2)
@@ -32,7 +32,7 @@ from llm_transport import complete, fits, structured_output_budget, ContextBudge
 # Compatibility exports for integrations importing configuration from summarize.
 from llm_config import (LLMConfig, get_llm_config as _get_llm_config,
                         resolve_llm_base_url, is_docker_runtime)
-LLM_MODEL = os.environ.get("LLM_MODEL", "gemma4:31b-it-q4_K_M")
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip() or "qwen3.5:9b"
 LLM_BASE_URL, LLM_BASE_URL_SOURCE = resolve_llm_base_url()
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS") or "120")
