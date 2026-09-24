@@ -142,14 +142,15 @@ def version_snapshot(payload=None):
     if isinstance(refs, str):
         refs = json.loads(refs)
     request = payload.get('request') or refs.get('options') or refs
-    models = {name: get_llm_config(request.get(name)).public_snapshot()
+    mode = request.get('processing_mode', payload.get('processing_mode', 'slow'))
+    models = {name: get_llm_config(request.get(name), processing_mode=mode).public_snapshot()
               for name in ('model', 'agenda_model', 'summary_model') if request.get(name)}
     return {"processing": {"mode": request.get("processing_mode", payload.get("processing_mode", "slow")),
                            "version": processing_version}, "transcription": {
         "code": hashlib.sha256(Path(__file__).with_name('transcribe.py').read_bytes()).hexdigest(),
         "policy": {key: os.environ.get(key) for key in ('WHISPER_MODEL', 'WHISPER_DEVICE',
             'WHISPER_LANGUAGE', 'WHISPER_BATCH_SIZE', 'WHISPER_CPU_THREADS', 'SPEAKER_EMBEDDING_MODEL')}
-    }, "overrides": models, "model": get_llm_config(request.get("model")).public_snapshot(), "policy": {
+    }, "overrides": models, "model": get_llm_config(request.get("model"), processing_mode=mode).public_snapshot(), "policy": {
         key: os.environ.get(key) for key in policy_keys
     }, "code": {
         name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in files}}

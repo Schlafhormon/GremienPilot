@@ -213,7 +213,10 @@ def validate_versions(old, new, *, pdf_contract=False):
         raise ValueError('Model overrides changed')
     for name, before in old.get('overrides', {}).items():
         compare('override:' + name, before, new['overrides'][name], allowed['model'])
-    if new['model']['thinking'] is not False or new['model']['thinking_tokens'] != 0:
+    config = new['model']
+    disabled = (config.get('thinking') is False or
+                (config.get('thinking') is None and config.get('reasoning_effort') == 'none'))
+    if not disabled or config['thinking_tokens'] != 0:
         raise ValueError('This migration requires thinking disabled')
     return changes
 

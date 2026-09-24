@@ -88,3 +88,35 @@ Cache. Konfiguration und Codeversion gehören zum Job- und Cachevertrag.
 
 Technische Vollständigkeit bedeutet vollständige Verarbeitung bzw. Prüfung.
 Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**.
+
+## Kompakter Quellenvertrag ab September 2026
+
+Fast und optional kompaktes Slow verwenden `agenda-end-sources-v3`. Jede
+Zuordnung enthält nur `end_line_id` und die fachlichen Felder `top_ids`,
+`reason`, `evidence`, `uncertain`, `confidence`. Ein Abschnitt gilt ausdrücklich
+für jede noch nicht zugeordnete Zielzeile bis einschließlich seiner Endquelle.
+Die Anwendung berechnet den Anfang aus der Quellenreihenfolge. Endquellen
+müssen im Zielblock liegen und streng aufsteigen; die letzte Endquelle muss
+explizit die letzte Zielzeile sein. Ein fehlendes Ende wird niemals ergänzt.
+Alte widersprüchliche Start-/Endantworten werden nicht in dieses Format repariert.
+
+`response` ist entweder `{kind: "assignments", spans: [...]}` oder
+`{kind: "source_request", source_window_ids: [...]}`. Beide Varianten sind in
+Schema und Validator getrennt. Quellenfenster sind technische Adressen von
+höchstens 80 Originalzeilen, keine Themenabschnitte. Nur Fenster mit noch nicht
+bereitgestellten Originalzeilen werden angeboten. Originale aus dem Zielblock,
+dem vollständigen Kontext und vollständigen Belegzitaten gelten bereits als
+vorhanden. Weitere Abrufe liefern nur fehlende Originale. Doppelte oder unbekannte
+Anforderungen sind Fehler; ein ausgeschöpftes Abrufbudget erzeugt keine neue
+Aufteilung in Modellaufträge.
+
+Fast begrenzt Abschnittsbegründungen auf 240 Zeichen und drei Beleg-IDs. Es
+bleibt bei einem Zuordnungsdurchgang ohne automatische Inhaltsprüfung und ohne
+Reparatur fehlerhafter Antworten. Slow behält unabhängige Prüfung und Klärung.
+Prompts enthalten weniger technische Auditmetadaten; Originaltexte, Belege,
+fachliche Fragen und Widerspruchsstatus bleiben erhalten. Archive bleiben vollständig.
+
+Die öffentliche zeilenweise API und gespeicherte Vorschläge ändern sich nicht.
+Manuelle Zuordnungen, Quellen-IDs und Originalzeiten bleiben unverändert.
+Neue Code-/Promptversionen verwenden neue Checkpoints; bestehende Ergebnisse
+bleiben lesbar und werden nicht automatisch neu interpretiert oder übernommen.

@@ -147,8 +147,8 @@ def _think(config, override=None):
     effort = config.reasoning_effort
     if effort == 'none':
         return False
-    # Gemma has an on/off switch, not named thinking levels.
-    if effort and config.model.lower().startswith('gemma4'):
+    # These families expose on/off, not graded reasoning levels in Ollama.
+    if effort and config.model.lower().startswith(('gemma4', 'qwen3')):
         return True
     return effort
 

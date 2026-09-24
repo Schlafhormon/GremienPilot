@@ -24,14 +24,29 @@ die bestehenden fachlichen Temperaturvorgaben bzw. Providerdefaults.
 [Offizielle Modellbeschreibung](https://ollama.com/library/gemma4),
 [Google-Modellübersicht](https://ai.google.dev/gemma/docs/core).
 
-`LLM_THINKING=true|false` ist der native Ollama-Schalter. Alternativ bleibt
-`LLM_REASONING_EFFORT=none|low|medium|high|max` kompatibel: Gemma erhält daraus
-einen booleschen Schalter, andere Ollama-Modelle ihre benannte Stufe.
-OpenAI-kompatible Server erhalten `reasoning_effort` ausschließlich, wenn
-konfiguriert. Sie müssen die gewählte Stufe unterstützen. Beide Variablen
-zusammen werden abgewiesen. Leere Einstellungen lassen den Provider entscheiden.
-Alle Zusammenfassungs- und Prüfphasen erben jetzt dieselbe zentrale Thinking-Konfiguration; die früheren `LLM_SUMMARY_*_THINK`-Schalter entfallen. Qwen-Steuerzeilen werden aus Systemprompts entfernt. Denktext wird
-weder als Ergebnis interpretiert noch in normale Logs oder Audits geschrieben.
+Die Thinking-Einstellung wird pro Verarbeitungsmodus aufgelöst:
+
+```dotenv
+LLM_FAST_REASONING_EFFORT=
+LLM_SLOW_REASONING_EFFORT=
+```
+
+Leer, nur Leerzeichen oder nicht gesetzt bedeutet **Fast: `none` (aus)** und
+**Slow: `medium` (an)**. Explizit erlaubt sind `none`, `low`, `medium`, `high`,
+`max`. Gemma 4 und Qwen 3/3.5 erhalten einen booleschen Ollama-Schalter: alle
+Stufen außer `none` schalten Thinking ein; sie sind bei diesen Modellen keine
+unterschiedlichen Denkintensitäten. Andere Modelle/Provider müssen die gewählte
+Stufe unterstützen. OpenAI-kompatible Server erhalten `reasoning_effort`.
+
+Die alten globalen Variablen `LLM_THINKING` und `LLM_REASONING_EFFORT` sind für
+Fast-/Slow-Aufgaben abgelöst und beeinflussen auch die leeren Modusdefaults nicht.
+Alle Phasen einer Aufgabe erben den Modus, einschließlich PDF, Agenda und
+Zusammenfassung. Job-Snapshots lösen denselben Modus bereits beim Einreichen auf.
+Die wirksame Konfiguration wird pro Operation eingefroren, protokolliert und in
+Cache-/Checkpoint-Identitäten aufgenommen. Parallele Aufgaben beeinflussen ihre
+Moduseinstellungen nicht. Bei `none` entfällt auch die Thinking-Tokenreserve.
+Qwen-Steuerzeilen werden aus Systemprompts entfernt. Denktext wird nicht als
+Endergebnis interpretiert.
 [Ollama Thinking](https://docs.ollama.com/capabilities/thinking).
 
 `LLM_OUTPUT_TOKENS` überschreibt ausdrücklich die bisherigen aufgabenspezifischen
@@ -129,10 +144,12 @@ Begründung und Originalbelegen aus. Der Server prüft lückenlose, überlappung
 Abdeckung und bildet jeden Abschnitt wieder auf die einzelnen Zeilen ab.
 Die unabhängige Gegenprüfung und die Klärung von Abweichungen bleiben bestehen.
 `AGENDA_OUTPUT_TOKENS_PER_LINE=40` und `AGENDA_DETECTION_CHUNK_LINES=80` sind ein
-möglicher Ausgangspunkt; zu große oder ungültige Antworten werden weiter geteilt.
+möglicher Ausgangspunkt. Fast teilt nur vor der Generierung zu große Eingaben;
+fehlerhafte oder abgeschnittene Modellantworten lösen keine Reparaturaufteilung aus.
+Slow behält seine begrenzten Reparaturversuche.
 Diese Planungswerte garantieren weder eine bestimmte Qualität noch Laufzeit.
-`LLM_THINKING=false` zusammen mit `LLM_THINKING_TOKENS=0` deaktiviert den Denkmodus
-und seine zusätzliche Budgetreservierung für alle neuen Modellaufrufe.
+`LLM_FAST_REASONING_EFFORT=none` bzw. `LLM_SLOW_REASONING_EFFORT=none`
+deaktiviert Thinking und die zusätzliche Reserve im jeweiligen Modus.
 
 Ein bereits gespeicherter Transkript-Checkpoint verhindert bei Wiederanläufen
 eine erneute Audioverarbeitung. Normale Jobs verweigern weiterhin geänderte

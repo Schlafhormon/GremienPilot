@@ -129,7 +129,7 @@ def test_fast_agenda_uses_one_unreviewed_compact_pass(agenda_model, known):
     assert len(result.llm.reconstructions) == 1
     assert all(body['phase'].startswith('fast') for body, _ in agenda_model.calls)
     detail = [request for body, request in agenda_model.calls if body['phase'] == 'fast:detail']
-    assert len(detail) == 1 and 'spans' in detail[0]['response_format']['json_schema']['schema']['properties']
+    assert len(detail) == 1 and 'response' in detail[0]['response_format']['json_schema']['schema']['properties']
     assert result.llm.line_results[0]['grounding']['content_status'] == 'unreviewed'
 
 
@@ -198,14 +198,14 @@ def test_fast_context_budget_preserves_every_source_without_review(agenda_model,
 
 
 @pytest.mark.parametrize('context,thinking,thinking_tokens,expected', [
-    ('16384', '', '0', 4096),
+    ('16384', '', '0', 8192),
     ('16384', 'true', '1024', 3072),
     ('32768', 'false', '0', 8192),
     ('12288', 'false', '0', 6144),
 ])
 def test_fast_native_budget_leaves_room_for_sources(agenda_model, monkeypatch, context, thinking, thinking_tokens, expected):
     monkeypatch.setenv('LLM_PROVIDER', 'ollama')
-    monkeypatch.setenv('LLM_THINKING', thinking)
+    monkeypatch.setenv('LLM_FAST_REASONING_EFFORT', 'high' if thinking == 'true' else 'none')
     monkeypatch.setenv('LLM_THINKING_TOKENS', thinking_tokens)
     monkeypatch.setenv('LLM_CONTEXT_TOKENS', context)
     monkeypatch.setenv('AGENDA_FAST_OUTPUT_TOKENS', '8192')

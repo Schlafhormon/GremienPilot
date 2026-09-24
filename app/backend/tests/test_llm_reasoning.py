@@ -19,31 +19,35 @@ SUMMARY = json.dumps({
 })
 
 
+@pytest.mark.parametrize("mode", ["fast", "slow"])
 @pytest.mark.parametrize("effort", [None, "", "  ", "none", "low", "medium", "high", "max", " HIGH "])
 @pytest.mark.parametrize("task", ["summary", "pdf_tops", "pdf_metadata", "known_agenda", "unknown_agenda"])
-def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, effort, task):
-    if effort is None:
-        monkeypatch.delenv("LLM_REASONING_EFFORT", raising=False)
-    else:
-        monkeypatch.setenv("LLM_REASONING_EFFORT", effort)
-    normalized = (effort or "").strip().lower()
-    if task == "summary":
-        fake_openai_module.content = SummaryModel()
-        summarize.summarize_segment("Haushalt", "MOD: Der Haushalt wurde beraten.")
-    elif task.startswith("pdf"):
-        fake_openai_module.content = json.dumps(agenda())
-        extract = extract_tops.extract_agenda_data_from_text if task == "pdf_metadata" else extract_tops.extract_tops_from_text
-        extract("Einladung: 1. Haushalt", system_prompt="/no_think\nFachlicher Kontext")
-    else:
-        from agenda_fixtures import AgendaModel
-        model = AgendaModel(monkeypatch)
-        transcript = [TranscriptUtterance("MOD", "Ich rufe TOP 1 Haushalt auf.")]
-        if task == "known_agenda":
-            result = agenda_detection.segment_known_agenda(transcript, ["1. Haushalt"], use_llm=True)
+def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, effort, task, mode):
+    from processing_mode import processing_scope
+    key = f"LLM_{mode.upper()}_REASONING_EFFORT"
+    with processing_scope(mode):
+        if effort is None:
+            monkeypatch.delenv(key, raising=False)
         else:
-            result = agenda_detection.detect_agenda_from_transcript(transcript, use_llm=True)
-        assert result.llm.attempted_calls == 8
-        assert result.llm.failed_calls == 0
+            monkeypatch.setenv(key, effort)
+        normalized = (effort or "").strip().lower() or ("none" if mode == "fast" else "medium")
+        if task == "summary":
+            fake_openai_module.content = SummaryModel()
+            summarize.summarize_segment("Haushalt", "MOD: Der Haushalt wurde beraten.")
+        elif task.startswith("pdf"):
+            fake_openai_module.content = json.dumps(agenda())
+            extract = extract_tops.extract_agenda_data_from_text if task == "pdf_metadata" else extract_tops.extract_tops_from_text
+            extract("Einladung: 1. Haushalt", system_prompt="/no_think\nFachlicher Kontext")
+        else:
+            from agenda_fixtures import AgendaModel
+            model = AgendaModel(monkeypatch)
+            transcript = [TranscriptUtterance("MOD", "Ich rufe TOP 1 Haushalt auf.")]
+            if task == "known_agenda":
+                result = agenda_detection.segment_known_agenda(transcript, ["1. Haushalt"], use_llm=True)
+            else:
+                result = agenda_detection.detect_agenda_from_transcript(transcript, use_llm=True)
+            assert result.llm.attempted_calls == (4 if mode == "fast" else 8)
+            assert result.llm.failed_calls == 0
 
     requests = [call for _, call in model.calls] if task.endswith("agenda") else fake_openai_module.instances[0].calls
     for call in requests:
@@ -62,13 +66,13 @@ def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, ef
 
 @pytest.mark.parametrize("effort", ["false", "true", "off", "auto", "minimal", "hihg"])
 def test_invalid_reasoning_setting_is_rejected(monkeypatch, effort):
-    monkeypatch.setenv("LLM_REASONING_EFFORT", effort)
-    with pytest.raises(ValueError, match="LLM_REASONING_EFFORT"):
+    monkeypatch.setenv("LLM_SLOW_REASONING_EFFORT", effort)
+    with pytest.raises(ValueError, match="LLM_SLOW_REASONING_EFFORT"):
         summarize.get_llm_config()
 
 
 def test_reasoning_applies_to_all_summary_reviews(monkeypatch, fake_openai_module):
-    monkeypatch.setenv("LLM_REASONING_EFFORT", "none")
+    monkeypatch.setenv("LLM_SLOW_REASONING_EFFORT", "none")
     model = SummaryModel()
     fake_openai_module.content = model
     summarize.summarize_segment("Haushalt", "A: Beratung.")
@@ -121,7 +125,7 @@ def test_real_sdk_serializes_reasoning_without_network(monkeypatch, effort):
                 'delta': {'content': model(requests[-1]), 'reasoning': 'This is not the final answer.'}}]
         }) + '\n\ndata: [DONE]\n\n')
 
-    monkeypatch.setenv("LLM_REASONING_EFFORT", effort)
+    monkeypatch.setenv("LLM_SLOW_REASONING_EFFORT", effort)
     monkeypatch.setenv("LLM_MODEL", "qwen3.5:9b")
     monkeypatch.setenv("LLM_API_KEY", "test-only")
     monkeypatch.setenv("LLM_BASE_URL", "http://llm.example.test/v1")

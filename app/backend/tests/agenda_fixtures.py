@@ -35,7 +35,7 @@ class AgendaModel:
         elif phase.endswith(':states:v1'):
             data.pop('narrative', None)
             data.pop('episodes', None)
-        if 'spans' in schema['properties'] and 'lines' in data:
+        if 'response' in schema['properties'] and 'lines' in data:
             spans = []
             indices = {r['line_id']: r['index'] for r in body['target_lines']}
             for row in data.pop('lines'):
@@ -45,7 +45,9 @@ class AgendaModel:
                     spans[-1]['end'] = index
                 else:
                     spans.append(dict(start=index, end=index, **{k: v for k, v in row.items() if k != 'line_id'}))
-            data['spans'] = spans
+            rows = {r['index']: r['line_id'] for r in body['target_lines']}
+            data = {'response': {'kind': 'assignments', 'spans': [dict(end_line_id=rows[s['end']],
+                **{k: v for k, v in s.items() if k not in {'start', 'end'}}) for s in spans]}}
         if phase.endswith((':discover', ':trajectory:v1', ':states:v1')):
             data.setdefault('source_ranges', [])
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(data)))])

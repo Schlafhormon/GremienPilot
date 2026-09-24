@@ -97,9 +97,9 @@ def test_larger_shared_context_is_sent_to_and_verified_on_ollama(server, monkeyp
     assert result.llm_provenance['verified_context_tokens'] == 131072
 
 
-@pytest.mark.parametrize('effort, expected', [('', None), ('none', False), ('low', True), ('max', True)])
+@pytest.mark.parametrize('effort, expected', [('', True), ('none', False), ('low', True), ('max', True)])
 def test_native_options_schema_boolean_gemma_thinking(server, monkeypatch, effort, expected):
-    monkeypatch.setenv('LLM_REASONING_EFFORT', effort)
+    monkeypatch.setenv('LLM_SLOW_REASONING_EFFORT', effort)
     monkeypatch.setenv('LLM_CPU_THREADS', '16')
     monkeypatch.setenv('LLM_GPU_LAYERS', '0')
     monkeypatch.setenv('LLM_TOP_K', '64')
@@ -134,7 +134,7 @@ def test_unknown_image_budget_fails_before_network(server):
 
 
 def test_schema_and_two_generation_phases_cannot_overflow(server):
-    config = replace(get_llm_config(), context_tokens=4096, thinking=True)
+    config = replace(get_llm_config(), context_tokens=4096, thinking=True, reasoning_effort=None)
     with pytest.raises(transport.ContextBudgetError):
         call(config, max_tokens=1400, response_format={'type': 'json_schema', 'json_schema': {'schema': {'description': 'x'*1000}}})
     assert not server['calls']
@@ -262,7 +262,7 @@ def test_status_retry_policy(server, status, body, retry):
 
 def test_openai_multimodal_reasoning_schema_and_completion_budget(server, monkeypatch):
     monkeypatch.setenv('LLM_PROVIDER', 'openai-compatible')
-    monkeypatch.setenv('LLM_REASONING_EFFORT', 'high')
+    monkeypatch.setenv('LLM_SLOW_REASONING_EFFORT', 'high')
     monkeypatch.setenv('LLM_OUTPUT_PARAMETER', 'max_completion_tokens')
     monkeypatch.setenv('LLM_THINKING_TOKENS', '200')
     monkeypatch.setenv('LLM_IMAGE_TOKENS', '2048')
@@ -301,7 +301,7 @@ def test_cache_private_versioned_and_configuration_bound(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize('key,value', [('LLM_CONTEXT_TOKENS', '1024'), ('LLM_READ_TIMEOUT_SECONDS', 'nan'),
- ('LLM_TOTAL_TIMEOUT_SECONDS', '-1'), ('LLM_MAX_RETRIES', '2.5'), ('LLM_THINKING', 'low'), ('LLM_TOP_P', '1.1'),
+ ('LLM_TOTAL_TIMEOUT_SECONDS', '-1'), ('LLM_MAX_RETRIES', '2.5'), ('LLM_SLOW_REASONING_EFFORT', 'invalid'), ('LLM_TOP_P', '1.1'),
  ('LLM_PROVIDER', 'typo'), ('LLM_CPU_THREADS', '0'), ('LLM_TEMPERATURE', 'inf')])
 def test_invalid_configuration(key, value, monkeypatch):
     monkeypatch.setenv(key, value)

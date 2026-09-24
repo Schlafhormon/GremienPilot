@@ -11,7 +11,7 @@ import resume_pipeline
 @pytest.fixture
 def interrupted(monkeypatch):
     monkeypatch.setenv('LLM_PROVIDER', 'ollama')
-    monkeypatch.setenv('LLM_THINKING', 'false')
+    monkeypatch.setenv('LLM_SLOW_REASONING_EFFORT', 'none')
     monkeypatch.setenv('LLM_THINKING_TOKENS', '0')
     session = persistence.save_session('original', {'tops': [], 'transcript': []})
     with persistence.connect() as db:

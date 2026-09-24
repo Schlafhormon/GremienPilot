@@ -154,7 +154,7 @@ def test_draft_checkpoint_and_attempts_are_not_completed_steps():
 
 def test_last_delta_age_advances_after_failure(monkeypatch):
     monkeypatch.setattr(durable.time, 'time', lambda: 130)
-    result = durable.public(dict(state='failed', progress=dict(last_delta_at=100,silence_seconds=0)))
+    result = durable.public(dict(kind='agenda', state='failed', progress=dict(last_delta_at=100,silence_seconds=0)))
     assert result['progress']['silence_seconds'] == 30
 
 

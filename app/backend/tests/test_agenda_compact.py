@@ -68,12 +68,12 @@ def test_compact_failed_large_response_splits_without_losing_lines(agenda_model)
     assert result.llm.processing_complete and result.llm.review_complete
 
 
-def test_compact_requests_original_sources_before_deciding(agenda_model):
+def test_compact_rejects_request_for_already_supplied_sources(agenda_model):
     def retrieve(body):
-        if not body.get('requested_originals'):
-            return dict(source_ranges=[dict(start=0, end=2)], spans=[])
-        return agenda_model.answer(body)
-    agenda_model.overrides['primary:detail'] = retrieve
-    result = run(['Beratung.']*3)
-    assert result.llm.processing_complete and result.llm.review_complete
-    assert any(b.get('requested_originals') for b, _ in agenda_model.calls)
+        assert body['source_windows'] == []
+        return {'response': {'kind': 'source_request', 'source_window_ids': ['W1']}}
+    agenda_model.overrides['fast:detail'] = retrieve
+    result = run(['Beratung.']*3, processing_mode='fast')
+    assert not result.llm.processing_complete
+    assert result.llm.failure_reasons == ['invalid_source_request']
+    assert len([b for b, _ in agenda_model.calls if b['phase'] == 'fast:detail']) == 1

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 ProcessingMode = Literal['fast', 'slow']
-VERSION = 'processing-modes-v1'
+VERSION = 'processing-modes-v2'
 FAST_NOTICE = 'Fast – ohne automatische Inhaltsprüfung. Ungenauere Ergebnisse möglich.'
 
 

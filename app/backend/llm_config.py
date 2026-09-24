@@ -95,6 +95,7 @@ class LLMConfig:
     timeout_seconds: float = 120  # Legacy alias: read/inactivity, never total.
     base_url_source: str = 'configured'
     reasoning_effort: str | None = None
+    processing_mode: str = 'slow'
     provider: str = 'openai-compatible'
     model_source: str = 'environment'
     ollama_endpoint: bool = False
@@ -206,9 +207,13 @@ def configured(function):
     return wrapped
 
 
-def get_llm_config(model=None, *, resolved=None):
+def get_llm_config(model=None, *, resolved=None, processing_mode=None):
+    from processing_mode import policy
+    mode = processing_mode or policy().mode
+    if mode not in {'fast', 'slow'}:
+        raise ModelConfigurationError('Invalid processing_mode')
     active = _CURRENT.get()
-    if active is not None and (not model or model == active.model):
+    if active is not None and active.processing_mode == mode and (not model or model == active.model):
         return active
     base, source = resolved or resolve_llm_base_url()
     provider = os.environ.get('LLM_PROVIDER', '').strip()
@@ -218,9 +223,11 @@ def get_llm_config(model=None, *, resolved=None):
     if not provider:
         provider = ('ollama' if native == 'true' else 'openai-compatible') if native else (
             'ollama' if _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS else 'openai-compatible')
-    think = os.environ.get('LLM_THINKING', '').strip().lower()
-    if think not in {'', 'true', 'false'}:
-        raise ModelConfigurationError('LLM_THINKING must be empty, true or false')
+    # Mode defaults are deliberate, never inherited from legacy global switches.
+    effort_key = 'LLM_FAST_REASONING_EFFORT' if mode == 'fast' else 'LLM_SLOW_REASONING_EFFORT'
+    effort = os.environ.get(effort_key, '').strip().lower() or ('none' if mode == 'fast' else 'medium')
+    if effort not in {'none', 'low', 'medium', 'high', 'max'}:
+        raise ModelConfigurationError(f'Invalid {effort_key}')
     def optional(name, *, integer=False, minimum=0):
         return _number(name, 0, integer=integer, minimum=minimum) if os.environ.get(name, '').strip() else None
     return LLMConfig(
@@ -229,11 +236,10 @@ def get_llm_config(model=None, *, resolved=None):
         model_source='request' if model else 'environment',
         ollama_endpoint=not os.environ.get("LLM_PROVIDER", "").strip() and _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS,
         api_key=os.environ.get('LLM_API_KEY', 'ollama'),
-        reasoning_effort=os.environ.get('LLM_REASONING_EFFORT', '').strip().lower() or None,
-        thinking={'true': True, 'false': False}.get(think),
+        reasoning_effort=effort, processing_mode=mode,
         context_tokens=_number('LLM_CONTEXT_TOKENS', 131072, integer=True, minimum=4096),
         output_tokens=optional('LLM_OUTPUT_TOKENS', integer=True, minimum=1),
-        thinking_tokens=_number('LLM_THINKING_TOKENS', 0, integer=True),
+        thinking_tokens=0 if effort == 'none' else _number('LLM_THINKING_TOKENS', 0, integer=True),
         temperature=optional('LLM_TEMPERATURE'), top_p=optional('LLM_TOP_P'),
         top_k=optional('LLM_TOP_K', integer=True, minimum=1), seed=optional('LLM_SEED', integer=True),
         cpu_threads=optional('LLM_CPU_THREADS', integer=True, minimum=1),
