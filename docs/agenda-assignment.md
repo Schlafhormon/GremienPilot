@@ -130,7 +130,7 @@ einem Aufruf ist nicht darstellbar. Die Statusbewertung liefert `agenda_states_b
 angeforderten TOP-IDs als Pflichtschlüsseln. Der Server erzeugt daraus wieder
 die bisherige `agenda_states`-Liste; er ergänzt keinen fehlenden Status.
 Gemeinsame `$defs` vermeiden wiederholte Feld-/Belegschemata. Die lokalen
-Ollama-Schematests prüfen auch diese Referenzen und optionale Endquellenfelder;
+Ollama-Schematests prüfen auch diese Referenzen und die explizite Wechselliste;
 andere Provider müssen diese JSON-Schema-Funktionen unterstützen.
 
 Der native Grammatikgenerator setzt Pflichtfelder vor optionale Felder. Eine
