@@ -91,7 +91,7 @@ Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**
 
 ## Kompakter Quellenvertrag ab September 2026
 
-Fast und optional kompaktes Slow verwenden `agenda-end-sources-v4`. Jede
+Fast und optional kompaktes Slow verwenden `agenda-end-sources-v5`. Jede
 Zuordnung enthält nur `end_line_id` und die fachlichen Felder `top_ids`,
 `reason`, `evidence`, `uncertain`, `confidence`. Ein Abschnitt gilt ausdrücklich
 für jede noch nicht zugeordnete Zielzeile bis einschließlich seiner Endquelle.

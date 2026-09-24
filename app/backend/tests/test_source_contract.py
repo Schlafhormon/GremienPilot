@@ -1,5 +1,6 @@
 """Synthetic adversarial source contracts, not claims about measured model accuracy."""
 import json
+import re
 from copy import deepcopy
 import pytest
 
@@ -9,6 +10,16 @@ import durable_jobs as durable
 import persistence
 from test_agenda_llm import run
 from test_summary_grounding import generate, question
+
+
+@pytest.mark.parametrize('count', [1,2,9,10,11,99,100,101,999,1000,1774,10000])
+def test_source_alias_grammar_has_exact_decimal_bounds_without_linear_schema(count):
+    catalog = SourceCatalog([{'line_id':str(i), 'text':'Original'} for i in range(count)])
+    schema = catalog.alias_schema()
+    pattern = re.compile(schema['pattern'])
+    assert len(json.dumps(schema)) < 500
+    assert [i for i in range(count*2+2) if pattern.fullmatch(f'L{i}')] == list(range(1,count+1))
+    assert not any(pattern.fullmatch(s) for s in ['L01','L-1','L1x',' L1','L1\n'])
 
 
 def test_short_ids_are_lossless_even_with_repeated_text():

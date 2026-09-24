@@ -31,6 +31,26 @@ class SourceCatalog:
                     'original_sha256': digest(self.rows[identity])}
                     for alias, identity in self.aliases.items()]}
 
+    def alias_schema(self):
+        """Bound native source references without listing the entire transcript.
+
+        Disjoint decimal prefixes cover L1..Ln. Grammar size depends on the
+        number of digits, not rows; authoritative lookup still validates replies.
+        Use only anchored groups, alternatives and digit classes supported by
+        the native JSON-schema grammar converter.
+        """
+        if not self.aliases:
+            raise ValueError('no_original_sources')
+        last = str(len(self.aliases))
+        parts = ['[1-9]' + '[0-9]' * (size-1) for size in range(1, len(last))]
+        for i, digit in enumerate(last):
+            low, high = (1 if i == 0 else 0), int(digit)-1
+            if low <= high:
+                choice = str(low) if low == high else f'[{low}-{high}]'
+                parts.append(last[:i] + choice + '[0-9]' * (len(last)-i-1))
+        parts.append(last)
+        return {'type': 'string', 'pattern': '^L(' + '|'.join(parts) + ')$'}
+
     def translate(self, value, *, decode=False):
         mapping = self.aliases if decode else self.reverse
         keys = {self.id_key, 'start_line_id', 'end_line_id'}

@@ -1,5 +1,6 @@
 """Bounded reconstruction, incomplete drafts and blind reviews with synthetic sources."""
 import json
+import re
 from copy import deepcopy
 
 import pytest
@@ -124,8 +125,34 @@ def test_reconstruction_bounds_anchors_without_restricting_source_access(agenda_
         schema = request['response_format']['json_schema']['schema']['properties']
         entries = schema['episodes' if 'episodes' in schema else 'agenda_states']['items']['properties']
         assert entries['evidence']['maxItems'] == 3
+        if 'episodes' in schema:
+            assert entries['start_line_id'] == work.catalog.alias_schema()
+            assert entries['end_line_id'] == work.catalog.alias_schema()
+            assert body['source_bounds'] == {'count': 2, 'first_line_id': 'L1', 'last_line_id': 'L2'}
         assert 'source_ranges' in schema
         assert body['context']['coverage'] == [0, 1]
+
+
+@pytest.mark.parametrize('start,end', [('L1820','L2100'), ('L3550','L3600')])
+def test_qwen_full_run_hallucinated_episode_sources_are_bounded_and_rejected(agenda_model, start, end):
+    from processing_mode import processing_scope
+    with processing_scope('fast'):
+        work = agenda_llm.Workflow(transcript(['Original']*1774),
+            AgendaLLMUsage(True, 'test'), None, None, None, '')
+        agenda = model_agenda(['1 Haushalt'])
+        def invalid(body):
+            return {'narrative':'Entwurf', 'source_ranges':[], 'episodes':[
+                {'start_line_id':start, 'end_line_id':end, 'top_ids':[agenda[0]['top_id']],
+                 'section':'public', 'reason':'Entwurf', 'evidence':[{'line_id':'L1'}]}]}
+        agenda_model.overrides['fast:reconstruct:trajectory:v1'] = invalid
+        with pytest.raises(agenda_llm.AgendaValidationError, match='invalid_episode_range'):
+            work.reconstruction('fast:reconstruct', {'model_notes':[], 'coverage':[0,1773]}, agenda)
+    assert len(agenda_model.calls) == 1
+    properties = agenda_model.calls[0][1]['response_format']['json_schema']['schema']['properties']['episodes']['items']['properties']
+    for key in ('start_line_id','end_line_id'):
+        pattern = re.compile(properties[key]['pattern'])
+        assert all(pattern.fullmatch(f'L{i}') for i in range(1,1775))
+        assert not pattern.fullmatch(start) and not pattern.fullmatch(end)
 
 
 def test_excessive_episode_anchors_are_rejected_even_if_provider_ignores_schema(agenda_model):
