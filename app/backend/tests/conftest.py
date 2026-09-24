@@ -13,6 +13,9 @@ def isolated_llm_transport(monkeypatch, request):
     # Unit tests must never accidentally contact a local model or reuse private caches.
     monkeypatch.setenv("LLM_OLLAMA_NATIVE", "false")
     monkeypatch.setenv("LLM_MODEL", "qwen3:8b")
+    # Keep boundary/splitting fixtures deterministic; deployment-default tests
+    # explicitly remove this override to exercise the production configuration.
+    monkeypatch.setenv("LLM_CONTEXT_TOKENS", "16384")
     monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0")
     monkeypatch.setenv("LLM_MAX_RETRIES", "0")
     monkeypatch.setenv("LLM_MODEL_REVISION", "test-revision")

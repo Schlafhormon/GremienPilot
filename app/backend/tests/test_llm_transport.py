@@ -84,6 +84,19 @@ def test_budget_counts_utf8_system_user_and_output(monkeypatch):
     assert not transport.fits(messages, 600)
 
 
+@pytest.mark.parametrize('mode', ['fast', 'slow'])
+def test_larger_shared_context_is_sent_to_and_verified_on_ollama(server, monkeypatch, mode):
+    from processing_mode import processing_scope
+    monkeypatch.delenv('LLM_CONTEXT_TOKENS', raising=False)
+    server['actual_context'] = 131072
+    with processing_scope(mode):
+        result = call(messages=[{'role': 'user', 'content': 'x' * 42000}])
+    payload = json.loads(next(r for r in server['calls'] if r.url.path == '/api/chat').content)
+    assert payload['options']['num_ctx'] == 131072
+    assert payload['truncate'] is False and payload['shift'] is False
+    assert result.llm_provenance['verified_context_tokens'] == 131072
+
+
 @pytest.mark.parametrize('effort, expected', [('', None), ('none', False), ('low', True), ('max', True)])
 def test_native_options_schema_boolean_gemma_thinking(server, monkeypatch, effort, expected):
     monkeypatch.setenv('LLM_REASONING_EFFORT', effort)

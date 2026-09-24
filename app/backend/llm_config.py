@@ -98,7 +98,7 @@ class LLMConfig:
     provider: str = 'openai-compatible'
     model_source: str = 'environment'
     ollama_endpoint: bool = False
-    context_tokens: int = 16384
+    context_tokens: int = 131072
     thinking: bool | None = None
     thinking_tokens: int = 0  # Reservation; provider may only expose a combined cap.
     output_tokens: int | None = None
@@ -231,7 +231,7 @@ def get_llm_config(model=None, *, resolved=None):
         api_key=os.environ.get('LLM_API_KEY', 'ollama'),
         reasoning_effort=os.environ.get('LLM_REASONING_EFFORT', '').strip().lower() or None,
         thinking={'true': True, 'false': False}.get(think),
-        context_tokens=_number('LLM_CONTEXT_TOKENS', 16384, integer=True, minimum=4096),
+        context_tokens=_number('LLM_CONTEXT_TOKENS', 131072, integer=True, minimum=4096),
         output_tokens=optional('LLM_OUTPUT_TOKENS', integer=True, minimum=1),
         thinking_tokens=_number('LLM_THINKING_TOKENS', 0, integer=True),
         temperature=optional('LLM_TEMPERATURE'), top_p=optional('LLM_TOP_P'),

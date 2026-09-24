@@ -347,7 +347,7 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `SUMMARY_MODEL_ATTEMPTS` | Versuche für ungültige strukturierte Modellantworten | `2` |
 | `SUMMARY_RECONCILIATION_ROUNDS` | Gezielte Modellklärung, danach konkrete Prüffragen | `2` |
 | `LLM_OLLAMA_NATIVE` | Veraltete Providerwahl; `LLM_PROVIDER` hat Vorrang | leer |
-| `LLM_CONTEXT_TOKENS` | Gemeinsames Eingabe-/Ausgabebudget; wird an Ollama übermittelt | `16384` |
+| `LLM_CONTEXT_TOKENS` | Gemeinsames Eingabe-/Ausgabebudget; wird an Ollama übermittelt | `131072` |
 | `LLM_CPU_THREADS` | Ollama-Inferenzthreads, unabhängig von Whisper; leer: Providerwahl | leer |
 | `LLM_MAX_RETRIES` | Gemeinsame Wiederholungen vorübergehender Transportfehler | `2` |
 | `LLM_CACHE_DIR` | Cache validierter Antworten; enthält vertrauliche Sitzungsdaten, leer deaktiviert | Compose: `/app/data/llm-cache` |

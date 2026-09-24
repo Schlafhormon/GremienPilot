@@ -1,8 +1,32 @@
 """Keep the versioned configuration surfaces in sync without reading local secrets."""
 from pathlib import Path
 import re
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize('mode', ['fast', 'slow'])
+def test_shared_context_default_reaches_both_modes_and_deployments(monkeypatch, mode):
+    from llm_config import get_llm_config
+    from processing_mode import processing_scope
+    monkeypatch.delenv('LLM_CONTEXT_TOKENS', raising=False)
+    with processing_scope(mode):
+        assert get_llm_config().context_tokens == 131072
+    name, default = 'LLM_CONTEXT_TOKENS', '131072'
+    for path in ['.env.example', 'app/backend/.env.example']:
+        assert f'{name}={default}' in (ROOT / path).read_text()
+    assert f'{name}=${{{name}:-{default}}}' in (ROOT / 'docker-compose.yml').read_text()
+    assert f'{name}: "{default}"' in (ROOT / 'k8s/backend/configmap.yaml').read_text()
+
+
+@pytest.mark.parametrize('mode', ['fast', 'slow'])
+def test_local_context_override_is_respected_in_both_modes(monkeypatch, mode):
+    from llm_config import get_llm_config
+    from processing_mode import processing_scope
+    monkeypatch.setenv('LLM_CONTEXT_TOKENS', '65536')
+    with processing_scope(mode):
+        assert get_llm_config().context_tokens == 65536
 
 
 def test_central_settings_reach_compose_examples_and_kubernetes():

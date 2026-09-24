@@ -50,7 +50,15 @@ als unvollständig. Der Transport repariert keine fachlichen Inhalte.
 ## Kontext, Bilder und Identität
 
 `LLM_CONTEXT_TOKENS` umfasst System-/Nutzertexte, Chat-Template-Reserve,
-Bildreservierungen, JSON-Schema und sämtliche Generierungsphasen. Native Anfragen
+Bildreservierungen, JSON-Schema und sämtliche Generierungsphasen. Der Standard
+beträgt **131072 Tokens** und gilt gemeinsam für **Fast und Slow**. Auch lokale
+`.env`-Dateien müssen auf diesen Wert angepasst werden, da bestehende Werte die
+Deployment-Defaults überschreiben. Das größere Fenster gibt TOP-Liste,
+Verlaufsnotizen und Rekonstruktionen einschließlich der Slow-Vergleiche mehr
+Platz; die Ausgabelimits und die Anzahl der Inhaltsprüfungen ändern sich nicht.
+Modell und Server müssen diese Kontextgröße unterstützen. Der größere
+Kontext kann mehr Arbeitsspeicher beziehungsweise VRAM beanspruchen.
+Native Anfragen
 setzen `num_ctx`, `truncate=false`, `shift=false`. Vor der Generierung werden
 Modellgrenze und Fähigkeiten aus `/api/show` geprüft; anschließend werden Kontext
 und Digest des geladenen Runners aus `/api/ps` kontrolliert. Ein zu kleiner oder
