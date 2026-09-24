@@ -64,7 +64,9 @@ class AgendaModel:
                     else:
                         data['agenda_states_by_id'] = {s['top_id']:{k:v for k,v in s.items() if k!='top_id'} for s in states}
                 if ranges:
-                    response = {'kind':'source_request','source_ranges':ranges}
+                    windows = [w['window_id'] for w in body['source_windows'] if any(
+                        int(w['start_line_id'][1:])-1 <= r['end'] and int(w['end_line_id'][1:])-1 >= r['start'] for r in ranges)]
+                    response = {'kind':'source_request','source_window_ids':windows}
                     if any(isinstance(v,(list,dict)) and v for v in data.values()): response['result']=data
                 else:
                     response = {'kind':'result','result':data}

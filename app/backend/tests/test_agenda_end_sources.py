@@ -146,6 +146,35 @@ def test_retrieval_limit_is_not_a_context_error_and_repeat_requests_fail():
         work.compact_details('detail', {}, [{'top_id':'top'}], {}, 0,79)
 
 
+@pytest.mark.parametrize('preparation',[False,True])
+def test_source_requests_are_bounded_windows_not_the_whole_transcript(preparation):
+    request={'response':{'kind':'source_request','source_window_ids':['W2','W3','W4']}}
+    result={'response':{'kind':'result','result':{'items':[]}}} if preparation else answer(decision('L80'))
+    work,calls=workflow([request,result],n=1774)
+    if preparation:
+        work.source_call('discover','',{'original':work.rows[:80]},
+            {'type':'object','properties':{'items':{'type':'array','items':{'type':'string'}}},'required':['items']},lambda data:None)
+    else:
+        work.compact_details('detail',{},[{'top_id':'top'}],{},0,79)
+    assert len(calls[1][0]['requested_originals'])==240
+    options=calls[0][1]['properties']['response']['anyOf'][1]['properties']
+    assert set(options)=={'kind','source_window_ids'}
+    assert options['source_window_ids']['maxItems']==3
+    assert not {'W1','W2','W3','W4'} & {w['window_id'] for w in calls[1][0]['source_windows']}
+
+
+@pytest.mark.parametrize('response',[
+    {'kind':'source_request','source_ranges':[{'start':0,'end':1773}]},
+    {'kind':'source_request','source_window_ids':['W1','W2','W3','W4']},
+    {'kind':'source_request','source_window_ids':['W1','W1']},
+])
+def test_actual_full_transcript_request_and_excessive_windows_are_rejected(response):
+    work,calls=workflow([{'response':response}],n=1774)
+    with pytest.raises(AgendaValidationError):
+        work.source_call('states','',{}, {'type':'object','properties':{}},lambda data:None)
+    assert len(calls)==1
+
+
 def test_fast_incomplete_generation_has_no_hidden_split_repairs(agenda_model):
     agenda_model.overrides['fast:detail'] = IncompleteResponseError('length')
     result = run(['Beratung']*3, processing_mode='fast')

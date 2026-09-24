@@ -240,7 +240,9 @@ def test_discovery_request_distinguishes_additions_from_full_inventory(agenda_mo
         assert result.tops == ['1 Haushalt']
 
 
-def test_reconstruction_can_request_original_sources(agenda_model):
+def test_reconstruction_can_request_original_sources(agenda_model,monkeypatch):
+    monkeypatch.setattr(agenda_llm.Workflow,'context',lambda self,*args:
+        {'model_notes':[{'evidence':[{'line_id':self.rows[0]['line_id'],'quote':'Beratung'}]}], 'coverage':[0,0]})
     def reconstruct(body):
         if 'requested_originals' not in body:
             return {'source_ranges': [{'start': 0, 'end': 0}], 'narrative': 'Originalbeleg benötigt', 'episodes': [], 'agenda_states': []}

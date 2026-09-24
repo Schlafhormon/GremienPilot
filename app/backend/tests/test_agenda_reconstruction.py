@@ -141,6 +141,7 @@ def test_truncated_json_never_becomes_a_state_or_success(agenda_model, monkeypat
 
 def test_joint_and_resumed_episodes_survive_grouping_with_original_access(agenda_model):
     work, agenda, context = workflow()
+    context = {'model_notes':[{'evidence':[{'line_id':work.rows[0]['line_id'],'quote':'Gemeinsam'}]}], 'coverage':[0,1]}
     def trajectory(body):
         result = agenda_model.answer(body)
         result['episodes'][0]['top_ids'] = ['agenda:0', 'agenda:8']
@@ -181,7 +182,7 @@ def test_reconstruction_bounds_anchors_without_restricting_source_access(agenda_
             assert not schema['agenda_states_by_id']['additionalProperties']
             assert 'top_id' not in entries
         assert 'source_ranges' not in schema
-        assert set(variants[1]['properties']) == {'kind','source_ranges'}
+        assert len(variants)==1  # All originals already supplied: no redundant retrieval.
         assert body['context']['coverage'] == [0, 1]
 
 

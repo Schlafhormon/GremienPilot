@@ -91,7 +91,7 @@ Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**
 
 ## Kompakter Quellenvertrag ab September 2026
 
-Fast und optional kompaktes Slow verwenden `agenda-end-sources-v7`. Das Objekt
+Fast und optional kompaktes Slow verwenden `agenda-end-sources-v8`. Das Objekt
 `spans_by_end` verwendet die Endquellen-IDs als eindeutige Schlüssel; jeder Wert
 enthält `top_ids`, `reason`, `evidence`, `uncertain`, `confidence`. Die letzte
 Zielquelle ist ein Pflichtschlüssel und benötigt eine ausdrückliche Entscheidung.
@@ -122,9 +122,11 @@ fachliche Fragen und Widerspruchsstatus bleiben erhalten. Archive bleiben vollst
 
 Auch die Vorbereitungsphasen trennen Ergebnis und Quellenanforderung als
 `response={kind: "result", result: {...}}` beziehungsweise
-`response={kind: "source_request", source_ranges: [...]}`. Dort bleiben die
-technischen Abrufbereiche nullbasiert und durch die vorhandene Quellenzahl
-begrenzt. Die Statusbewertung liefert `agenda_states_by_id` mit genau den
+`response={kind: "source_request", source_window_ids: [...]}`. Vorbereitung und
+kompakte Details erlauben höchstens drei Fenster mit je höchstens 80 Zeilen pro
+Abruf. Nur Fenster mit fehlenden Originalen werden angeboten; bereits gelieferte
+Zeilen werden nicht dupliziert. Ein erneuter Abruf des gesamten Transkripts in
+einem Aufruf ist nicht darstellbar. Die Statusbewertung liefert `agenda_states_by_id` mit genau den
 angeforderten TOP-IDs als Pflichtschlüsseln. Der Server erzeugt daraus wieder
 die bisherige `agenda_states`-Liste; er ergänzt keinen fehlenden Status.
 Gemeinsame `$defs` vermeiden wiederholte Feld-/Belegschemata. Die lokalen
