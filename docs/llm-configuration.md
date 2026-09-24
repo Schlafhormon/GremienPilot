@@ -1,6 +1,6 @@
 # Modell- und Transportvertrag
 
-Stand der Prüfung: 22. September 2026. Neue Installationen verwenden den
+Stand der Prüfung: 24. September 2026. Neue Installationen verwenden den
 Qualitätskandidaten `gemma4:31b-it-q4_K_M`; explizite Modellnamen, einschließlich
 Browser-/API-Überschreibungen, bleiben unverändert. Die Quantisierung muss zum
 Speicher des Betreibers passen. Es gibt keinen automatischen Modellwechsel,
@@ -200,6 +200,7 @@ Die lokale CPU-Auswahl und gemessene Ressourcen gehören ausschließlich in die
 unversionierte `.env`. Vor einer späteren Aktivierung sind ein kontrollierter
 Ladeversuch, die tatsächliche KV-/RSS-Belegung, Durchsatz, Bildtokenisierung und
 fachliche Qualität zu prüfen. Modellgewichte allein belegen keinen passenden
-Kontext. Änderungen dieser Arbeit starten keine Dienste und laden kein Modell.
+Kontext. Die lokale Qwen-Umstellung und ihre Messungen stehen im
+[Verifikationsbericht vom 24. September](mode-pipeline-validation-2026-09-24.md).
 
 Die verpflichtende Quellenprüfung, Offline-Bewertung und Grenzen sehr großer Notizinventare sind in [quality-verification.md](quality-verification.md) beschrieben.
