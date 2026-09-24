@@ -1,4 +1,4 @@
-"""Source endpoint protocol, including sanitized geometry from job 9965f5c7.
+"""Initial decision/change protocol and sanitized legacy failures from job 9965f5c7.
 
 Only ranges/diagnostic codes are retained from the private job, never transcript
 content or inferred corrections. Scripted answers do not establish model quality.
@@ -15,14 +15,16 @@ from llm_transport import IncompleteResponseError
 from test_agenda_llm import run
 
 
-def decision(end, **kwargs):
-    return dict(end_line_id=end, top_ids=['top'], reason='Beratung',
+def decision(start, **kwargs):
+    return dict(start_line_id=start, top_ids=['top'], reason='Beratung',
                 evidence=[{'line_id': 'L1'}], uncertain=False, confidence=0.8, **kwargs)
 
 
 def answer(*spans):
-    return {'response': {'kind': 'assignments', 'spans_by_end': {
-        s['end_line_id']: {k:v for k,v in s.items() if k!='end_line_id'} for s in spans}}}
+    result={'kind':'assignments','changes':[dict(start_line_id=s['start_line_id'],
+        assignment={k:v for k,v in s.items() if k!='start_line_id'}) for s in spans[1:]]}
+    if spans: result['initial']={k:v for k,v in spans[0].items() if k!='start_line_id'}
+    return {'response':result}
 
 
 def workflow(responses, n=160):
@@ -49,45 +51,54 @@ def workflow(responses, n=160):
 
 
 @pytest.mark.parametrize('start,end', [(0,0), (0,79), (80,159), (1760,1773)])
-def test_exact_endpoints_expand_without_changing_source_identities(start, end):
-    work, calls = workflow([answer(decision(f'L{end+1}'))], n=end+1)
+def test_exact_starts_expand_without_changing_source_identities(start, end):
+    work, calls = workflow([answer(decision(f'L{start+1}'))], n=end+1)
     rows = work.compact_details('fast:detail', {}, [{'top_id':'top'}], {}, start, end)
     assert [r['line_id'] for r in rows] == [f'id-{i}' for i in range(start, end+1)]
     assert all(r['top_ids'] == ['top'] for r in rows)
     assert len(calls) == 1
 
 
-def test_endpoint_order_is_source_order_not_lexicographic_and_preserves_joint_and_gap():
+def test_start_order_is_source_order_not_lexicographic_and_preserves_joint_and_gap():
     joint = decision('L9'); joint['top_ids'] = ['top','other']
     gap = decision('L10'); gap['top_ids'] = []
-    work, _ = workflow([answer(gap, joint)], n=10)  # Object key order has no semantic meaning.
+    work, _ = workflow([answer(decision('L1'),gap,joint)], n=10)
     rows = work.compact_details('detail', {}, [{'top_id':'top'},{'top_id':'other'}], {}, 0,9)
-    assert [r['top_ids'] for r in rows] == [['top','other']]*9 + [[]]
+    assert [r['top_ids'] for r in rows] == [['top']]*8 + [['top','other'],[]]
 
 
-@pytest.mark.parametrize('ends', [[], ['L2'], ['L4'], ['missing'], [False]])
-def test_unknown_or_missing_final_end_is_not_repaired(ends):
-    work, calls = workflow([answer(*(decision(e) for e in ends))], n=3)
+@pytest.mark.parametrize('ends', [['L1'], ['L4'], ['missing'], [False], ['L2','L2']])
+def test_unknown_first_or_duplicate_change_is_not_repaired(ends):
+    work, calls = workflow([answer(decision('L1'),*(decision(e) for e in ends))], n=3)
     with pytest.raises(AgendaValidationError, match='incomplete_source_coverage'):
         work.compact_details('detail', {}, [{'top_id':'top'}], {}, 0,2)
     assert len(calls) == 1
 
 
-def test_duplicate_endpoint_keys_are_rejected_before_any_assignment_can_be_overwritten():
-    raw = '{"response":{"kind":"assignments","spans_by_end":{"L2":{},"L2":{},"L3":{}}}}'
+def test_duplicate_start_keys_are_rejected_before_any_assignment_can_be_overwritten():
+    raw = '{"response":{"kind":"assignments","initial":{},"initial":{},"changes":[]}}'
     with pytest.raises(AgendaValidationError,match='duplicate_response_key'):
         parse_response(raw)
 
 
-def test_schema_requires_explicit_last_decision_and_reuses_shared_assignment_definition():
-    work,calls=workflow([answer(decision('L80'))],n=80)
+def test_schema_requires_initial_and_explicit_change_list_and_reuses_shared_definition():
+    work,calls=workflow([answer(decision('L1'))],n=80)
     work.compact_details('detail',{},[{'top_id':'top'}],{},0,79)
     schema=calls[0][1]
-    ends=schema['properties']['response']['anyOf'][0]['properties']['spans_by_end']
-    assert ends['required']==['L80'] and not ends['additionalProperties']
-    assert list(ends['properties'])==[f'L{i}' for i in range(1,81)]
-    assert all(v=={'$ref':'#/$defs/assignment'} for v in ends['properties'].values())
+    response=schema['properties']['response']['anyOf'][0]
+    assert response['required']==['kind','initial','changes'] and not response['additionalProperties']
+    assert response['properties']['initial']=={'$ref':'#/$defs/assignment'}
+    changes=response['properties']['changes']
+    assert changes['maxItems']==79
+    assert changes['items']['properties']['start_line_id']['enum']==[f'L{i}' for i in range(2,81)]
+    assert changes['items']['properties']['assignment']=={'$ref':'#/$defs/assignment'}
     assert 'end_line_id' not in schema['$defs']['assignment']['properties']
+
+
+def test_missing_initial_decision_is_not_filled():
+    work,_=workflow([{'response':{'kind':'assignments','changes':[]}}],n=3)
+    with pytest.raises(AgendaValidationError,match='invalid_compact_response'):
+        work.compact_details('detail',{},[{'top_id':'top'}],{},0,2)
 
 
 # All eight coverage failures and seven mixed answers from the reported job.
@@ -124,21 +135,21 @@ def test_mixed_new_variants_and_extra_start_boundaries_fail(kind):
     work, _ = workflow([{'response':{'kind':kind, 'spans':[decision('L80')], 'source_window_ids':['W2']}}])
     with pytest.raises(AgendaValidationError, match='mixed_source_request'):
         work.compact_details('detail', {}, [{'top_id':'top'}], {}, 0,79)
-    work, _ = workflow([answer(decision('L80', start=0))])
+    work, _ = workflow([answer(decision('L1', end=79))])
     with pytest.raises(AgendaValidationError, match='invalid_compact_response'):
         work.compact_details('detail', {}, [{'top_id':'top'}], {}, 0,79)
 
 
 def test_retrieval_offers_only_missing_original_windows_and_deduplicates():
     work, calls = workflow([{'response':{'kind':'source_request','source_window_ids':['W2']}},
-                            answer(decision('L80'))])
+                            answer(decision('L1'))])
     rows = work.compact_details('detail', {}, [{'top_id':'top'}], {}, 0,79)
     assert len(rows) == 80
     assert [w['window_id'] for w in calls[0][0]['source_windows']] == ['W2']
     assert [r['index'] for r in calls[1][0]['requested_originals']] == list(range(80,160))
     assert calls[1][0]['source_windows'] == []
     variants = calls[0][1]['properties']['response']['anyOf']
-    assert set(variants[0]['properties']) == {'kind','spans_by_end'}
+    assert set(variants[0]['properties']) == {'kind','initial','changes'}
     assert set(variants[1]['properties']) == {'kind','source_window_ids'}
 
 
@@ -155,7 +166,7 @@ def test_retrieval_limit_is_not_a_context_error_and_repeat_requests_fail():
 @pytest.mark.parametrize('preparation',[False,True])
 def test_source_requests_are_bounded_windows_not_the_whole_transcript(preparation):
     request={'response':{'kind':'source_request','source_window_ids':['W2','W3','W4']}}
-    result={'response':{'kind':'result','result':{'items':[]}}} if preparation else answer(decision('L80'))
+    result={'response':{'kind':'result','result':{'items':[]}}} if preparation else answer(decision('L1'))
     work,calls=workflow([request,result],n=1774)
     if preparation:
         work.source_call('discover','',{'original':work.rows[:80]},
@@ -214,3 +225,15 @@ def test_prompt_projection_preserves_sources_and_questions_without_mutating_arch
     assert projected['note']['grounding']=={'content_status':'contradicted','questions':['Wurde abgelehnt?']}
     assert projected['note']['evidence'][0]['line_id']=='L1'
     assert 'source_ranges' not in projected['note']
+
+
+def test_id_based_prompts_do_not_expose_competing_zero_based_indices():
+    work,_=workflow([],n=3)
+    body={'target_lines':work.rows,'target_start':0,'target_end':2,'source_windows':[]}
+    before=deepcopy(body)
+    projected=json.loads(work.messages('detail','',body)[1]['content'])
+    assert 'target_start' not in projected and 'target_end' not in projected
+    assert all('index' not in row for row in projected['target_lines'])
+    assert [row['line_id'] for row in projected['target_lines']]==['L1','L2','L3']
+    assert [row['text'] for row in projected['target_lines']]==[row['text'] for row in work.rows]
+    assert body==before

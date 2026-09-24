@@ -121,7 +121,7 @@ def test_preparation_result_and_source_request_are_disjoint_even_if_provider_ign
     assert len(agenda_model.calls)==1
 
 
-@pytest.mark.parametrize('identity',['evidence','grounding','source_ranges','uncertain','agenda_states_by_id','spans_by_end'])
+@pytest.mark.parametrize('identity',['evidence','grounding','source_ranges','uncertain','agenda_states_by_id','spans_by_end','spans_by_start'])
 def test_keyed_state_ids_remain_identities_even_when_named_like_metadata(agenda_model,identity):
     result=run(['Beratung.'],tops=['1 Haushalt'],top_ids=[identity],processing_mode='fast')
     assert result.llm.processing_complete

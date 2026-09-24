@@ -91,20 +91,20 @@ Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**
 
 ## Kompakter Quellenvertrag ab September 2026
 
-Fast und optional kompaktes Slow verwenden `agenda-end-sources-v8`. Das Objekt
-`spans_by_end` verwendet die Endquellen-IDs als eindeutige Schlüssel; jeder Wert
-enthält `top_ids`, `reason`, `evidence`, `uncertain`, `confidence`. Die letzte
-Zielquelle ist ein Pflichtschlüssel und benötigt eine ausdrückliche Entscheidung.
-Alle anderen Zielquellen sind optionale Abschnittsenden. Die Anwendung sortiert
-die Schlüssel nach Quellenreihenfolge und berechnet daraus die Anfänge. Ein
-Abschnitt gilt ausdrücklich für jede Zeile nach dem vorherigen Ende bis
-einschließlich seiner Endquelle. Die Reihenfolge der JSON-Objektschlüssel trägt
-keine Bedeutung. Ein fehlender Pflichtschlüssel oder eine unbekannte Endquelle
-wird abgewiesen. Doppelte JSON-Schlüssel werden bereits beim Parsen abgewiesen.
+Fast und optional kompaktes Slow verwenden `agenda-changes-v10`. `initial`
+enthält die ausdrückliche Zuordnung der ersten Zielzeile mit `top_ids`, `reason`,
+`evidence`, `uncertain`, `confidence`. Die verpflichtende Liste `changes` enthält
+für jeden Wechsel `start_line_id` und die neue `assignment` mit denselben Feldern.
+Sie darf nur dann leer bleiben, wenn die Zuordnung im gesamten Block gleich bleibt.
+Die Anwendung sortiert eindeutige Wechsel nach Quellenreihenfolge und berechnet
+die Enden. Eine Entscheidung gilt ausdrücklich bis unmittelbar vor den nächsten
+Wechsel; die letzte bis einschließlich der letzten Zielzeile. Fehlendes `initial`,
+fehlendes `changes`, unbekannte oder doppelte Wechsel-IDs werden abgewiesen.
+Doppelte JSON-Schlüssel werden bereits beim Parsen abgewiesen.
 Alte widersprüchliche Start-/Endantworten werden nicht in dieses Format repariert;
 fehlende Entscheidungen werden niemals ergänzt.
 
-`response` ist entweder `{kind: "assignments", spans_by_end: {...}}` oder
+`response` ist entweder `{kind: "assignments", initial: {...}, changes: [...]}` oder
 `{kind: "source_request", source_window_ids: [...]}`. Beide Varianten sind in
 Schema und Validator getrennt. Quellenfenster sind technische Adressen von
 höchstens 80 Originalzeilen, keine Themenabschnitte. Nur Fenster mit noch nicht
@@ -132,6 +132,14 @@ die bisherige `agenda_states`-Liste; er ergänzt keinen fehlenden Status.
 Gemeinsame `$defs` vermeiden wiederholte Feld-/Belegschemata. Die lokalen
 Ollama-Schematests prüfen auch diese Referenzen und optionale Endquellenfelder;
 andere Provider müssen diese JSON-Schema-Funktionen unterstützen.
+
+Der native Grammatikgenerator setzt Pflichtfelder vor optionale Felder. Eine
+verpflichtende letzte Endquelle ist deshalb ungünstig für eine Vorwärtsaufteilung.
+Objekte mit optionalen End- oder Anfangsschlüsseln führten im lokalen Versuch zu
+groben Zusammenfassungen statt zu den vorhandenen Themenwechseln. Das gewählte
+Format fragt zuerst nach der ersten Zeile und verlangt danach ausdrücklich
+die Wechselliste. Das ist keine Garantie fachlich richtiger Segmentierung.
+[llama.cpp-Grammatikgenerator](https://github.com/ggml-org/llama.cpp/blob/master/common/json-schema-to-grammar.cpp).
 
 Bei knappen Kontextbudgets werden Fenster technisch unterteilt und die Zahl der
 gleichzeitig anforderbaren Fenster reduziert. Dafür werden keine Modellaufrufe

@@ -21,6 +21,13 @@ class AgendaModel:
 
     def complete(self, client, config, **kwargs):
         body = json.loads(kwargs['messages'][1]['content'])
+        # Synthetic labels use positions; production prompts expose only source
+        # IDs. Derive positions in the fixture, never ask the model to emit them.
+        if 'target_lines' in body:
+            for row in body['target_lines']:
+                row.setdefault('index',int(row['line_id'][1:])-1)
+            body.setdefault('target_start',body['target_lines'][0]['index'])
+            body.setdefault('target_end',body['target_lines'][-1]['index'])
         self.calls.append((body, kwargs))
         phase = body['phase']
         if phase in self.overrides:
@@ -50,8 +57,9 @@ class AgendaModel:
                 else:
                     spans.append(dict(start=index, end=index, **{k: v for k, v in row.items() if k != 'line_id'}))
             rows = {r['index']: r['line_id'] for r in body['target_lines']}
-            data = {'response': {'kind': 'assignments', 'spans_by_end': {rows[s['end']]:
-                {k: v for k, v in s.items() if k not in {'start', 'end'}} for s in spans}}}
+            data = {'response': {'kind': 'assignments','changes':[
+                dict(start_line_id=rows[s['start']],assignment={k:v for k,v in s.items() if k not in {'start','end'}}) for s in spans[1:]]}}
+            if spans: data['response']['initial']={k:v for k,v in spans[0].items() if k not in {'start','end'}}
         if phase.endswith((':discover', ':trajectory:v1', ':states:v1')):
             if 'response' not in data:
                 ranges = data.pop('source_ranges', [])
