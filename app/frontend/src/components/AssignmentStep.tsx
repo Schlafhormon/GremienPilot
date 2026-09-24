@@ -6,6 +6,7 @@ import type {
   TopColor,
 } from '../types';
 import AudioPlayer from './AudioPlayer';
+import ModelJobStatus from './ModelJobStatus';
 import { useAudioSync } from '../hooks/useAudioSync';
 import SpeakerNameEditor from './SpeakerNameEditor';
 import { mergedTiming } from '../transcriptTiming';
@@ -45,7 +46,15 @@ export default function AssignmentStep({
   isDetectingAgenda = false,
   onDetectAgenda,
   onCancelAgenda,
-  agendaJobPhase,
+  agendaJob,
+  pdfJob,
+  isExtractingPdf = false,
+  canExtractPdf = false,
+  pdfExtractionError,
+  onExtractPdf,
+  onCancelPdf,
+  pdfCandidate,
+  onApplyPdfCandidate,
   onTranscriptStructureChange,
   audioUrl,
   speakerNames,
@@ -564,11 +573,36 @@ export default function AssignmentStep({
           <span className="text-gray-600">{hasSummaries ? 'Entwurf vorbereitet' : 'Entwurf nach Prüfung'}</span>
         </div>
       </div>
-      {isDetectingAgenda && <div className="flex gap-3 items-center">
-        <p role="status" className="text-sm text-blue-700">{agendaJobPhase || 'TOP-Erkennung läuft …'}</p>
-        {onCancelAgenda && <button type="button" onClick={onCancelAgenda}>Erkennung abbrechen</button>}
-      </div>}
-      {agendaDetectionError && <p role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">TOP-Erkennung fehlgeschlagen: {agendaDetectionError}. Manuelle Zuordnung bleibt verfügbar.</p>}
+      <section aria-label="TOP-Verarbeitung" className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-lg border border-gray-200 bg-white p-4">
+          <h3 className="font-medium">1. Tagesordnung aus der Einladung</h3>
+          <p className="my-2 text-sm text-gray-600">Die gespeicherte PDF-Einladung erneut auswerten. Die neue TOP-Liste wird zunächst zur Übernahme angezeigt.</p>
+          <button type="button" onClick={onExtractPdf}
+            disabled={!onExtractPdf || !canExtractPdf || isExtractingPdf || isDetectingAgenda}
+            className="rounded-lg border px-4 py-2 disabled:text-gray-400">TOPs aus PDF neu extrahieren</button>
+          {!canExtractPdf && <p className="mt-2 text-sm text-gray-500">Keine gespeicherte PDF-Einladung verfügbar.</p>}
+          <ModelJobStatus title="PDF-Extraktion" job={pdfJob} busy={isExtractingPdf} error={pdfExtractionError} onCancel={onCancelPdf} />
+        </div>
+        <div className="rounded-lg border border-gray-200 bg-white p-4">
+          <h3 className="font-medium">2. Transkript den TOPs zuordnen</h3>
+          <p className="my-2 text-sm text-gray-600">Mit der aktuellen TOP-Liste neue Zuordnungsvorschläge berechnen. Manuelle Zuordnungen bleiben bis zur Übernahme erhalten.</p>
+          {onDetectAgenda && <button type="button" onClick={() => onDetectAgenda(true)}
+            disabled={isDetectingAgenda || isExtractingPdf || !transcript.length}
+            className="rounded-lg border px-4 py-2 disabled:text-gray-400">TOP-Zuordnung neu berechnen</button>}
+          <ModelJobStatus title="TOP-Zuordnung" job={agendaJob} busy={isDetectingAgenda} error={agendaDetectionError} onCancel={onCancelAgenda} />
+          {!isDetectingAgenda && !agendaDetectionError && agendaJob && ['completed', 'review_required'].includes(agendaJob.state) &&
+            <p className="mt-2 text-sm text-gray-600">Neue Vorschläge stehen unter „Automatisch erkannte Segmente“ zur Übernahme bereit.</p>}
+        </div>
+      </section>
+      {pdfCandidate && <section aria-label="Neue PDF-Tagesordnung" className="rounded-lg border border-blue-200 bg-white p-4">
+        <h3 className="font-medium">Neue PDF-Tagesordnung: {pdfCandidate.tops.length} TOPs</h3>
+        <p className="my-2 text-sm text-gray-600">Übernehmen ersetzt die aktuelle TOP-Liste. Zuordnungen und Zusammenfassungen bleiben für eindeutig unveränderte TOPs erhalten; entfallene oder geänderte TOPs müssen neu zugeordnet und zusammengefasst werden.</p>
+        <details><summary className="cursor-pointer text-blue-700">Extrahierte TOPs anzeigen</summary>
+          <ol className="mt-2 list-decimal space-y-1 pl-6 text-sm">{pdfCandidate.tops.map((title, index) => <li key={index}>{title}</li>)}</ol>
+        </details>
+        <button type="button" onClick={onApplyPdfCandidate} disabled={isDetectingAgenda || isExtractingPdf || !onApplyPdfCandidate}
+          className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-white disabled:opacity-50">TOP-Liste übernehmen</button>
+      </section>}
       {agendaDetectionStale && <p className="rounded border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900">Vorschläge veraltet oder ohne überprüfbaren Quellenstand. Übernehmen gesperrt; bitte erneut berechnen. Bisherige Unsicherheiten bleiben sichtbar, Zeilenangaben beziehen sich auf den alten Stand.</p>}
 
       {/* Progress */}
@@ -928,19 +962,6 @@ export default function AssignmentStep({
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            {onDetectAgenda && <button
-              type="button"
-              onClick={() => onDetectAgenda()}
-              disabled={isDetectingAgenda || !transcript.length}
-              className="px-4 py-2 border rounded-lg disabled:text-gray-400"
-            >{isDetectingAgenda ? 'TOP-Erkennung läuft …' : 'TOP-Erkennung erneut berechnen'}</button>}
-            {onDetectAgenda && <button
-              type="button"
-              onClick={() => onDetectAgenda(true)}
-              disabled={isDetectingAgenda || !transcript.length}
-              className="px-4 py-2 border rounded-lg disabled:text-gray-400"
-              title="Neue Modellantworten verwenden; vorhandene Ergebnisse bleiben im Cache erhalten"
-            >Frische TOP-Berechnung</button>}
             <button
               type="button"
               onClick={applyAllSafeSuggestions}

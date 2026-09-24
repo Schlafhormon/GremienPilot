@@ -158,7 +158,7 @@ describe('AssignmentStep', () => {
     const onDetectAgenda = vi.fn();
     const setAssignments = vi.fn();
     renderAssignmentStep({ onDetectAgenda, setAssignments });
-    await user.click(screen.getByRole('button', { name: 'Frische TOP-Berechnung' }));
+    await user.click(screen.getByRole('button', { name: 'TOP-Zuordnung neu berechnen' }));
     expect(onDetectAgenda).toHaveBeenCalledWith(true);
     expect(setAssignments).not.toHaveBeenCalled();
   });

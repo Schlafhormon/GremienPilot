@@ -26,6 +26,10 @@ import {
   acceptExistingSummary,
   checkBackendHealth,
   detectAgenda,
+  reextractSessionPDF,
+  pollModelJob,
+  pdfResultUsable,
+  type ModelJob,
   saveSession,
   loadSession,
   SessionConflictError,
@@ -379,6 +383,15 @@ export default function App() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfExtraction, setPdfExtraction] = useState<PdfAgendaExtractionResult | null>(null);
+  const [pdfSourceJobId, setPdfSourceJobId] = useState<string | null>(null);
+  const [hasPdfSource, setHasPdfSource] = useState(false);
+  const [pdfJob, setPdfJob] = useState<ModelJob | null>(null);
+  const [pdfCandidate, setPdfCandidate] = useState<PdfAgendaExtractionResult | null>(null);
+  const [pdfExtractionError, setPdfExtractionError] = useState<string | null>(null);
+  const [isExtractingPdf, setIsExtractingPdf] = useState(false);
+  const [restoredPdfJob, setRestoredPdfJob] = useState<ModelJob | null>(null);
+  const pdfAbortRef = useRef<AbortController | null>(null);
+  const pdfRequestRef = useRef(0);
   const [tops, setTops] = useState<string[]>(EMPTY_TOPS);
   const [topIds, setTopIds] = useState<string[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
@@ -388,7 +401,8 @@ export default function App() {
   const agendaDetectionStale = Boolean(agendaProposals) &&
     !proposalsAreValid(agendaProposals, tops, topIds, transcript);
   const [isDetectingAgenda, setIsDetectingAgenda] = useState(false);
-  const [agendaJobPhase, setAgendaJobPhase] = useState('');
+  const [agendaJob, setAgendaJob] = useState<ModelJob | null>(null);
+  const [restoredAgendaJob, setRestoredAgendaJob] = useState<ModelJob | null>(null);
   const agendaRequestRef = useRef(0);
   const agendaAbortRef = useRef<AbortController | null>(null);
   const agendaInputEpochRef = useRef(0);
@@ -397,6 +411,10 @@ export default function App() {
     agendaInputEpochRef.current += 1;
     agendaAbortRef.current?.abort();
   }, [agendaInputKey, route.view, route.sessionId]);
+  useEffect(() => {
+    pdfRequestRef.current += 1;
+    pdfAbortRef.current?.abort();
+  }, [route.view, route.sessionId]);
   const [agendaDetectionError, setAgendaDetectionError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
@@ -530,6 +548,7 @@ export default function App() {
 
   const buildSessionPayload = useCallback(
     (overrides: Partial<SessionSavePayload> = {}): SessionSavePayload => ({
+      pdf_source_job_id: overrides.pdf_source_job_id === undefined ? pdfSourceJobId : overrides.pdf_source_job_id,
       processing_mode: overrides.processing_mode ?? processingMode,
       session_id: overrides.session_id ?? sessionId,
       revision: overrides.revision ?? sessionRevision,
@@ -548,6 +567,7 @@ export default function App() {
       skipped_assignment: overrides.skipped_assignment ?? skippedAssignment,
     }),
     [
+      pdfSourceJobId,
       processingMode,
       agendaProposals,
       assignments,
@@ -598,6 +618,19 @@ export default function App() {
     setTranscript(session.transcript ?? []);
     setAssignments(session.assignments ?? []);
     setAgendaProposals(session.agenda_proposals ?? null);
+    const restored = session as SessionResponse;
+    setPdfSourceJobId(session.pdf_source_job_id ?? null);
+    setHasPdfSource(restored.has_pdf_source ?? Boolean(restored.pdf_extraction?.document));
+    setAgendaJob(restored.latest_agenda_job ?? null);
+    setRestoredAgendaJob(restored.latest_agenda_job && restored.latest_agenda_job.state !== 'cancelled' &&
+      restored.latest_agenda_job.job_id !== session.agenda_proposals?.job_id ? restored.latest_agenda_job : null);
+    setPdfJob(restored.latest_pdf_job ?? null);
+    setRestoredPdfJob(restored.latest_pdf_job && restored.latest_pdf_job.state !== 'cancelled' &&
+      restored.latest_pdf_job.job_id !== session.pdf_source_job_id ? restored.latest_pdf_job : null);
+    pdfRequestRef.current += 1;
+    setIsExtractingPdf(false);
+    setPdfCandidate(null);
+    setPdfExtractionError(null);
     agendaRequestRef.current += 1;
     setIsDetectingAgenda(false);
     setAgendaDetectionError(null);
@@ -704,6 +737,17 @@ export default function App() {
   }, [applySession]);
 
   const resetSession = useCallback(() => {
+    pdfRequestRef.current += 1;
+    pdfAbortRef.current?.abort();
+    setIsExtractingPdf(false);
+    setPdfJob(null);
+    setPdfCandidate(null);
+    setPdfExtractionError(null);
+    setHasPdfSource(false);
+    setPdfSourceJobId(null);
+    setRestoredPdfJob(null);
+    setAgendaJob(null);
+    setRestoredAgendaJob(null);
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
@@ -1273,7 +1317,7 @@ export default function App() {
     }
   };
 
-  const modeLocked = isProcessing || isDetectingAgenda || isGeneratingSummary ||
+  const modeLocked = isProcessing || isDetectingAgenda || isExtractingPdf || isGeneratingSummary ||
     Boolean(pipelineJob && ['pending', 'processing'].includes(pipelineJob.status)) ||
     Boolean(summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status));
   const handleProcessingModeChange = (mode: ProcessingMode) => {
@@ -1418,7 +1462,7 @@ export default function App() {
     setPipelineNotice(null);
   };
 
-  const handleDetectAgenda = async (fresh = false) => {
+  const handleDetectAgenda = useCallback(async (fresh = true, resume?: ModelJob) => {
     agendaAbortRef.current?.abort();
     const controller = new AbortController();
     agendaAbortRef.current = controller;
@@ -1427,15 +1471,25 @@ export default function App() {
     const source = agendaSource(tops, topIds, transcript);
     setIsDetectingAgenda(true);
     setAgendaDetectionError(null);
+    setAgendaJob(resume ?? null);
+    let requestSource = resume?.source;
+    let modelJobId = resume?.job_id;
+    const onStatus = (job: ModelJob) => {
+      if (requestId !== agendaRequestRef.current) return;
+      modelJobId = job.job_id;
+      requestSource = job.source ?? requestSource;
+      setAgendaJob(job);
+    };
     try {
-      const result = await detectAgenda({
+      const result = resume ? await pollModelJob<AgendaDetectionResponse>(resume.job_id, controller.signal, onStatus) : await detectAgenda({
         tops, transcript, model: llmSettings.model, processingMode,
-        fresh, topIds, signal: controller.signal,
-        onStatus: job => setAgendaJobPhase(job.state === 'queued' ? 'Wartet auf Verarbeitung' : job.state === 'retry_wait' ? 'Vorübergehend gestört; erneuter Versuch folgt' : (job.progress?.agenda_phase ?? job.progress?.phase)?.startsWith('independent') ? 'Unabhängige Quellenprüfung läuft …' : (job.progress?.agenda_phase ?? job.progress?.phase)?.startsWith('resolve') ? 'Abweichungen werden geklärt …' : job.progress?.phase === 'loading' ? 'Modell lädt / wartet auf erste Ausgabe' : 'Sitzungsverlauf und Zuordnungen werden ermittelt …'),
+        fresh, topIds, sessionId, signal: controller.signal, onStatus,
         preserveTranscriptStructure: true,
       });
       if (requestId !== agendaRequestRef.current) return;
-      if (inputEpoch !== agendaInputEpochRef.current) {
+      if (inputEpoch !== agendaInputEpochRef.current || (requestSource && (
+        JSON.stringify(agendaSource(requestSource.tops, requestSource.top_ids, requestSource.transcript)) !== JSON.stringify(source) ||
+        requestSource.processing_mode !== processingMode))) {
         setAgendaDetectionError("TOPs oder Transkript wurden während der Erkennung geändert. Bitte erneut berechnen");
         return;
       }
@@ -1448,9 +1502,9 @@ export default function App() {
         const item = result.llm?.provenance?.identities?.find(top => top.top_index === tops.length + offset);
         return item?.top_uid ?? item?.top_id ?? crypto.randomUUID();
       })];
-      const proposals: AgendaProposals = { version: 1, source: { ...source,
+      const proposals: AgendaProposals = { version: 1, job_id: modelJobId, source: { ...source,
         tops: result.tops, top_ids: nextTopIds,
-        pdf_extraction: agendaProposals?.source?.pdf_extraction ?? pdfExtraction }, result };
+        pdf_extraction: pdfExtraction ?? agendaProposals?.source?.pdf_extraction }, result };
       if (!proposalsAreValid(proposals, result.tops, nextTopIds, transcript)) {
         throw new Error("Das Ergebnis passt nicht zum aktuellen Transkript oder zur Tagesordnung");
       }
@@ -1462,12 +1516,55 @@ export default function App() {
       setAgendaProposals(proposals);
     } catch (error) {
       if (requestId === agendaRequestRef.current) {
+        if (error instanceof Error && error.message === 'Verarbeitung abgebrochen') setAgendaJob(job => job ? { ...job, state: 'cancelled' } : null);
         setAgendaDetectionError(error instanceof Error ? error.message : "Erkennung fehlgeschlagen");
       }
     } finally {
       if (requestId === agendaRequestRef.current) setIsDetectingAgenda(false);
     }
-  };
+  }, [tops, topIds, transcript, processingMode, llmSettings.model, sessionId, pdfExtraction, agendaProposals]);
+
+  const handleExtractPdf = useCallback(async (resume?: ModelJob) => {
+    if (!sessionId) return;
+    const controller = new AbortController();
+    pdfAbortRef.current = controller;
+    const requestId = ++pdfRequestRef.current;
+    setPdfJob(resume ?? null);
+    setPdfCandidate(null);
+    setPdfExtractionError(null);
+    setIsExtractingPdf(true);
+    const onStatus = (job: ModelJob) => {
+      if (requestId === pdfRequestRef.current) setPdfJob(job);
+    };
+    try {
+      const result = resume ? await pollModelJob<PdfAgendaExtractionResult>(resume.job_id, controller.signal, onStatus)
+        : await reextractSessionPDF(sessionId, { model: llmSettings.model, processingMode, signal: controller.signal, onStatus });
+      if (requestId !== pdfRequestRef.current) return;
+      if (!pdfResultUsable(result, processingMode) || !result.tops.length) {
+        throw new Error('Die PDF-Extraktion ist unvollständig oder passt nicht zum gewählten Modus. Die bisherige TOP-Liste bleibt erhalten.');
+      }
+      setPdfCandidate(result);
+    } catch (error) {
+      if (requestId === pdfRequestRef.current) {
+        if (error instanceof Error && error.message === 'Verarbeitung abgebrochen') setPdfJob(job => job ? { ...job, state: 'cancelled' } : null);
+        setPdfExtractionError(error instanceof Error ? error.message : 'PDF-Extraktion fehlgeschlagen');
+      }
+    } finally {
+      if (requestId === pdfRequestRef.current) setIsExtractingPdf(false);
+    }
+  }, [sessionId, llmSettings.model, processingMode]);
+
+  useEffect(() => {
+    if (isLoadingRouteSession || !sessionId) return;
+    if (restoredAgendaJob) {
+      setRestoredAgendaJob(null);
+      void handleDetectAgenda(true, restoredAgendaJob);
+    }
+    if (restoredPdfJob) {
+      setRestoredPdfJob(null);
+      void handleExtractPdf(restoredPdfJob);
+    }
+  }, [isLoadingRouteSession, sessionId, restoredAgendaJob, restoredPdfJob, handleDetectAgenda, handleExtractPdf]);
 
   const handleTranscriptStructureChange = () => {
     setAgendaDetectionError(null);
@@ -1509,6 +1606,44 @@ export default function App() {
     setSummaryStates((values) => remap(values));
     setTopIds(nextTopIds);
     setTops(nextTops);
+  };
+
+  const handleApplyPdfCandidate = () => {
+    if (!pdfCandidate || !pdfResultUsable(pdfCandidate, processingMode) || isDetectingAgenda || isExtractingPdf) return;
+    const sourceId = pdfCandidate.document?.job_id ?? pdfJob?.job_id;
+    if (!sourceId) {
+      setPdfExtractionError('Die neue PDF-Auswertung hat keine gespeicherte Quellenreferenz. Bitte erneut extrahieren.');
+      return;
+    }
+    const nextTops = pdfCandidate.tops;
+    const nextIds = nextTops.map(title => {
+      const previous = tops.indexOf(title);
+      return previous >= 0 && tops.lastIndexOf(title) === previous && nextTops.filter(t => t === title).length === 1
+        ? topIds[previous] ?? crypto.randomUUID() : crypto.randomUUID();
+    });
+    setAssignments(current => current.map(index => {
+      const id = index === null ? undefined : topIds[index];
+      const nextIndex = id ? nextIds.indexOf(id) : -1;
+      return nextIndex >= 0 ? nextIndex : null;
+    }));
+    handleTopsChange(nextTops, nextIds);
+    setPdfExtraction(pdfCandidate);
+    setPdfSourceJobId(sourceId);
+    setHasPdfSource(true);
+    setAgendaProposals(null);
+    setAgendaDetectionError(null);
+    setSkippedAssignment(false);
+    setSkipAgendaDetection(false);
+    setDirectProtocolAvailable(false);
+    setPipelineNotice('PDF-Tagesordnung übernommen. Die TOP-Zuordnung kann jetzt separat neu berechnet werden.');
+    const metadata = pdfCandidate.metadata;
+    setExportMetadata(current => ({ ...current,
+      committee: current.committee || metadata.committee || '',
+      location: current.location || metadata.location || '',
+      date: current.date || metadata.date || '',
+      title: current.title && current.title !== 'Sitzungsprotokoll' ? current.title : metadata.title || current.title,
+    }));
+    setPdfCandidate(null);
   };
 
   const handleCancelPipeline = async () => {
@@ -1636,7 +1771,7 @@ export default function App() {
         </div>
       )}
 
-      {!isProcessing && <PdfSources result={agendaProposals?.source?.pdf_extraction ?? pdfExtraction} />}
+      {!isProcessing && <PdfSources result={pdfExtraction ?? agendaProposals?.source?.pdf_extraction} />}
 
       {!isProcessing && <StepIndicator currentStep={currentStep} />}
 
@@ -1721,7 +1856,15 @@ export default function App() {
           isDetectingAgenda={isDetectingAgenda}
           onDetectAgenda={handleDetectAgenda}
           onCancelAgenda={() => agendaAbortRef.current?.abort()}
-          agendaJobPhase={agendaJobPhase}
+          agendaJob={agendaJob}
+          pdfJob={pdfJob}
+          isExtractingPdf={isExtractingPdf}
+          canExtractPdf={hasPdfSource}
+          pdfExtractionError={pdfExtractionError}
+          onExtractPdf={() => void handleExtractPdf()}
+          onCancelPdf={() => pdfAbortRef.current?.abort()}
+          pdfCandidate={pdfCandidate}
+          onApplyPdfCandidate={pdfCandidate && pdfResultUsable(pdfCandidate, processingMode) ? handleApplyPdfCandidate : undefined}
           onTranscriptStructureChange={handleTranscriptStructureChange}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}

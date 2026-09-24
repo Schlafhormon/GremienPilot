@@ -660,6 +660,7 @@ class SummaryJobResponse(BaseModel):
 
 
 class SessionSaveRequest(BaseModel):
+    pdf_source_job_id: Optional[str] = None
     processing_mode: ProcessingMode = "slow"
     agenda_proposals: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
@@ -679,6 +680,10 @@ class SessionSaveRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    pdf_source_job_id: Optional[str] = None
+    has_pdf_source: bool = False
+    latest_pdf_job: Optional[Dict[str, Any]] = None
+    latest_agenda_job: Optional[Dict[str, Any]] = None
     processing_mode: ProcessingMode = "slow"
     agenda_proposals: Optional[Dict[str, Any]] = None
     session_id: str
@@ -950,6 +955,7 @@ class AssignmentSuggestionsRequest(BaseModel):
 
 
 class AgendaDetectionRequest(BaseModel):
+    session_id: Optional[str] = None
     processing_mode: ProcessingMode = "slow"
     fresh: StrictBool = False
     cache_namespace: str = Field(default='', max_length=128)
@@ -1127,6 +1133,32 @@ def build_transcription_job_response(
     )
 
 
+def session_pdf_extraction(session, pipeline=None):
+    if source_id := session.get('pdf_source_job_id'):
+        source = durable.load(source_id)
+        if source and source['kind'] == 'pdf' and source.get('result'):
+            return source['result']
+    return _pipeline_refs(pipeline).get('pdf_extraction') if pipeline else None
+
+
+def session_pdf_document(session, pipeline=None):
+    extraction = session_pdf_extraction(session, pipeline) or {}
+    reference = extraction.get('document') or {}
+    if reference.get('job_id'):
+        source = durable.load(reference['job_id'])
+        document = next((d for d in (source or {}).get('documents', [])
+                         if d['sha256'] == reference.get('sha256') and not d.get('deleted_at')), None)
+        if document:
+            return document
+    # Retain access even if the pipeline failed before producing PDF results.
+    path = _pipeline_refs(pipeline).get('pdf_path') if pipeline else None
+    if path and Path(path).is_file():
+        source = durable.load(pipeline['pipeline_job_id'])
+        return next((d for d in (source or {}).get('documents', [])
+                     if d['path'] == path and not d.get('deleted_at')), None)
+    return None
+
+
 def build_session_response(session: dict[str, Any]) -> SessionResponse:
     job_id = session.get("job_id")
     job = get_job_from_cache_or_db(job_id) if job_id else None
@@ -1152,6 +1184,10 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
             summary_states.setdefault(top_index, fallback_state)
 
     return SessionResponse(
+        pdf_source_job_id=session.get('pdf_source_job_id'),
+        has_pdf_source=bool(session_pdf_document(session, latest_pipeline)),
+        latest_pdf_job=durable.public(work) if (work := durable.latest_for_session(session['session_id'], 'pdf')) else None,
+        latest_agenda_job=durable.public(work) if (work := durable.latest_for_session(session['session_id'], 'agenda')) else None,
         processing_mode=session.get("processing_mode", "slow"),
         session_id=session["session_id"],
         revision=int(session.get("revision") or 1),
@@ -1173,7 +1209,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         audio_url=job_response.audio_url if job_response else None,
         audio_metadata=job_response.audio_metadata if job_response else None,
         job=job_response,
-        pdf_extraction=_pipeline_refs(latest_pipeline).get("pdf_extraction") if latest_pipeline else None,
+        pdf_extraction=session_pdf_extraction(session, latest_pipeline),
         latest_pipeline=(
             build_pipeline_status_response(latest_pipeline)
             if latest_pipeline is not None
@@ -3628,7 +3664,9 @@ def ensure_mode_change_allowed(session_id):
     pipeline = load_latest_pipeline_job_for_session(session_id)
     summary = load_latest_summary_job_for_session(session_id)
     if (pipeline and pipeline.get('status') in {'pending', 'processing'}) or (
-            summary and summary.get('status') in {'pending', 'processing', 'cancelling'}):
+            summary and summary.get('status') in {'pending', 'processing', 'cancelling'}) or any(
+            (work := durable.latest_for_session(session_id, kind)) and work['state'] in durable.ACTIVE
+            for kind in ('pdf', 'agenda')):
         raise HTTPException(409, 'Verarbeitungsmodus kann während einer laufenden Verarbeitung nicht geändert werden')
 
 
@@ -3657,6 +3695,17 @@ def save_session_or_conflict(
         ) from exc
 
 
+def reconcile_pdf_source(request, state, existing, session_id):
+    if 'pdf_source_job_id' not in request.model_fields_set:
+        state['pdf_source_job_id'] = (existing or {}).get('pdf_source_job_id')
+    if (source_id := state.get('pdf_source_job_id')) and source_id != (existing or {}).get('pdf_source_job_id'):
+        source = durable.load(source_id)
+        if (not source or source['kind'] != 'pdf' or source['state'] not in {'completed', 'review_required'}
+                or source['payload'].get('session_id') not in {None, session_id}
+                or not pdf_usable(source.get('result'), state.get('processing_mode', 'slow'))):
+            raise HTTPException(422, 'PDF-Auswertung ist für diese Sitzung noch nicht verwendbar')
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_or_save_session(request: SessionSaveRequest):
     """
@@ -3678,6 +3727,7 @@ async def create_or_save_session(request: SessionSaveRequest):
         state["agenda_proposals"] = session_agenda_proposals(
             existing, load_latest_pipeline_job_for_session(session_id)
         )
+    reconcile_pdf_source(request, state, existing, session_id)
     state = reconcile_session_summaries(existing, state)
     session = save_session_or_conflict(
         session_id,
@@ -3701,6 +3751,7 @@ async def save_existing_session(session_id: str, request: SessionSaveRequest):
         state["agenda_proposals"] = session_agenda_proposals(
             existing, load_latest_pipeline_job_for_session(session_id)
         )
+    reconcile_pdf_source(request, state, existing, session_id)
     state = reconcile_session_summaries(existing, state)
     session = save_session_or_conflict(session_id, state, request.revision)
     return build_session_response(session)
@@ -5018,10 +5069,47 @@ async def cancel_model_job(job_id: str):
     return durable.public(job)
 
 
+class PdfReextractRequest(BaseModel):
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
+    processing_mode: Optional[ProcessingMode] = None
+
+
+def ensure_session_model_job_available(session_id):
+    for kind in ('pdf', 'agenda'):
+        current = durable.latest_for_session(session_id, kind)
+        if current and current['state'] in durable.ACTIVE:
+            raise HTTPException(409, 'Für diese Sitzung läuft bereits eine PDF-Extraktion oder TOP-Zuordnung')
+
+
+@app.post('/api/sessions/{session_id}/pdf-jobs', status_code=202)
+async def restart_session_pdf(session_id: str, request: PdfReextractRequest):
+    session = load_session(session_id)
+    if not session:
+        raise HTTPException(404, 'Session nicht gefunden')
+    ensure_session_model_job_available(session_id)
+    pipeline = load_latest_pipeline_job_for_session(session_id)
+    document = session_pdf_document(session, pipeline)
+    if not document or not Path(document['path']).is_file():
+        raise HTTPException(410, 'Keine gespeicherte PDF-Einladung verfügbar')
+    if durable.document(document['path'])['sha256'] != document['sha256']:
+        raise HTTPException(409, 'Die gespeicherte PDF-Einladung wurde verändert')
+    # A new durable job has separate checkpoints and really extracts the PDF again.
+    job = durable.submit('pdf', {'session_id': session_id, 'path': document['path'],
+        'model': request.model, 'system_prompt': request.system_prompt,
+        'processing_mode': request.processing_mode or session.get('processing_mode', 'slow')},
+        documents=[document])
+    return durable.public(job)
+
+
 @app.post('/api/agenda-detection/jobs', status_code=202)
 async def start_agenda_job(request: AgendaDetectionRequest):
     if not request.transcript:
         raise HTTPException(400, 'Kein Transkript vorhanden')
+    if request.session_id:
+        if not load_session(request.session_id):
+            raise HTTPException(404, 'Session nicht gefunden')
+        ensure_session_model_job_available(request.session_id)
     data = request.model_dump()
     data['transcript'] = [line_to_dict(line) for line in request.transcript]
     from agenda_context import source_rows, model_agenda
@@ -5036,7 +5124,7 @@ async def start_agenda_job(request: AgendaDetectionRequest):
     if request.fresh:
         data['cache_namespace'] = str(uuid.uuid4())
         data['fresh'] = False
-    return durable.public(durable.submit('agenda', {'request': data}))
+    return durable.public(durable.submit('agenda', {'request': data, 'session_id': request.session_id}))
 
 
 @app.post('/api/agenda-detection', response_model=AgendaDetectionResponse)

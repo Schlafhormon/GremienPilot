@@ -151,6 +151,7 @@ export interface PipelineResultResponse {
 }
 
 export interface SessionSavePayload {
+  pdf_source_job_id?: string | null;
   processing_mode?: ProcessingMode;
   agenda_proposals?: AgendaProposals | null;
   session_id?: string | null;
@@ -170,6 +171,9 @@ export interface SessionSavePayload {
 }
 
 export interface SessionResponse extends SessionSavePayload {
+  has_pdf_source?: boolean;
+  latest_pdf_job?: import('./api').ModelJob | null;
+  latest_agenda_job?: import('./api').ModelJob | null;
   pdf_extraction?: PdfAgendaExtractionResult | null;
   session_id: string;
   revision?: number;
@@ -356,6 +360,7 @@ export interface AssignmentSuggestionsResponse {
 }
 
 export interface AgendaDetectionRequest {
+  sessionId?: string | null;
   processingMode?: ProcessingMode;
   signal?: AbortSignal;
   onStatus?: (job: import('./api').ModelJob) => void;
@@ -406,6 +411,7 @@ export interface AgendaDetectionResponse {
 
 // Positional results are usable only against this exact, identity-bound input.
 export interface AgendaProposals {
+  job_id?: string;
   version: 1;
   source: { tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; pdf_extraction?: PdfAgendaExtractionResult | null } | null;
   result: AgendaDetectionResponse;
@@ -502,6 +508,15 @@ export interface ProcessingStepProps {
 }
 
 export interface AssignmentStepProps {
+  agendaJob?: import('./api').ModelJob | null;
+  pdfJob?: import('./api').ModelJob | null;
+  isExtractingPdf?: boolean;
+  canExtractPdf?: boolean;
+  pdfExtractionError?: string | null;
+  onExtractPdf?: () => void;
+  onCancelPdf?: () => void;
+  pdfCandidate?: PdfAgendaExtractionResult | null;
+  onApplyPdfCandidate?: () => void;
   onNext: () => void;
   onBack: () => void;
   tops: string[];
@@ -518,7 +533,6 @@ export interface AssignmentStepProps {
   isDetectingAgenda?: boolean;
   onDetectAgenda?: (fresh?: boolean) => void;
   onCancelAgenda?: () => void;
-  agendaJobPhase?: string;
   onTranscriptStructureChange?: () => void;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;

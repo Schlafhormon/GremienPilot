@@ -15,6 +15,7 @@ import {
   exportProtocol,
   extractAgendaDataFromPDF,
   extractTOPsFromPDF,
+  reextractSessionPDF,
   generateSummary,
   listSpeakerMatchDiagnostics,
   listSpeakerObservations,
@@ -527,12 +528,13 @@ describe('api session client', () => {
     });
   });
 
-  it('does not send oversized legacy agenda-detection requests from the browser', async () => {
-    const fetchMock = vi.fn();
+  it('sends full long meetings to the durable agenda job without the legacy browser limit', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'long-meeting', state: 'queued' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'long-meeting', state: 'completed', result: { tops: [], transcript: [], assignments: [] } }) });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(
-      detectAgenda({
+    await detectAgenda({
         transcript: [
           {
             speaker: 'SPEAKER_00',
@@ -541,10 +543,9 @@ describe('api session client', () => {
             end: 1,
           },
         ],
-      })
-    ).rejects.toThrow(/Browser-Workflow zu groß/i);
-
-    expect(fetchMock).not.toHaveBeenCalled();
+      });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body).transcript[0].text).toBe('Langer Transkripttext '.repeat(7000));
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/model-jobs/long-meeting');
   });
 
   it('does not send oversized legacy summary requests from the browser', async () => {
@@ -810,8 +811,22 @@ describe('durable model jobs', () => {
 
   it('does not return technical partial results as successful', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ state: 'failed', result: { tops: ['partial'] } }) }));
-    await expect(pollModelJob('j')).rejects.toThrow('failed');
+    await expect(pollModelJob('j')).rejects.toThrow('Verarbeitung fehlgeschlagen');
   });
+});
+
+it('reextracts a retained session PDF in Fast mode and polls its own job', async () => {
+  const onStatus = vi.fn();
+  const result = { tops: ['Haushalt'], metadata: {}, processing_mode: 'fast', processing_complete: true, review_status: 'skipped' };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'pdf-new', kind: 'pdf', state: 'queued' }) })
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'pdf-new', kind: 'pdf', state: 'review_required', result }) });
+  vi.stubGlobal('fetch', fetchMock);
+  expect(await reextractSessionPDF('s1', { processingMode: 'fast', onStatus })).toEqual(result);
+  expect(fetchMock.mock.calls[0]![0]).toBe('/api/sessions/s1/pdf-jobs');
+  expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({ processing_mode: 'fast' });
+  expect(fetchMock.mock.calls[1]![0]).toBe('/api/model-jobs/pdf-new');
+  expect(onStatus.mock.calls.map(call => call[0].state)).toEqual(['queued', 'review_required']);
 });
 
 it('rejects enabled PDF detection without uploading or creating a job', async () => {

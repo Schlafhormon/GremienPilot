@@ -2,14 +2,14 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
-import { checkBackendHealth, detectAgenda, loadSession, saveSession } from './api';
+import { checkBackendHealth, detectAgenda, loadSession, saveSession, reextractSessionPDF, pollModelJob } from './api';
 import { agendaSource } from './agendaProposals';
-import type { AgendaDetectionRequest, AgendaDetectionResponse, SessionResponse } from './types';
+import type { AgendaDetectionRequest, AgendaDetectionResponse, SessionResponse, PdfAgendaExtractionResult } from './types';
 
 vi.mock('./api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./api')>(),
   checkBackendHealth: vi.fn(), loadSession: vi.fn(), saveSession: vi.fn(),
-  detectAgenda: vi.fn(), listSpeakerProfiles: vi.fn(async () => []),
+  detectAgenda: vi.fn(), reextractSessionPDF: vi.fn(), pollModelJob: vi.fn(), listSpeakerProfiles: vi.fn(async () => []),
 }));
 
 function detection(input: AgendaDetectionRequest): AgendaDetectionResponse {
@@ -30,6 +30,12 @@ function detection(input: AgendaDetectionRequest): AgendaDetectionResponse {
     })),
   };
 }
+
+const extractedPdf: PdfAgendaExtractionResult = {
+  tops: ['Schulbau', 'Neuer TOP'], metadata: {}, processing_complete: true,
+  processing_mode: 'fast', review_status: 'skipped', review_required: true,
+  document: { job_id: 'pdf-new', sha256: 'pdf-hash', page_count: 2 },
+};
 
 let stored: SessionResponse;
 const draft = () => JSON.parse(localStorage.getItem('active-session-draft')!) as SessionResponse;
@@ -116,7 +122,7 @@ describe('agenda proposals across real editor state transitions', () => {
     await user.click(screen.getByRole('button', { name: 'TOP hinzufügen' }));
     let resolve!: (value: AgendaDetectionResponse) => void;
     vi.mocked(detectAgenda).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
-    await user.click(screen.getByRole('button', { name: 'TOP-Erkennung erneut berechnen' }));
+    await user.click(screen.getByRole('button', { name: 'TOP-Zuordnung neu berechnen' }));
     await user.click(screen.getByText('TOP 1 Haushalt.'));
     expect(assignments()).toEqual([1, 2]);
     const request = vi.mocked(detectAgenda).mock.calls[0]![0];
@@ -158,7 +164,7 @@ describe('agenda proposals across real editor state transitions', () => {
     await screen.findByRole('button', { name: 'Alle übernehmen' });
     let resolve!: (value: AgendaDetectionResponse) => void;
     vi.mocked(detectAgenda).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
-    await user.click(screen.getByRole('button', { name: 'TOP-Erkennung erneut berechnen' }));
+    await user.click(screen.getByRole('button', { name: 'TOP-Zuordnung neu berechnen' }));
     const request = vi.mocked(detectAgenda).mock.calls[0]![0];
     await user.click(screen.getAllByRole('button', { name: 'Bearbeiten' })[0]!);
     await user.clear(screen.getByLabelText('Transkriptzeile 1 korrigieren'));
@@ -182,7 +188,7 @@ describe('agenda proposals across real editor state transitions', () => {
     await user.click(screen.getByText('TOP 1 Haushalt.'));
     const original = draft().agenda_proposals;
     vi.mocked(detectAgenda).mockRejectedValueOnce(new Error('Zeitlimit'));
-    await user.click(screen.getByRole('button', { name: 'TOP-Erkennung erneut berechnen' }));
+    await user.click(screen.getByRole('button', { name: 'TOP-Zuordnung neu berechnen' }));
     await screen.findByText(/Zeitlimit/);
     expect(assignments()).toEqual([null, 1]);
     expect(draft().agenda_proposals).toEqual(original);
@@ -195,7 +201,7 @@ describe('agenda proposals across real editor state transitions', () => {
     await screen.findByRole('button', { name: 'Alle übernehmen' });
     let resolve!: (value: AgendaDetectionResponse) => void;
     vi.mocked(detectAgenda).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
-    await user.click(screen.getByRole('button', { name: 'TOP-Erkennung erneut berechnen' }));
+    await user.click(screen.getByRole('button', { name: 'TOP-Zuordnung neu berechnen' }));
     const request = vi.mocked(detectAgenda).mock.calls[0]![0];
     vi.mocked(loadSession).mockResolvedValueOnce({ ...stored, session_id: 'session-2', agenda_proposals: null });
     act(() => {
@@ -268,6 +274,62 @@ describe('agenda proposals across real editor state transitions', () => {
   });
 });
 
+it('extracts the PDF separately, shows progress and preserves edits until deliberate acceptance', async () => {
+  stored.has_pdf_source = true;
+  stored.processing_mode = 'fast';
+  stored.summaries = { 0: 'Haushaltstext', 1: 'Schulbautext' };
+  let resolve!: (value: PdfAgendaExtractionResult) => void;
+  vi.mocked(reextractSessionPDF).mockImplementationOnce(async (_id, options) => {
+    options.onStatus?.({ job_id: 'pdf-new', kind: 'pdf', state: 'running', progress: { page: 1, total_pages: 2 } });
+    return new Promise(done => { resolve = done; });
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole('button', { name: 'TOPs aus PDF neu extrahieren' }));
+  expect(reextractSessionPDF).toHaveBeenCalledWith('session-1', expect.objectContaining({ processingMode: 'fast' }));
+  expect(screen.getByText('PDF-Seite 1 von 2')).toBeInTheDocument();
+  expect(screen.getByRole('progressbar', { name: 'PDF-Extraktion: Fortschritt' })).not.toHaveAttribute('aria-valuenow');
+  expect(screen.getByRole('button', { name: 'TOP-Zuordnung neu berechnen' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'PDF-Extraktion abbrechen' })).toBeEnabled();
+  await act(async () => resolve(extractedPdf));
+  expect(draft().tops).toEqual(['Haushalt', 'Schulbau']);
+  expect(assignments()).toEqual([0, 1]);
+  expect(detectAgenda).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: 'TOP-Liste übernehmen' }));
+  expect(draft().tops).toEqual(['Schulbau', 'Neuer TOP']);
+  expect(draft().top_ids).toEqual(['top-b', expect.any(String)]);
+  expect(assignments()).toEqual([null, 0]);
+  expect(draft().summaries).toEqual({ 0: 'Schulbautext' });
+  expect(draft().pdf_source_job_id).toBe('pdf-new');
+  expect(draft().agenda_proposals).toBeNull();
+});
+
+it('restores PDF and agenda results after reload without starting new model work', async () => {
+  stored.processing_mode = 'fast';
+  stored.has_pdf_source = true;
+  stored.latest_pdf_job = { job_id: 'pdf-new', kind: 'pdf', state: 'review_required', result: extractedPdf };
+  const result = detection({ tops: stored.tops, transcript: stored.transcript! });
+  stored.latest_agenda_job = { job_id: 'agenda-new', kind: 'agenda', state: 'completed', result,
+    source: { tops: stored.tops, top_ids: stored.top_ids!, transcript: stored.transcript!, processing_mode: 'fast' } };
+  vi.mocked(pollModelJob).mockImplementation(async id => id === 'pdf-new' ? extractedPdf : result);
+  render(<App />);
+  expect(await screen.findByRole('button', { name: 'TOP-Liste übernehmen' })).toBeEnabled();
+  await waitFor(() => expect(draft().agenda_proposals?.job_id).toBe('agenda-new'));
+  expect(pollModelJob).toHaveBeenCalledTimes(2);
+  expect(detectAgenda).not.toHaveBeenCalled();
+  expect(reextractSessionPDF).not.toHaveBeenCalled();
+  expect(assignments()).toEqual([0, 1]);
+});
+
+it('keeps existing TOPs when PDF processing fails and shows the failure', async () => {
+  stored.has_pdf_source = true;
+  vi.mocked(reextractSessionPDF).mockRejectedValueOnce(new Error('PDF-Modell nicht erreichbar'));
+  render(<App />);
+  await userEvent.click(await screen.findByRole('button', { name: 'TOPs aus PDF neu extrahieren' }));
+  expect(await screen.findByText('PDF-Modell nicht erreichbar')).toBeInTheDocument();
+  expect(draft().tops).toEqual(['Haushalt', 'Schulbau']);
+  expect(screen.queryByRole('button', { name: 'TOP-Liste übernehmen' })).not.toBeInTheDocument();
+});
+
 it('appends independently detected points while preserving existing IDs and manual assignments', async () => {
   vi.mocked(detectAgenda).mockImplementation(async input => {
     const result = detection(input);
@@ -279,7 +341,7 @@ it('appends independently detected points while preserving existing IDs and manu
     return result;
   });
   render(<App />);
-  const button = await screen.findByRole('button', { name: 'TOP-Erkennung erneut berechnen' });
+  const button = await screen.findByRole('button', { name: 'TOP-Zuordnung neu berechnen' });
   await userEvent.click(button);
   await waitFor(() => expect(draft().tops).toEqual(['Haushalt', 'Schulbau', 'Zusätzliche Beratung']));
   expect(draft().top_ids).toEqual(['top-a', 'top-b', 'new-top']);

@@ -4,6 +4,30 @@ Die folgenden Prüfabläufe beschreiben **Slow**, den Standardmodus. **Fast** nu
 einen verkürzten Ablauf ohne unabhängige Inhaltsprüfung; Unterschiede und
 Ergebnisstatus stehen unter [Verarbeitungsmodi](processing-modes.md).
 
+## Erneute Verarbeitung im Editor
+
+Zwei getrennte Aktionen verwenden den gewählten Sitzungsmodus:
+
+- **TOPs aus PDF neu extrahieren** wertet die gespeicherte Einladung erneut aus.
+  Die neue Liste erscheint zur Übernahme. Eindeutig unveränderte TOPs behalten
+  dabei ihre IDs, Zuordnungen und Zusammenfassungen.
+- **TOP-Zuordnung neu berechnen** erzeugt frische Zuordnungsvorschläge aus der
+  aktuellen TOP-Liste und dem vollständigen Transkript. Manuelle Zuordnungen
+  bleiben bis zur Übernahme erhalten.
+
+Beide Aktionen haben eigene Statusanzeigen mit Phase, Laufzeit, verfügbarem
+Fortschritt und Abbruch. Aufträge sind an die Sitzung gebunden und werden beim
+erneuten Öffnen wieder angezeigt. Eine unbekannte Restdauer wird nicht als
+geschätzter Prozentwert ausgegeben. Ohne gespeicherte Einladung ist die
+PDF-Aktion deaktiviert. Fast erhält keine zusätzlichen Modellprüfungen.
+
+Die Hintergrundaufträge laufen über `/api/sessions/{session_id}/pdf-jobs`
+und `/api/agenda-detection/jobs`; ihr Status über `/api/model-jobs/{job_id}`.
+Die frühere Browsergrenze für synchrone Modellanfragen gilt nicht für die
+Zuordnung vollständiger Sitzungen über diese Hintergrundverarbeitung.
+
+## Modellablauf
+
 Bekannte Agenden und Erkennung ohne Einladung verwenden denselben Ablauf.
 Zwei getrennte Modellaufrufe ermitteln zuerst belegbare Punkte bzw. zusätzliche
 Punkte einer bekannten Agenda; Unterschiede werden anhand der Quellen

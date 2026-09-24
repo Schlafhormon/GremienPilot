@@ -92,7 +92,18 @@ def public(job):
     if (result.get('progress') or {}).get('last_delta_at') is not None:
         result['progress'] = {**result['progress'], 'silence_seconds':
             max(0, time.time() - result['progress']['last_delta_at'])}
+    if job['kind'] == 'agenda' and job['state'] in TERMINAL and job.get('payload', {}).get('session_id'):
+        request = job['payload']['request']
+        result['source'] = {key: request.get(key) for key in ('tops', 'top_ids', 'transcript', 'processing_mode')}
     return result
+
+
+def latest_for_session(session_id, kind):
+    with persistence.connect() as db:
+        row = db.execute("""SELECT * FROM durable_jobs WHERE kind=?
+            AND json_extract(payload, '$.session_id')=? ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+            (kind, session_id)).fetchone()
+        return _decode(row)
 
 
 def artifact(step, kind, value):

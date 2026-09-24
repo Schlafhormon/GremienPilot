@@ -606,7 +606,10 @@ export interface ModelJob {
   job_id: string;
   kind: string;
   state: 'queued' | 'running' | 'retry_wait' | 'review_required' | 'failed' | 'completed' | 'cancelled' | 'superseded';
-  progress?: { phase?: string; agenda_phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number };
+  created_at?: number;
+  updated_at?: number;
+  progress?: { phase?: string; agenda_phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number; processed_lines?: number; total_lines?: number; model_calls?: number; elapsed_seconds?: number };
+  source?: { tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; processing_mode?: ProcessingMode };
   error?: string | null;
   result?: unknown;
   documents?: { sha256: string; deleted_at?: number | null }[];
@@ -654,7 +657,9 @@ export async function pollModelJob<T>(jobId: string, signal?: AbortSignal,
       if (signal?.aborted) continue;
       if (['completed', 'review_required'].includes(job.state) && job.result != null) return job.result as T;
       if (['failed', 'cancelled', 'superseded', 'review_required'].includes(job.state)) {
-        throw new Error(job.error || `Verarbeitung: ${job.state}`);
+          const result = job.result as { llm?: { failure_reasons?: string[] }; warnings?: string[] } | null;
+          throw new Error(job.error || result?.llm?.failure_reasons?.join(', ') ||
+            (job.state === 'cancelled' ? 'Verarbeitung abgebrochen' : 'Verarbeitung fehlgeschlagen. Bitte erneut starten.'));
       }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -666,7 +671,8 @@ export async function pollModelJob<T>(jobId: string, signal?: AbortSignal,
 export async function detectAgenda(
   request: AgendaDetectionRequest
 ): Promise<AgendaDetectionResponse> {
-  assertClientLlmPayloadFits(request.transcript, "Das Transkript");
+  // This durable backend job plans bounded model inputs itself; a browser text
+  // limit must not reject a full meeting before the job can even be started.
 
   const response = await fetch(`${API_BASE}/api/agenda-detection/jobs`, {
     method: "POST",
@@ -684,6 +690,7 @@ export async function detectAgenda(
       fresh: request.fresh,
       cache_namespace: request.cacheNamespace,
       top_ids: request.topIds,
+      session_id: request.sessionId,
     }),
   });
 
@@ -693,6 +700,7 @@ export async function detectAgenda(
   }
 
   const started = await response.json();
+  if (started.job_id) request.onStatus?.(started);
   const data = started.job_id
     ? await pollModelJob<AgendaDetectionResponse>(started.job_id, request.signal, request.onStatus)
     : started;
@@ -988,6 +996,18 @@ export interface ExtractTOPsOptions {
   onStatus?: (job: ModelJob) => void;
   model?: string;
   systemPrompt?: string;
+}
+
+export async function reextractSessionPDF(sessionId: string, options: ExtractTOPsOptions): Promise<PdfAgendaExtractionResult> {
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/pdf-jobs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: options.model, system_prompt: options.systemPrompt,
+      processing_mode: options.processingMode }),
+  });
+  if (!response.ok) throw await readApiError(response, 'PDF-Extraktion konnte nicht gestartet werden');
+  const job: ModelJob = await response.json();
+  options.onStatus?.(job);
+  return pollModelJob<PdfAgendaExtractionResult>(job.job_id, options.signal, options.onStatus);
 }
 
 /**
