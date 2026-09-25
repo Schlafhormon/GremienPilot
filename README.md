@@ -12,7 +12,7 @@ Dieses Repository ist ein weiterentwickelter Fork der ursprünglichen
 Protokollierungsassistenz. Die Weiterentwicklung wird durch die **Stadt Doberlug-Kirchhain** vorangetrieben.
 
 <p align="center">
-  <img src="app/frontend/public/logos/Keule-Logo.png" alt="Keule-Services Logo" height="64">
+  <img src="app/frontend/public/logos/keule-icon.svg" alt="Keule-Services Logo" height="64">
   &nbsp;&nbsp;&nbsp;&nbsp;
   <img src="app/frontend/public/logos/Logo-jpeg_4c.jpg" alt="Stadt Doberlug-Kirchhain Logo" height="72">
 </p>

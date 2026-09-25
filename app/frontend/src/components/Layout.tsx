@@ -78,11 +78,13 @@ export default function Layout({
                 alt="AISC Logo"
                 className="h-10 object-contain"
               />
-              <img
-                src="/logos/Keule-Logo.png"
-                alt="Keule Logo"
-                className="h-10 object-contain"
-              />
+              <a href="https://keule.dev" target="_blank" rel="noopener noreferrer">
+                <img
+                  src="/logos/keule-icon.svg"
+                  alt="Keule Logo"
+                  className="h-10 object-contain"
+                />
+              </a>
               <img
                 src="/logos/Logo-jpeg_4c.jpg"
                 alt="Doberlug-Kirchhain Logo"
@@ -90,7 +92,11 @@ export default function Layout({
               />
             </div>
             <p className="text-sm text-gray-500">
-              Weiterentwickelt durch Keule-Services und der Stadt Doberlug-Kirchhain
+              Weiterentwickelt durch{' '}
+              <a href="https://keule.dev" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700">
+                Keule
+              </a>{' '}
+              und der Stadt Doberlug-Kirchhain
             </p>
           </div>
         </div>
