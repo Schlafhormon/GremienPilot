@@ -60,6 +60,18 @@ def test_fast_pdf_covers_all_pages_without_audits(tmp_path, monkeypatch, kinds):
     assert not pdf_usable(result.to_dict(), 'slow')
 
 
+def test_fast_pdf_does_not_publish_blank_page_headers_as_tops(tmp_path, monkeypatch):
+    path = tmp_path / 'invitation.pdf'
+    path.write_bytes(pdf_bytes())
+    real = item('p1-top', title='Haushalt')
+    header = item('p1-header', number=None, title='Leere Seite / Seitenkopf')
+    monkeypatch.setattr(pdf, '_request', lambda *args: json.dumps(agenda(items=[real, header])))
+    result = pdf.extract_agenda_data_from_pdf(path, processing_mode='fast')
+    assert result.tops == ['Haushalt']
+    assert [entry['title'] for entry in result.items] == ['Haushalt']
+    assert len(result.pages) == 1
+
+
 def test_fast_pdf_invalid_answer_is_not_repaired(tmp_path, monkeypatch):
     path = tmp_path / 'invitation.pdf'
     path.write_bytes(pdf_bytes())

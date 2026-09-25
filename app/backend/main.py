@@ -51,7 +51,7 @@ from summarize import (
     summarize_segment,
 )
 from processing_mode import ProcessingMode, agenda_complete as agenda_processing_complete, pdf_usable
-from extract_tops import extract_agenda_data_from_pdf, PdfReviewRequired
+from extract_tops import extract_agenda_data_from_pdf
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
 from export_protocol import (
@@ -2789,7 +2789,8 @@ def detect_pipeline_agenda(
                 system_prompt=options.get("pdf_system_prompt")).to_dict())
         save_pipeline_state(pipeline_id, result_refs={"pdf_extraction": extracted, "processing_complete": False})
         if not pdf_usable(extracted, options.get("processing_mode", "slow")):
-            raise PdfReviewRequired(extracted)
+            pdf_incomplete = True
+            append_pipeline_warning(pipeline_id, "PDF-Agenda benötigt manuelle Prüfung; vorhandene Einträge bleiben als Entwurf erhalten.")
         agenda_tops = extracted["tops"]
         pdf_metadata = extracted["metadata"]
         pdf_extraction = extracted
@@ -3164,19 +3165,6 @@ def _run_pipeline_job(
                 "assignments": assignments,
             },
         }
-        save_pipeline_session(
-            session_id,
-            job_id=transcription_job_id,
-            transcript=transcript,
-            tops=tops,
-            top_ids=top_ids,
-            assignments=assignments,
-            export_metadata=pdf_metadata,
-            agenda_proposals=agenda_proposals,
-            skipped_assignment=not bool(tops),
-            current_step=2,
-            draft_phase=None if agenda_complete(agenda_result) else 'agenda',
-        )
         save_pipeline_state(
             pipeline_id,
             result_refs={"agenda": agenda_info, "top_count": len(tops)},
@@ -3185,12 +3173,8 @@ def _run_pipeline_job(
         if not agenda_complete(agenda_result):
             execution = durable.load(pipeline_id) if durable.CURRENT.get() else None
             failure_phase = ((execution or {}).get('progress') or {}).get('agenda_phase', 'agenda_detect')
-            save_pipeline_state(pipeline_id, status=PIPELINE_STATUS_FAILED,
-                stage=PIPELINE_STAGE_AGENDA_DETECT, progress=72,
-                error='TOP-Zuordnung technisch unvollständig', result_refs={
-                    'processing_complete': False, 'ready_for_review': False,
-                    'publication_status': 'incomplete_draft', 'failure_phase': failure_phase})
-            return
+            append_pipeline_warning(pipeline_id, 'TOP-Zuordnung unvollständig; fehlende Stellen bitte manuell prüfen.')
+            save_pipeline_state(pipeline_id, result_refs={'failure_phase': failure_phase})
 
         ensure_pipeline_not_cancelled(pipeline_id)
         save_pipeline_state(
@@ -3244,7 +3228,7 @@ def _run_pipeline_job(
             export_metadata=pdf_metadata,
             skipped_assignment=not bool(tops),
             current_step=2 if not tops else 3,
-            draft_phase=None if summaries_complete((summaries,summary_reviews)) else 'summaries',
+            draft_phase=None if agenda_complete(agenda_result) and summaries_complete((summaries,summary_reviews)) else 'summaries',
         )
 
         ensure_pipeline_not_cancelled(pipeline_id)
@@ -3259,11 +3243,11 @@ def _run_pipeline_job(
                     and (not tops or len(assignments) == len(transcript)))
         save_pipeline_state(
             pipeline_id,
-            status=PIPELINE_STATUS_COMPLETED if complete else PIPELINE_STATUS_FAILED,
-            stage=PIPELINE_STAGE_READY_FOR_REVIEW if complete else PIPELINE_STAGE_SUMMARIZE,
-            progress=100 if complete else 82,
+            status=PIPELINE_STATUS_COMPLETED,
+            stage=PIPELINE_STAGE_READY_FOR_REVIEW,
+            progress=100,
             error=None,
-            result_refs={"ready_for_review": bool(complete),
+            result_refs={"ready_for_review": True,
                          "processing_complete": complete,
                          "publication_status": 'review_draft' if complete and (agenda_usage.get('review_required') or
                              any((r.get('llm_usage') or {}).get('review_required') for r in summary_reviews.values()))
@@ -4309,9 +4293,9 @@ async def export_protocol_endpoint(request: ProtocolExportRequest):
         saved_reviews = saved_session.get('summary_reviews') or {}
         request.summary_reviews = {**request.summary_reviews, **saved_reviews}
         pipeline = load_latest_pipeline_job_for_session(request.session_id)
-        if pipeline and (pipeline['status'] != 'completed' or _pipeline_refs(pipeline).get('processing_complete') is not True):
-            raise HTTPException(409, 'Pipeline technisch unvollständig; erhaltene Ergebnisse sind ein prüfbarer Entwurf')
-        if pipeline and _pipeline_refs(pipeline).get('publication_status') == 'review_draft':
+        if pipeline and pipeline['status'] != 'completed':
+            raise HTTPException(409, 'Pipeline noch nicht abgeschlossen')
+        if pipeline and _pipeline_refs(pipeline).get('publication_status') in {'review_draft', 'incomplete_draft'}:
             if 'Prüfentwurf' not in request.metadata.title:
                 request.metadata.title = (request.metadata.title or 'Sitzungsprotokoll') + ' – Prüfentwurf'
             usage = ((_pipeline_refs(pipeline).get('agenda') or {}).get('llm') or {})
@@ -4972,8 +4956,6 @@ def mirror_durable_job(job):
               "review_required": "completed", "superseded": "failed"}.get(state, state)
     if state == 'review_required' and job.get('result') is None:
         status = 'failed'
-    if job['kind'] == 'pipeline' and state == 'review_required' and (job.get('result') or {}).get('processing_complete') is False:
-        status = 'failed'
     if job['kind'] == 'pipeline':
         # Technical failures never turn into a successful legacy completion.
         old = save_pipeline_state(job['job_id'], status=status, error=job.get('error'),
@@ -5025,9 +5007,7 @@ def run_durable_job(job):
             session = load_session(old['session_id']) or {}
             needs_review = refs.get('warnings') or refs.get('unassigned_line_count') or any(
                 (review or {}).get('review_warnings') for review in (session.get('summary_reviews') or {}).values())
-            state = 'review_required' if refs.get('processing_complete') and needs_review else 'completed'
-            if refs.get('processing_complete') is False:
-                state = 'failed'
+            state = 'review_required' if needs_review or refs.get('processing_complete') is False else 'completed'
         return {'session_id': old['session_id'], 'processing_complete':refs.get('processing_complete',False),
                 'publication_status':refs.get('publication_status','incomplete_draft')}, state
     if job['kind'] == 'summary':

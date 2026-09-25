@@ -63,8 +63,11 @@ Ein vollständiges Fast-Ergebnis trägt `processing_complete: true`,
 `processing_mode: "fast"` und `review_status: "skipped"`. TOP-Zuordnungen und
 Zusammenfassungen behalten `review_complete: false`; `review_required` bleibt wahr.
 Der dauerhafte Job darf damit als `review_required` enden, während die Pipeline
-technisch erfolgreich ist. Fehlende Quellenabdeckung oder fehlerhafte Modellantworten
-bleiben technische Fehler. Fast setzt keine Prüfkennzeichen künstlich auf erfolgreich.
+technisch erfolgreich ist. Bei fehlender Quellenabdeckung oder fehlerhaften
+Modellantworten läuft die Pipeline mit den gültigen Teilergebnissen bis zu einem
+`incomplete_draft` weiter. Betroffene TOPs, Zeilen und Zusammenfassungen bleiben
+als ungeprüft oder fehlend markiert; Fast setzt keine Prüfkennzeichen künstlich
+auf erfolgreich. Dasselbe gilt in Slow nach den dortigen zusätzlichen Prüfversuchen.
 
 Die Oberfläche zeigt „Fast – ohne automatische Inhaltsprüfung“. Erfolgreiche
 Fast-Pipelines führen direkt zum bearbeitbaren Protokoll. Quellen bleiben zugänglich;

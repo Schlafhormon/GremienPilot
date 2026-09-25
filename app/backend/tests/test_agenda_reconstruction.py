@@ -77,18 +77,19 @@ def test_failed_group_keeps_drafts_without_success_checkpoint(agenda_model):
     agenda_model.overrides['primary:reconstruct:states:v1'] = incomplete
     job = durable.submit('test', {})
     with claimed(job):
-        with pytest.raises(agenda_llm.IncompleteAgendaStates):
-            work.reconstruction('primary:reconstruct', context, agenda)
+        result = work.reconstruction('primary:reconstruct', context, agenda)
+    assert len(result['agenda_states']) == 35
+    assert 'agenda:11' not in {state['top_id'] for state in result['agenda_states']}
     with persistence.connect() as db:
         drafts = [json.loads(r[0]) for r in db.execute("SELECT value FROM durable_artifacts WHERE kind='incomplete_draft'")]
         states = [json.loads(r[0]) for r in db.execute("SELECT value FROM durable_steps WHERE step_key LIKE 'agenda:%'")]
-    assert len(drafts[-1]['agenda_states']) == 11
-    assert len(drafts[-1]['missing_top_ids']) == 25
+    assert len(drafts[-1]['agenda_states']) == 35
+    assert drafts[-1]['missing_top_ids'] == ['agenda:11']
     assert drafts[-1]['processing_complete'] is False
     saved_groups = [s['response']['result']['agenda_states_by_id'] for s in states
                     if 'agenda_states_by_id' in s.get('response',{}).get('result',{})]
     assert saved_groups and all(len(group)==6 for group in saved_groups)
-    assert len([b for b, _ in agenda_model.calls if 'expected_top_ids' in b]) == 1 + work.attempts
+    assert 6 <= len([b for b, _ in agenda_model.calls if 'expected_top_ids' in b]) <= 6 + work.attempts
 
 
 def test_actual_qwen_five_of_six_states_require_all_keys_and_are_not_filled(agenda_model):
@@ -100,14 +101,29 @@ def test_actual_qwen_five_of_six_states_require_all_keys_and_are_not_filled(agen
             data['agenda_states']=data['agenda_states'][:5]
             return data
         agenda_model.overrides['fast:reconstruct:states:v1']=missing
-        with pytest.raises(agenda_llm.IncompleteAgendaStates) as error:
-            work.reconstruction_states('fast:reconstruct',context,agenda,{})
-    assert len(error.value.states)==5 and error.value.missing==[agenda[-1]['top_id']]
+        states = work.reconstruction_states('fast:reconstruct',context,agenda,{})
+    assert len(states)==5 and agenda[-1]['top_id'] not in {state['top_id'] for state in states}
     assert len(agenda_model.calls)==1
     wire=agenda_model.calls[0][1]['response_format']['json_schema']['schema']
     states=wire['properties']['response']['anyOf'][0]['properties']['result']['properties']['agenda_states_by_id']
     assert states['required']==[t['top_id'] for t in agenda]
     assert all(v=={'$ref':'#/$defs/agenda_state'} for v in states['properties'].values())
+
+
+def test_source_request_limit_keeps_earlier_states_and_continues(agenda_model):
+    from processing_mode import processing_scope
+    with processing_scope('fast'):
+        work, agenda, _ = workflow()
+        agenda = agenda[:8]
+        work.retrieval_rounds = 0
+        agenda_model.overrides['fast:reconstruct:states:v1'] = lambda body: (
+            {'response': {'kind': 'source_request', 'source_window_ids': ['W1']}}
+            if 'agenda:6' in body['expected_top_ids'] else agenda_model.answer(body))
+        states = work.reconstruction_states('fast:reconstruct',
+            {'model_notes': [{'evidence': [{'line_id': work.rows[0]['line_id'],
+                'quote': work.rows[0]['text']}]}], 'coverage': [0, 1]}, agenda, {})
+    assert [state['top_id'] for state in states] == [f'agenda:{i}' for i in range(6)]
+    assert 'source_request_limit' in work.usage.failure_reasons
 
 
 def test_preparation_result_and_source_request_are_disjoint_even_if_provider_ignores_schema(agenda_model):
@@ -134,9 +150,9 @@ def test_truncated_json_never_becomes_a_state_or_success(agenda_model, monkeypat
     work, agenda, context = workflow()
     monkeypatch.setattr(agenda_llm, 'complete', lambda *a, **k:
         SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"agenda_states":['))]))
-    with pytest.raises(ValueError):
-        work.reconstruction_states('independent:reconstruct', context, agenda, {})
-    assert work.usage.attempted_calls == 2  # identical malformed output stops ineffective repairs
+    assert work.reconstruction_states('independent:reconstruct', context, agenda, {}) == []
+    assert work.usage.attempted_calls == 12  # Each independent group is bounded.
+    assert work.usage.failure_reasons
 
 
 def test_joint_and_resumed_episodes_survive_grouping_with_original_access(agenda_model):
@@ -222,9 +238,10 @@ def test_excessive_episode_anchors_are_rejected_even_if_provider_ignores_schema(
 def test_missing_independent_check_preserves_primary_and_blocks_completion(agenda_model):
     agenda_model.overrides['independent:reconstruct:states:v1'] = dict(source_ranges=[], agenda_states=[])
     result = run(['Gemeinsame Beratung.'])
-    assert len(result.llm.reconstructions) == 1
+    assert len(result.llm.reconstructions) == 2
     assert not result.llm.processing_complete and not result.llm.review_complete
-    assert all(g['kind'] == 'technical' for g in result.llm.gaps)
+    assert result.llm.agenda_states[0]['review_status'] == 'technical_pending'
+    assert result.assignments == [0]
 
 
 def test_adjudication_keeps_global_timeline_but_only_compares_target_states(agenda_model):

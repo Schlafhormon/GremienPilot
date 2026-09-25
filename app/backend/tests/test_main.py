@@ -1262,7 +1262,7 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
 
         assert wait_until(
             lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"]
-            == "failed"
+            == "completed"
         )
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
@@ -1316,7 +1316,7 @@ def test_pipeline_failure_keeps_technical_gap_without_invented_agenda(
 
         assert wait_until(
             lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"]
-            == "failed"
+            == "completed"
         )
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
@@ -1518,11 +1518,12 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
 
         assert wait_until(
             lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"]
-            == "failed"
+            == "completed"
         )
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
-    assert result["pipeline"]["status"] == "failed"
+    assert result["pipeline"]["status"] == "completed"
+    assert result["pipeline"]["execution"]["state"] == "review_required"
     assert result["session"]["summaries"]["0"] == "Haushalt wurde zusammengefasst."
     assert result["session"]["summaries"]["1"] == ""
     assert result["session"]["summary_reviews"]["1"]["review_warnings"][0]["severity"] == "error"
@@ -1544,7 +1545,7 @@ def test_pipeline_persists_incomplete_source_check_without_losing_draft(tmp_path
             'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'true',
         }, files={'audio': ('meeting.mp3', b'audio', 'audio/mpeg')})
         pipeline_id = started.json()['pipeline_id']
-        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == ('failed' if grounding_incomplete else 'completed'))
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'completed')
         result = client.get(f'/api/pipeline/{pipeline_id}/result').json()
         session = client.get('/api/sessions/' + result['session']['session_id']).json()
     assert main.load_pipeline_job(pipeline_id)['result_refs']['processing_complete'] is not grounding_incomplete
@@ -1863,7 +1864,7 @@ def test_known_agenda_total_failure_is_persisted_as_incomplete(tmp_path, monkeyp
             'tops': json.dumps(['1 Haushalt']), 'agenda_use_llm': 'true', 'model': 'test-model',
         }, files={'audio': ('meeting.mp3', b'audio', 'audio/mpeg')})
         pipeline_id = started.json()['pipeline_id']
-        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'failed')
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'completed')
         result = client.get(f'/api/pipeline/{pipeline_id}/result').json()
         session = client.get('/api/sessions/' + result['session']['session_id']).json()
     assert result['agenda_detection']['llm']['status'] == 'failed'
@@ -1872,11 +1873,11 @@ def test_known_agenda_total_failure_is_persisted_as_incomplete(tmp_path, monkeyp
     assert not main.load_pipeline_job(pipeline_id)['result_refs']['processing_complete']
     assert not session['summaries'].get('0')
     pipeline = main.load_pipeline_job(pipeline_id)
-    assert pipeline['stage'] == 'agenda_detect' and pipeline['progress'] < 100
+    assert pipeline['stage'] == 'ready_for_review' and pipeline['progress'] == 100
     with persistence.connect() as db:
         keys={row[0] for row in db.execute('SELECT step_key FROM durable_steps WHERE job_id=?',(pipeline_id,))}
-    assert not {'pipeline:agenda','pipeline:summaries','pipeline:published'} & keys
-    assert 'pipeline:draft:agenda' in keys
+    assert not {'pipeline:agenda','pipeline:published'} & keys
+    assert 'pipeline:draft:summaries' in keys
     assert result['warnings']
     assert 'SECRET' not in str(result)
     assert len(fake_openai_module.instances) == 1  # No summary over heuristic replacement text.
@@ -1901,7 +1902,7 @@ def test_reuse_verified_pdf_keeps_source_and_ids_without_browser_file(tmp_path, 
             data={'pdf_source_job_id': extracted['document']['job_id'], 'agenda_use_llm': 'false'})
         assert response.status_code == 200, response.text
         pipeline_id = response.json()['pipeline_id']
-        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'failed')
+        assert wait_until(lambda: client.get(f'/api/pipeline/{pipeline_id}').json()['status'] == 'completed')
         session = client.get(f'/api/pipeline/{pipeline_id}/result').json()['session']
         assert session['tops'] == extracted['tops']
         assert session['top_ids'] == [i['id'] for i in extracted['items'] if i['kind'] == 'agenda']

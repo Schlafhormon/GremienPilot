@@ -17,6 +17,106 @@ import durable_jobs as durable
 import persistence
 
 
+def recover_fast_draft(job_id, *, apply=False):
+    """Fork a failed Fast agenda run, retaining accepted audio and raw PDF work."""
+    from llm_config import get_llm_config
+    from llm_transport import model_fingerprint
+    from processing_mode import processing_scope
+
+    with durable.ProcessLock():
+        job = durable.load(job_id)
+        pipeline = persistence.load_pipeline_job(job_id)
+        if (not job or not pipeline or job['kind'] != 'pipeline' or job['state'] != 'failed'
+                or pipeline['stage'] != 'agenda_detect'
+                or pipeline['result_refs'].get('options', {}).get('processing_mode') != 'fast'):
+            raise ValueError('Expected a failed Fast agenda pipeline')
+        previous = job['payload']['versions']
+        current = durable.version_snapshot(job['payload'])
+        if any(previous.get(section) != current.get(section) for section in previous if section != 'code'):
+            raise ValueError('Model, transcription or policy configuration changed')
+        changed = {name for name in set(previous['code']) | set(current['code'])
+                   if previous['code'].get(name) != current['code'].get(name)}
+        if changed - {'main.py', 'agenda_llm.py', 'extract_tops.py'}:
+            raise ValueError('Unrelated code changed: ' + ','.join(sorted(changed - {'main.py', 'agenda_llm.py', 'extract_tops.py'})))
+        with persistence.connect() as db:
+            if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise ValueError('Database integrity check failed')
+            if db.execute("SELECT 1 FROM durable_jobs WHERE state IN ('queued','running','retry_wait')").fetchone():
+                raise ValueError('Other work remains active')
+            records = db.execute('''SELECT s.step_key,s.value,i.sha256,s.completed_at FROM durable_steps s
+                LEFT JOIN durable_step_integrity i ON i.job_id=s.job_id AND i.step_key=s.step_key
+                WHERE s.job_id=?''', (job_id,)).fetchall()
+        steps = {r[0]: r[1] for r in records}
+        retained = {key: value for key, value in steps.items()
+                    if key in {'model-identities', 'pipeline:transcript', 'pipeline:agenda-transcript:v1'}
+                    or key.startswith(('model:', 'pdf:fast:v1:'))}
+        if not {'model-identities', 'pipeline:transcript', 'pipeline:agenda-transcript:v1'} <= retained.keys():
+            raise ValueError('Accepted transcript or model checkpoint missing')
+        for key, value, digest, _ in records:
+            if key in retained and (not digest or digest != durable.hash_value(value)):
+                raise ValueError('Checkpoint integrity mismatch: ' + key)
+        transcript = json.loads(retained['pipeline:transcript'])
+        transcription = persistence.load_job(pipeline['transcription_job_id'])
+        if (not transcription or transcription['status'] != 'completed' or
+                transcription['transcript'] != [{k: v for k, v in row.items() if k != 'line_id'} for row in transcript]):
+            raise ValueError('Accepted transcript differs from completed transcription')
+        with processing_scope('fast'):
+            for name, identity in json.loads(retained['model-identities']).items():
+                if not identity.get('digest') or model_fingerprint(get_llm_config(name)) != identity:
+                    raise ValueError('Model identity changed')
+        for document in job['documents']:
+            if durable.document(document['path'])['sha256'] != document['sha256']:
+                raise ValueError('Original document changed')
+        child_id = str(uuid.uuid5(uuid.UUID(job_id), 'recover-fast-draft:' + durable.hash_value(json.dumps(current, sort_keys=True))))
+        existing = durable.load(child_id)
+        if existing:
+            return dict(job_id=child_id, session_id=existing['payload']['legacy_snapshot']['session_id'], already_created=True)
+        report = dict(parent_job_id=job_id, job_id=child_id, transcript_lines=len(transcript),
+                      retained_steps=len(retained), changed_code=sorted(changed), applied=apply)
+        if not apply:
+            return report
+        backup = persistence.get_db_path().parent / 'backups' / ('fast-draft-resume-' + child_id + '.sqlite3')
+        backup.parent.mkdir(exist_ok=True)
+        with persistence.connect() as source, sqlite3.connect(backup) as target:
+            source.backup(target, pages=128, sleep=.02)
+            if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                raise ValueError('Backup integrity failed')
+        session_id = str(uuid.uuid5(uuid.UUID(child_id), 'session'))
+        if persistence.load_session(session_id):
+            raise ValueError('Recovery session already exists')
+        snapshot = deepcopy(job['payload'].get('session_snapshot') or {})
+        snapshot.update(transcript=transcript, current_step=1, job_id=pipeline['transcription_job_id'],
+                        tops=[], top_ids=[], assignments=[], summaries={}, summary_reviews={},
+                        summary_states={}, agenda_proposals=None)
+        fork = persistence.save_session(session_id, snapshot)
+        refs = {key: deepcopy(pipeline['result_refs'][key]) for key in
+                ('audio_path', 'pdf_path', 'known_tops', 'options', 'remember_speakers')
+                if key in pipeline['result_refs']}
+        refs.update(parent_pipeline_id=job_id, processing_complete=False, publication_status='pending')
+        now = time.time()
+        new_pipeline = dict(pipeline, pipeline_job_id=child_id, session_id=session_id,
+                            status='pending', stage='agenda_detect', progress=72, error=None,
+                            result_refs=refs, created_at=now, updated_at=now)
+        payload = dict(job['payload'], versions=current, session_snapshot=fork,
+                       session_revision=fork['revision'], legacy_snapshot=new_pipeline)
+        history = dict(parent_job_id=job_id, parent_session_id=pipeline['session_id'],
+                       previous_versions=previous, current_versions=current,
+                       retained_hashes={key: durable.hash_value(value) for key, value in retained.items()},
+                       backup=str(backup))
+        with persistence.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('''INSERT INTO pipeline_jobs (pipeline_job_id,session_id,transcription_job_id,status,stage,
+                progress,error,result_refs_json,created_at,updated_at) VALUES (?,?,?,'pending','agenda_detect',72,NULL,?,?,?)''',
+                (child_id, session_id, pipeline['transcription_job_id'], json.dumps(refs), now, now))
+            db.execute("INSERT INTO durable_jobs (job_id,kind,state,payload,documents,created_at,updated_at) VALUES (?,'pipeline','queued',?,?,?,?)",
+                       (child_id, json.dumps(payload), json.dumps(job['documents']), now, now))
+            for key, value in {**retained, 'operator:fast-draft-resume': json.dumps(history)}.items():
+                db.execute('INSERT INTO durable_steps VALUES (?,?,?,?)', (child_id, key, value, now))
+                db.execute('INSERT INTO durable_step_integrity VALUES (?,?,?)',
+                           (child_id, key, durable.hash_value(value)))
+        return {**report, 'session_id': session_id, 'backup': str(backup)}
+
+
 def resume_sources(job_id, *, apply=False, reconstruction=False):
     """Fork a failed graded-source continuation; the historical job stays intact.
 
@@ -335,7 +435,8 @@ if __name__ == '__main__':
     parser.add_argument('--pdf-contract', action='store_true', help='Migrate unfinished PDF checks to page-evidence-v3; verify local model digest and retained audio')
     parser.add_argument('--source-contract', action='store_true', help='Fork failed work with graded sources; retain verified PDF and accepted audio')
     parser.add_argument('--reconstruction', action='store_true', help='Fork the verified graded-source baseline; reuse unchanged context/discovery calls')
+    parser.add_argument('--recover-fast-draft', action='store_true', help='Fork failed Fast agenda work; reuse accepted audio and raw PDF checkpoints')
     args = parser.parse_args()
-    result = resume_sources(args.job_id,apply=args.apply,reconstruction=args.reconstruction) if args.source_contract or args.reconstruction else resume(
+    result = recover_fast_draft(args.job_id,apply=args.apply) if args.recover_fast_draft else resume_sources(args.job_id,apply=args.apply,reconstruction=args.reconstruction) if args.source_contract or args.reconstruction else resume(
         args.job_id, apply=args.apply, fork_session=args.fork_session, pdf_contract=args.pdf_contract)
     print(json.dumps(result, ensure_ascii=False, indent=2))

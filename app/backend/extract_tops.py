@@ -485,7 +485,8 @@ def extract_fast_pdf(path, document, model, system_prompt):
             pages.append(durable.checkpoint(f'{prefix}:page:{number}', read_page))
     instruction = ('Erfasse diese Originalseiten vollständig in Dokumentreihenfolge. '
         'Erhalte Nummern, Sitzungsteile, Unterordnung und Metadatenquellen. '
-        'IDs mit der Quellseite beginnen lassen, z.B. p1-item1.')
+        'IDs mit der Quellseite beginnen lassen, z.B. p1-item1. '
+        'Leere Seiten und Seitenköpfe gehören ausschließlich in pages, niemals als TOP in items.')
     schema = {'type': 'json_schema', 'json_schema': {
         'name': 'Agenda', 'strict': True, 'schema': Agenda.model_json_schema()}}
     reserve = structured_output_budget(config, _limit('PDF_OUTPUT_TOKENS', '8192'))
@@ -517,6 +518,11 @@ def extract_fast_pdf(path, document, model, system_prompt):
             lambda data: _validate(data, [p['page'] for p in pages], allow_empty=True)))
     if hashlib.sha256(path.read_bytes()).hexdigest() != document['sha256']:
         raise ExtractionError('Original-PDF während Verarbeitung verändert')
+    # A Fast result has no audit pass. Keep page artifacts in pages, but do not
+    # turn an explicit blank-page/header label into a meeting agenda item.
+    candidate = dict(candidate, items=[item for item in candidate['items']
+        if not (item['kind'] == 'agenda' and item['title'].strip().casefold() in
+                {'leere seite', 'seitenkopf', 'leere seite / seitenkopf'})])
     result = _result(candidate, document, [dict(page=p['page'], status='unreviewed',
         source=p['source'], text_characters=len(p['text'])) for p in pages])
     result.processing_complete = True

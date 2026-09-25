@@ -524,6 +524,7 @@ class Workflow:
     def reconstruction_states(self, role, context, agenda, trajectory, opinions=None):
         ids = [t['top_id'] for t in agenda]
         retained = {}
+        failures = {}
         instruction = ('Gib agenda_states_by_id als Objekt mit genau den expected_top_ids als Schlüsseln aus, '
             'keine Liste und keine zusätzlichen top_id-Felder. Jeder Schlüssel ist verpflichtend und '
             'enthält status, reason und evidence. Bewerte diese TOPs anhand des GESAMTEN Sitzungsverlaufs als '
@@ -557,13 +558,25 @@ class Workflow:
                         accepted = self.mapped_states(data['agenda_states_by_id'], pending)
                     except IncompleteAgendaStates as exc:
                         accepted = exc.states
+                    except LLMCancelledError:
+                        raise
+                    except Exception as exc:
+                        code = str(exc) if isinstance(exc, AgendaValidationError) else type(exc).__name__
+                        failures.update({identity: code for identity in pending})
+                        if code not in self.usage.failure_reasons:
+                            self.usage.failure_reasons.append(code)
+                        break
                     retained.update({s['top_id']: s for s in accepted})
                     pending = [identity for identity in pending if identity not in retained]
                     if not pending:
                         break
                 if pending:
-                    raise IncompleteAgendaStates(list(retained.values()), pending, [])
-            return self.state_entries(list(retained.values()), ids)
+                    failures.update({identity: failures.get(identity, 'incomplete_agenda_states') for identity in pending})
+            if failures:
+                durable.artifact(role, 'incomplete_draft', {'trajectory': trajectory,
+                    'agenda_states': list(retained.values()), 'missing_top_ids': list(failures),
+                    'failure_reasons': failures, 'processing_complete': False})
+            return [retained[identity] for identity in ids if identity in retained]
         except Exception:
             durable.artifact(role, 'incomplete_draft', {'trajectory': trajectory,
                 'agenda_states': list(retained.values()),
@@ -915,10 +928,13 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         usage.gaps = [dict(start_index=r['index'], end_index=r['index'],
             kind='technical' if r['status'] == 'not_processed' else 'semantic', reason=r['reason'])
             for r in usage.line_results if r['status'] != 'assigned']
-        usage.processing_complete = len(usage.processed_lines) == len(rows)
+        state_coverage = (len(usage.agenda_states) == len(agenda)
+            and len(usage.reconstructions) >= (1 if policy().fast else 2)
+            and all(len(result.get('agenda_states', [])) == len(agenda) for result in usage.reconstructions))
+        usage.processing_complete = len(usage.processed_lines) == len(rows) and state_coverage
         usage.review_complete = (all(r['review_status'] in {'agreed', 'resolved', 'unresolved'} for r in usage.line_results)
-                                 and all(s.get('review_status') in {'agreed', 'resolved', 'unresolved'} for s in usage.agenda_states)
-                                 and len(usage.reconstructions) >= 2)
+            and all(s.get('review_status') in {'agreed', 'resolved', 'unresolved'} for s in usage.agenda_states)
+            and len(usage.agenda_states) == len(agenda) and len(usage.reconstructions) >= 2)
         usage.review_status = 'skipped' if policy().fast else 'completed' if usage.review_complete else 'pending'
         usage.review_required = (not usage.review_complete or any(r['status'] != 'assigned' or r.get('uncertain')
             or r['review_status'] == 'unresolved' for r in usage.line_results) or
@@ -981,8 +997,11 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
         for role, context in zip(('primary', 'independent'), contexts):
             reconstructions.append(work.reconstruction(role + ':reconstruct', context, agenda))
         primary_states, reviewed_states = [{s['top_id']: s for s in r['agenda_states']} for r in reconstructions]
-        usage.agenda_states = [dict(s, review_status='agreed' if s['status'] == reviewed_states[s['top_id']]['status'] else 'unresolved')
-                               for s in primary_states.values()]
+        usage.agenda_states = [dict(primary_states.get(identity) or reviewed_states[identity],
+            review_status=('technical_pending' if identity not in primary_states or identity not in reviewed_states
+                           else 'agreed' if primary_states[identity]['status'] == reviewed_states[identity]['status']
+                           else 'unresolved')) for identity in [a['top_id'] for a in agenda]
+            if identity in primary_states or identity in reviewed_states]
         if any(s['review_status'] == 'unresolved' for s in usage.agenda_states):
             try:
                 resolved = work.reconstruction('resolve:states', contexts[0], agenda, reconstructions)
