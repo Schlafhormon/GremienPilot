@@ -1021,6 +1021,14 @@ export default function AssignmentStep({
                 Zeile {line.index + 1}: {line.status === 'not_processed' ? 'Technisch nicht verarbeitet' : line.status === 'unassigned' ? 'Fachlich begründet unzugeordnet' : line.top_ids.length > 1 ? 'Gemeinsame Beratung' : 'Zugeordnet'}
                 {line.top_ids.length > 0 && ': ' + line.top_ids.map(id => agendaDetection.llm?.provenance?.identities?.find(top => top.top_id === id)?.title ?? id).join(' / ')}
                 {' – '}{line.reason}
+                {line.top_ids.length === 0 && agendaDetection.llm?.provenance?.original_line_results?.[line.index]?.top_ids.length ? (
+                  <p className="text-amber-900">Ursprünglicher Modellvorschlag (nicht übernommen): {' '}
+                    {agendaDetection.llm.provenance.original_line_results[line.index]!.top_ids.map(id =>
+                      agendaDetection.llm?.provenance?.identities?.find(top => top.top_id === id)?.title ?? id).join(' / ')}
+                    {' – '}{agendaDetection.llm.provenance.original_line_results[line.index]!.reason}
+                    {line.evidence.map(ref => <q key={ref.line_id} className="ml-2">{ref.quote}</q>)}
+                  </p>
+                ) : null}
                 {line.grounding ? (line.grounding.evidence_status === 'exact' ? ' · Exakt belegt, fachlich modellgeprüft' :
                   line.grounding.evidence_status === 'source_range' ? ' · Quelle eingegrenzt, unbestätigt' : ' · Unbelegt, unbestätigter Vorschlag') :
                   line.review_status === 'technical_pending' ? ' · Technische Prüflücke' : ' · Prüfung offen'}

@@ -68,6 +68,18 @@ function renderAssignmentStep(overrides: Partial<AssignmentStepProps> = {}) {
 }
 
 describe('AssignmentStep', () => {
+  it('retains rejected model suggestions and their sources for manual boundary review', () => {
+    const llm = reviewedLines(2, [1]);
+    llm.provenance = {
+      identities: [{ top_id: 'model', top_index: 1, title: 'Haushalt' }],
+      original_line_results: reviewedLines(2).line_results,
+    };
+    llm.line_results![1]!.evidence = [{ line_id: 'line-1', quote: 'Wir beraten den Haushalt' }];
+    render(<AssignmentStep {...defaultProps} agendaDetection={{ ...defaultProps.agendaDetection!, llm }} />);
+    expect(screen.getByText(/Ursprünglicher Modellvorschlag \(nicht übernommen\):/)).toHaveTextContent('Haushalt');
+    expect(screen.getByText('Wir beraten den Haushalt', { selector: 'q' })).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
   });

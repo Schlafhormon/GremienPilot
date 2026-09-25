@@ -36,8 +36,11 @@ def test_incomplete_pdf_result_never_calls_transcript_detector(tmp_path, monkeyp
     source = tmp_path / 'source.pdf'; source.write_bytes(pdf_bytes())
     monkeypatch.setattr(main, 'extract_agenda_data_from_pdf', lambda *a, **kw: PdfAgendaExtractionResult())
     monkeypatch.setattr(main, 'detect_agenda_from_transcript', lambda *a, **kw: pytest.fail('Transcript fallback called'))
-    with pytest.raises(ValueError, match='unvollständig'):
-        main.detect_pipeline_agenda('legacy', [], known_tops=[], pdf_path=str(source), options={'auto_detect_tops_from_pdf': True})
+    tops, assignments, info, _ = main.detect_pipeline_agenda('legacy', [], known_tops=[],
+        pdf_path=str(source), options={'auto_detect_tops_from_pdf': True})
+    assert tops == assignments == []
+    assert info['pdf_incomplete'] and not info['llm']['processing_complete']
+    assert info['pdf_extraction'] is not None and info['warnings']
 
 
 def test_retained_sources_are_hash_bound_and_accessible_after_completion(tmp_path, monkeypatch, fake_openai_module):

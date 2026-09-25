@@ -3,8 +3,11 @@ import type { UploadStepProps, PdfAgendaExtractionResult } from '../types';
 import { extractAgendaDataFromPDF, pdfResultUsable, pollModelJob, API_BASE, type ModelJob } from '../api';
 import ProcessingModeSwitch from './ProcessingModeSwitch';
 import PdfSources from './PdfSources';
+import TopOrderOption from './TopOrderOption';
 
 export default function UploadStep({
+  enforceTopOrder = false,
+  setEnforceTopOrder,
   processingMode = 'slow',
   setProcessingMode,
   processingModeDisabled = false,
@@ -302,6 +305,7 @@ export default function UploadStep({
         onPdfExtracted?.(recovered); setRecovered(null);
       }}>{recovered.processing_mode === 'fast' ? 'PDF-TOPs ohne Inhaltsprüfung übernehmen' : 'Geprüfte PDF-TOPs übernehmen'}</button>}
       <ProcessingModeSwitch mode={processingMode} onChange={mode => { setRecovered(null); setProcessingMode?.(mode); }} disabled={processingModeDisabled || isExtractingTops} />
+      <TopOrderOption checked={enforceTopOrder} onChange={setEnforceTopOrder} disabled={processingModeDisabled} />
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>

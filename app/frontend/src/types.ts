@@ -122,6 +122,7 @@ export interface PipelineJob {
 }
 
 export interface PipelineStartOptions {
+  enforceTopOrder?: boolean;
   processingMode?: ProcessingMode;
   agendaFresh?: boolean;
   sessionId?: string | null;
@@ -151,6 +152,7 @@ export interface PipelineResultResponse {
 }
 
 export interface SessionSavePayload {
+  enforce_top_order?: boolean;
   pdf_source_job_id?: string | null;
   processing_mode?: ProcessingMode;
   agenda_proposals?: AgendaProposals | null;
@@ -360,6 +362,7 @@ export interface AssignmentSuggestionsResponse {
 }
 
 export interface AgendaDetectionRequest {
+  enforceTopOrder?: boolean;
   sessionId?: string | null;
   processingMode?: ProcessingMode;
   signal?: AbortSignal;
@@ -384,11 +387,11 @@ export interface AgendaLLMUsage {
   line_results?: { line_id: string; index: number; top_ids: string[]; status: 'assigned' | 'unassigned' | 'not_processed'; reason: string; review_status: string; grounding?: GroundingStatus; evidence: { line_id: string; quote: string }[] }[];
   agenda_states?: { top_id: string; status: 'treated' | 'deferred' | 'removed' | 'not_evidenced'; reason: string; review_status: string; evidence: { line_id: string; quote: string }[] }[];
   reconstructions?: { narrative: string }[];
-  provenance?: { identities?: { top_id: string; top_index: number; title: string; top_uid?: string }[]; model?: string; digest?: string; cache_namespace?: string; prompt_version?: string };
+  provenance?: { original_line_results?: AgendaLLMUsage['line_results']; identities?: { top_id: string; top_index: number; title: string; top_uid?: string }[]; model?: string; digest?: string; cache_namespace?: string; prompt_version?: string };
   enabled: boolean;
   source: "server_default" | "request";
   timeout_seconds: number;
-  status: "disabled" | "skipped" | "success" | "fallback" | "partial_fallback" | "failed" | "partial_failure";
+  status: "disabled" | "skipped" | "review_draft" | "success" | "fallback" | "partial_fallback" | "failed" | "partial_failure";
   attempted_calls: number;
   failed_calls: number;
   failure_reasons: string[];
@@ -413,7 +416,7 @@ export interface AgendaDetectionResponse {
 export interface AgendaProposals {
   job_id?: string;
   version: 1;
-  source: { tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; pdf_extraction?: PdfAgendaExtractionResult | null } | null;
+  source: { enforce_top_order?: boolean; tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; pdf_extraction?: PdfAgendaExtractionResult | null } | null;
   result: AgendaDetectionResponse;
 }
 
@@ -451,6 +454,7 @@ export interface PdfAgendaExtractionResult {
   review_required?: boolean;
   document?: { sha256: string; page_count: number; url?: string; job_id?: string };
   items?: { id: string; number: string | null; title: string; kind: 'agenda' | 'heading';
+    original_kind?: 'agenda' | 'heading'; exclusion_reason?: string;
     section: string | null; parent_id: string | null; sources: { page: number; quote: string | null }[] }[];
   pages?: { page: number; status: string; text_error?: string | null }[];
   metadata_sources?: Record<string, { page: number; quote: string | null }[]>;
@@ -477,6 +481,8 @@ export interface LLMSettings {
 }
 
 export interface UploadStepProps {
+  setEnforceTopOrder?: (value: boolean) => void;
+  enforceTopOrder?: boolean;
   processingMode?: ProcessingMode;
   setProcessingMode?: (mode: ProcessingMode) => void;
   processingModeDisabled?: boolean;

@@ -61,9 +61,11 @@ class AgendaLLMUsage:
         elif not self.review_complete:
             warnings.append('Unabhängige Modellprüfung nicht vollständig abgeschlossen; keine nachgewiesene fachliche Qualität.')
         if any(r['review_status'] == 'unresolved' for r in self.line_results):
-            warnings.append('Modellprüfung durchgeführt; fachliche Abweichungen bleiben ungeklärt.')
+            warnings.append('Zuordnungsprüfung: fachliche Grenzen oder Abweichungen bleiben ungeklärt.')
         if self.failed_calls:
             warnings.append(f'{self.failed_calls} technische Teilaufrufe fehlgeschlagen; erfolgreiche Schritte bleiben erhalten.')
+        for issue in self.provenance.get('order_review_ranges', []):
+            warnings.append(f"Zeilen {issue['start_index']+1}–{issue['end_index']+1}: {issue['reason']}")
         return warnings
 
 
@@ -85,14 +87,14 @@ def _should_use_llm(use_llm=None):
 
 @configured
 def segment_known_agenda(transcript, tops, model=None, system_prompt=None, *, use_llm=None,
-                         progress_callback=None, cache_namespace='', top_ids=None, processing_mode=None):
+                         progress_callback=None, cache_namespace='', top_ids=None, processing_mode=None, enforce_top_order=False):
     from agenda_llm import classify
     usage = AgendaLLMUsage(_should_use_llm(use_llm), 'server_default' if use_llm is None else 'request',
                            timeout_seconds=get_llm_config(model).timeout_seconds, processing_mode=policy().mode)
     if any(not isinstance(t, str) or not t.strip() for t in tops):
         raise ValueError('invalid_agenda_title')
     titles, segments = classify(transcript, list(tops), usage, model, system_prompt, progress_callback,
-                                cache_namespace=cache_namespace, top_ids=top_ids)
+                                cache_namespace=cache_namespace, top_ids=top_ids, enforce_top_order=enforce_top_order)
     return AgendaDetectionResult(titles, assignments_from_segments(len(transcript), segments), segments,
                                  sum(s.uncertain for s in segments), 'model_agenda_v1', usage)
 

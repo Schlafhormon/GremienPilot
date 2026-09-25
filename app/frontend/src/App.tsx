@@ -1,3 +1,4 @@
+import TopOrderOption from './components/TopOrderOption';
 import ProcessingModeSwitch from './components/ProcessingModeSwitch';
 import type { ProcessingMode } from './types';
 import { mergeSummarySession } from './summarySync';
@@ -386,6 +387,7 @@ export default function App() {
   );
 
   // Data state
+  const [enforceTopOrder, setEnforceTopOrder] = useState(false);
   const [processingMode, setProcessingMode] = useState<ProcessingMode>('slow');
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -406,7 +408,8 @@ export default function App() {
   const [agendaProposals, setAgendaProposals] = useState<AgendaProposals | null>(null);
   const agendaDetection = agendaProposals?.result ?? null;
   const agendaDetectionStale = Boolean(agendaProposals) &&
-    !proposalsAreValid(agendaProposals, tops, topIds, transcript);
+    (!proposalsAreValid(agendaProposals, tops, topIds, transcript) ||
+      (agendaProposals?.source?.enforce_top_order ?? false) !== enforceTopOrder);
   const [isDetectingAgenda, setIsDetectingAgenda] = useState(false);
   const [agendaJob, setAgendaJob] = useState<ModelJob | null>(null);
   const [restoredAgendaJob, setRestoredAgendaJob] = useState<ModelJob | null>(null);
@@ -417,7 +420,7 @@ export default function App() {
   useEffect(() => {
     agendaInputEpochRef.current += 1;
     agendaAbortRef.current?.abort();
-  }, [agendaInputKey, route.view, route.sessionId]);
+  }, [agendaInputKey, enforceTopOrder, route.view, route.sessionId]);
   useEffect(() => {
     pdfRequestRef.current += 1;
     pdfAbortRef.current?.abort();
@@ -557,6 +560,7 @@ export default function App() {
     (overrides: Partial<SessionSavePayload> = {}): SessionSavePayload => ({
       pdf_source_job_id: overrides.pdf_source_job_id === undefined ? pdfSourceJobId : overrides.pdf_source_job_id,
       processing_mode: overrides.processing_mode ?? processingMode,
+      enforce_top_order: overrides.enforce_top_order ?? enforceTopOrder,
       session_id: overrides.session_id ?? sessionId,
       revision: overrides.revision ?? sessionRevision,
       job_id: overrides.job_id ?? jobId,
@@ -576,6 +580,7 @@ export default function App() {
     [
       pdfSourceJobId,
       processingMode,
+      enforceTopOrder,
       agendaProposals,
       assignments,
       currentStep,
@@ -604,6 +609,7 @@ export default function App() {
   const applySession = useCallback((session: SessionResponse | SessionDraft) => {
     summaryBaselineRef.current = session;
     setProcessingMode(session.processing_mode ?? "slow");
+    setEnforceTopOrder(session.enforce_top_order ?? false);
     const nextSessionId = session.session_id ?? null;
     const nextRevision = session.revision ?? null;
     setSessionId(nextSessionId);
@@ -777,6 +783,7 @@ export default function App() {
     setPdfFile(null);
     setPdfExtraction(null);
     setProcessingMode("slow");
+    setEnforceTopOrder(false);
     setTops(EMPTY_TOPS);
     setTopIds([]);
     setTranscript([]);
@@ -1061,6 +1068,7 @@ export default function App() {
       sessionRevisionRef.current = refreshed.revision ?? sessionRevisionRef.current;
       setSessionRevision(sessionRevisionRef.current);
       setProcessingMode(merged.processing_mode ?? "slow");
+      setEnforceTopOrder(merged.enforce_top_order ?? false);
       setTops(merged.tops);
       setTopIds(merged.top_ids ?? []);
       setTranscript(merged.transcript ?? []);
@@ -1260,7 +1268,7 @@ export default function App() {
       localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
 
       const pipeline = await apiStartPipeline(audioFile, {
-        processingMode,
+        processingMode, enforceTopOrder,
         sessionId: activeSessionId,
         tops: submittedTops,
         pdfFile,
@@ -1489,14 +1497,15 @@ export default function App() {
     };
     try {
       const result = resume ? await pollModelJob<AgendaDetectionResponse>(resume.job_id, controller.signal, onStatus) : await detectAgenda({
-        tops, transcript, model: llmSettings.model, processingMode,
+        tops, transcript, model: llmSettings.model, processingMode, enforceTopOrder,
         fresh, topIds, sessionId, signal: controller.signal, onStatus,
         preserveTranscriptStructure: true,
       });
       if (requestId !== agendaRequestRef.current) return;
       if (inputEpoch !== agendaInputEpochRef.current || (requestSource && (
         JSON.stringify(agendaSource(requestSource.tops, requestSource.top_ids, requestSource.transcript)) !== JSON.stringify(source) ||
-        requestSource.processing_mode !== processingMode))) {
+        requestSource.processing_mode !== processingMode ||
+        (requestSource.enforce_top_order ?? false) !== enforceTopOrder))) {
         setAgendaDetectionError("TOPs oder Transkript wurden während der Erkennung geändert. Bitte erneut berechnen");
         return;
       }
@@ -1510,7 +1519,7 @@ export default function App() {
         return item?.top_uid ?? item?.top_id ?? crypto.randomUUID();
       })];
       const proposals: AgendaProposals = { version: 1, job_id: modelJobId, source: { ...source,
-        tops: result.tops, top_ids: nextTopIds,
+        tops: result.tops, top_ids: nextTopIds, enforce_top_order: enforceTopOrder,
         pdf_extraction: pdfExtraction ?? agendaProposals?.source?.pdf_extraction }, result };
       if (!proposalsAreValid(proposals, result.tops, nextTopIds, transcript)) {
         throw new Error("Das Ergebnis passt nicht zum aktuellen Transkript oder zur Tagesordnung");
@@ -1529,7 +1538,7 @@ export default function App() {
     } finally {
       if (requestId === agendaRequestRef.current) setIsDetectingAgenda(false);
     }
-  }, [tops, topIds, transcript, processingMode, llmSettings.model, sessionId, pdfExtraction, agendaProposals]);
+  }, [tops, topIds, transcript, processingMode, enforceTopOrder, llmSettings.model, sessionId, pdfExtraction, agendaProposals]);
 
   const handleExtractPdf = useCallback(async (resume?: ModelJob) => {
     if (!sessionId) return;
@@ -1800,6 +1809,7 @@ export default function App() {
         </div>
       )}
 
+      {(currentStep !== 1 || isProcessing) && <TopOrderOption checked={enforceTopOrder} onChange={setEnforceTopOrder} disabled={modeLocked} />}
       {(currentStep !== 1 || isProcessing) && <ProcessingModeSwitch mode={processingMode} onChange={handleProcessingModeChange} disabled={modeLocked} existingResults />}
       {isProcessing ? (
         <div>
@@ -1824,6 +1834,8 @@ export default function App() {
         </div>
       ) : currentStep === 1 ? (
         <UploadStep
+          enforceTopOrder={enforceTopOrder}
+          setEnforceTopOrder={setEnforceTopOrder}
           processingMode={processingMode}
           setProcessingMode={handleProcessingModeChange}
           processingModeDisabled={modeLocked}

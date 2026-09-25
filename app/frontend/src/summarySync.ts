@@ -17,7 +17,7 @@ export function mergeSummarySession(
 ): SessionSavePayload {
   const merged = { ...current, revision: incoming.revision };
   // Refresh unchanged fields, keeping local edits (including export metadata).
-  for (const key of ['processing_mode', 'tops', 'top_ids', 'transcript', 'assignments', 'speaker_names',
+  for (const key of ['enforce_top_order', 'processing_mode', 'tops', 'top_ids', 'transcript', 'assignments', 'speaker_names',
     'export_metadata', 'agenda_proposals', 'skipped_assignment'] as const) {
     if (equal(current[key], baseline[key])) Object.assign(merged, { [key]: incoming[key] });
   }

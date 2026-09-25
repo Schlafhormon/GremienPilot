@@ -18,7 +18,7 @@ export default function PdfSources({ result }: { result?: PdfAgendaExtractionRes
     <p className="break-all text-xs text-gray-500">Dokument-ID: {result.document.sha256}</p>
     <ul className="my-2 space-y-2">{result.items?.map(item => <li key={item.id}>
       {item.section && <span>[{item.section}] </span>}{item.number !== null && `${item.number} `}{item.title}
-      {item.kind === 'heading' && ' (Abschnitt)'}
+      {item.exclusion_reason ? ` (${item.exclusion_reason})` : item.kind === 'heading' && ' (Abschnitt)'}
       {item.parent_id && ` · Unterpunkt zu ${result.items?.find(parent => parent.id === item.parent_id)?.title ?? item.parent_id}`}
       {' · '}{item.sources.map((source, index) => <a key={index} href={`${url}#page=${source.page}`}
         target="_blank" rel="noreferrer" className="mr-2 text-blue-700 underline" title={source.quote ?? undefined}>

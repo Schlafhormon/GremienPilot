@@ -84,6 +84,6 @@ def test_agenda_job_belongs_to_session_and_exposes_frozen_source_for_reload(tmp_
     assert persistence.load_session('session-1')['assignments'] == [0]
     finish(job, {'tops': state['tops']})
     latest = client.get('/api/sessions/session-1').json()['latest_agenda_job']
-    assert latest['source'] == request
+    assert latest['source'] == dict(request, enforce_top_order=False)
     assert latest['job_id'] == job['job_id']
     assert client.post('/api/agenda-detection/jobs', json={**request, 'session_id': 'missing'}).status_code == 404

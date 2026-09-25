@@ -33,6 +33,7 @@ py-modules = [
     "durable_jobs",
     "agenda_detection",
     "agenda_llm",
+    "agenda_order",
     "agenda_context",
     "llm_transport",
     "llm_config",

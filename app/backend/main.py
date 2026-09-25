@@ -660,6 +660,7 @@ class SummaryJobResponse(BaseModel):
 
 
 class SessionSaveRequest(BaseModel):
+    enforce_top_order: StrictBool = False
     pdf_source_job_id: Optional[str] = None
     processing_mode: ProcessingMode = "slow"
     agenda_proposals: Optional[Dict[str, Any]] = None
@@ -680,6 +681,7 @@ class SessionSaveRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    enforce_top_order: StrictBool = False
     pdf_source_job_id: Optional[str] = None
     has_pdf_source: bool = False
     latest_pdf_job: Optional[Dict[str, Any]] = None
@@ -949,12 +951,14 @@ class ExtractTOPsResponse(BaseModel):
 
 
 class AssignmentSuggestionsRequest(BaseModel):
+    enforce_top_order: StrictBool = False
     processing_mode: ProcessingMode = "slow"
     transcript: List[TranscriptLine]
     tops: List[str]
 
 
 class AgendaDetectionRequest(BaseModel):
+    enforce_top_order: StrictBool = False
     session_id: Optional[str] = None
     processing_mode: ProcessingMode = "slow"
     fresh: StrictBool = False
@@ -1189,6 +1193,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         latest_pdf_job=durable.public(work) if (work := durable.latest_for_session(session['session_id'], 'pdf')) else None,
         latest_agenda_job=durable.public(work) if (work := durable.latest_for_session(session['session_id'], 'agenda')) else None,
         processing_mode=session.get("processing_mode", "slow"),
+        enforce_top_order=session.get("enforce_top_order", False),
         session_id=session["session_id"],
         revision=int(session.get("revision") or 1),
         created_at=session.get("created_at"),
@@ -2674,6 +2679,7 @@ def save_pipeline_session(
     skipped_assignment: bool | None = None,
     draft_phase: str | None = None,
     processing_mode: ProcessingMode | None = None,
+    enforce_top_order: bool | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id) or {"session_id": session_id}
     ctx = durable.CURRENT.get()
@@ -2683,6 +2689,8 @@ def save_pipeline_session(
     if ctx and durable.published(publication_key):
         return session
     state = dict(session)
+    if enforce_top_order is not None:
+        state["enforce_top_order"] = enforce_top_order
     if processing_mode is not None:
         state["processing_mode"] = processing_mode
     if job_id is not None:
@@ -2797,12 +2805,21 @@ def detect_pipeline_agenda(
         save_pipeline_state(pipeline_id, result_refs={"pdf_extraction": extracted})
 
     detection_details: dict[str, Any] = {"pdf_incomplete": pdf_incomplete, "pdf_extraction": pdf_extraction}
+    if pdf_extraction is not None and not agenda_tops:
+        # An artifact-only invitation must not trigger an invented replacement
+        # agenda. Retain the PDF and transcript as an editable, incomplete draft.
+        warning = "PDF enthält keine belegten TOPs; Tagesordnung und Transkript bitte manuell prüfen."
+        append_pipeline_warning(pipeline_id, warning)
+        draft_tops, assignments, draft = fallback_agenda(transcript)
+        return draft_tops, assignments, {**draft, **detection_details,
+            "pdf_incomplete": True, "warnings": [warning]}, pdf_metadata
     try:
         utterances = transcript_utterances(transcript)
         if agenda_tops:
             result = segment_known_agenda(
                 utterances,
                 agenda_tops,
+                enforce_top_order=options.get("enforce_top_order", False),
                 model=model,
                 system_prompt=system_prompt,
                 processing_mode=options.get("processing_mode", "slow"),
@@ -3159,7 +3176,7 @@ def _run_pipeline_job(
         # Freeze the exact detector input and result before manual editing begins.
         agenda_proposals = {
             "version": 1,
-            "source": {"tops": tops, "top_ids": top_ids, "transcript": transcript, **({"pdf_extraction": pdf_extraction} if pdf_extraction else {})},
+            "source": {"enforce_top_order": options.get("enforce_top_order", False), "tops": tops, "top_ids": top_ids, "transcript": transcript, **({"pdf_extraction": pdf_extraction} if pdf_extraction else {})},
             "result": {
                 **agenda_info, "tops": tops, "transcript": transcript,
                 "assignments": assignments,
@@ -3390,6 +3407,7 @@ async def start_pipeline(
     skip_agenda_detection: bool = Form(False),
     auto_detect_tops_from_pdf: bool = Form(False),
     processing_mode: Optional[ProcessingMode] = Form(None),
+    enforce_top_order: Optional[bool] = Form(None),
 ):
     """Start an unattended upload-to-review pipeline job."""
     if (
@@ -3415,6 +3433,11 @@ async def start_pipeline(
     if effective_mode not in ('fast', 'slow'):
         raise HTTPException(422, 'processing_mode muss fast oder slow sein')
     parsed_options['processing_mode'] = effective_mode
+    effective_order = enforce_top_order if enforce_top_order is not None else parsed_options.get(
+        'enforce_top_order', (load_session(session_id) or {}).get('enforce_top_order', False) if session_id else False)
+    if type(effective_order) is not bool:
+        raise HTTPException(422, 'enforce_top_order muss ein Boolean sein')
+    parsed_options['enforce_top_order'] = effective_order
     if session_id:
         ensure_mode_change_allowed(session_id)
     source_extraction = None
@@ -3521,6 +3544,7 @@ async def start_pipeline(
     save_pipeline_session(
         effective_session_id,
         processing_mode=effective_mode,
+        enforce_top_order=effective_order,
         job_id=transcription_job_id,
         tops=known_tops,
         skipped_assignment=skip_agenda_detection,
@@ -3709,6 +3733,10 @@ async def create_or_save_session(request: SessionSaveRequest):
     state = model_to_dict(request)
     state["session_id"] = session_id
     existing = load_session(session_id)
+    if existing and "enforce_top_order" not in request.model_fields_set:
+        state["enforce_top_order"] = existing.get("enforce_top_order", False)
+    if existing and state["enforce_top_order"] != existing.get("enforce_top_order", False):
+        ensure_mode_change_allowed(session_id)
     if existing and "processing_mode" not in request.model_fields_set:
         state["processing_mode"] = existing.get("processing_mode", "slow")
     if existing and state['processing_mode'] != existing.get('processing_mode', 'slow'):
@@ -3733,6 +3761,10 @@ async def save_existing_session(session_id: str, request: SessionSaveRequest):
     state = model_to_dict(request)
     state["session_id"] = session_id
     existing = load_session(session_id)
+    if existing and "enforce_top_order" not in request.model_fields_set:
+        state["enforce_top_order"] = existing.get("enforce_top_order", False)
+    if existing and state["enforce_top_order"] != existing.get("enforce_top_order", False):
+        ensure_mode_change_allowed(session_id)
     if existing and "processing_mode" not in request.model_fields_set:
         state["processing_mode"] = existing.get("processing_mode", "slow")
     if existing and state['processing_mode'] != existing.get('processing_mode', 'slow'):
@@ -4684,7 +4716,7 @@ async def assignment_suggestions_endpoint(request: AssignmentSuggestionsRequest)
         raise HTTPException(400, 'Transkript und TOPs erforderlich')
     job = await start_agenda_job(AgendaDetectionRequest(
         transcript=request.transcript, tops=request.tops, use_llm=True, processing_mode=request.processing_mode,
-        preserve_transcript_structure=True))
+        enforce_top_order=request.enforce_top_order, preserve_transcript_structure=True))
     result = await await_durable_result(job['job_id'])
     return AssignmentSuggestionsResponse(
         suggested_assignments=result['assignments'], segments=result['segments'],
@@ -4721,6 +4753,7 @@ def calculate_agenda(request: AgendaDetectionRequest):
         result = segment_known_agenda(
             transcript,
             valid_tops,
+            enforce_top_order=request.enforce_top_order,
             model=request.model,
             system_prompt=request.system_prompt,
             processing_mode=request.processing_mode,
@@ -5097,6 +5130,8 @@ async def start_agenda_job(request: AgendaDetectionRequest):
             raise HTTPException(404, 'Session nicht gefunden')
         ensure_session_model_job_available(request.session_id)
     data = request.model_dump()
+    if request.session_id and 'enforce_top_order' not in request.model_fields_set:
+        data['enforce_top_order'] = load_session(request.session_id).get('enforce_top_order', False)
     data['transcript'] = [line_to_dict(line) for line in request.transcript]
     from agenda_context import source_rows, model_agenda
     try:

@@ -317,6 +317,8 @@ def init_db(db_path: Path | None = None) -> None:
                 ADD COLUMN export_metadata_json TEXT
                 """
             )
+        if "enforce_top_order" not in session_columns:
+            db.execute("ALTER TABLE sessions ADD COLUMN enforce_top_order INTEGER NOT NULL DEFAULT 0")
         if "processing_mode" not in session_columns:
             db.execute("ALTER TABLE sessions ADD COLUMN processing_mode TEXT NOT NULL DEFAULT 'slow' CHECK (processing_mode IN ('fast', 'slow'))")
         if "agenda_proposals_json" not in session_columns:
@@ -1474,7 +1476,7 @@ def save_session(
         db.execute("BEGIN IMMEDIATE")
         fence(db)
         existing = db.execute(
-            "SELECT created_at, revision, processing_mode, pdf_source_job_id FROM sessions WHERE session_id = ?",
+            "SELECT created_at, revision, processing_mode, enforce_top_order, pdf_source_job_id FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         created_at = float(existing["created_at"]) if existing else now
@@ -1491,9 +1493,9 @@ def save_session(
             """
             INSERT INTO sessions (
                 session_id, job_id, current_step, skipped_assignment, export_metadata_json,
-                agenda_proposals_json, processing_mode, pdf_source_job_id, revision, created_at, updated_at
+                agenda_proposals_json, processing_mode, enforce_top_order, pdf_source_job_id, revision, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 job_id = excluded.job_id,
                 current_step = excluded.current_step,
@@ -1501,6 +1503,7 @@ def save_session(
                 export_metadata_json = excluded.export_metadata_json,
                 agenda_proposals_json = excluded.agenda_proposals_json,
                 processing_mode = excluded.processing_mode,
+                enforce_top_order = excluded.enforce_top_order,
                 pdf_source_job_id = excluded.pdf_source_job_id,
                 revision = sessions.revision + ?,
                 updated_at = excluded.updated_at
@@ -1513,6 +1516,7 @@ def save_session(
                 metadata_json,
                 proposals_json,
                 state.get("processing_mode", existing["processing_mode"] if existing else "slow"),
+                int(state.get("enforce_top_order", existing["enforce_top_order"] if existing else False)),
                 state.get("pdf_source_job_id", existing["pdf_source_job_id"] if existing else None),
                 created_at,
                 now,
@@ -1713,6 +1717,7 @@ def load_session(
         ).fetchall()
 
     session = dict(row)
+    session["enforce_top_order"] = bool(session.get("enforce_top_order", False))
     session["skipped_assignment"] = bool(session["skipped_assignment"])
     session["tops"] = [item["title"] for item in tops]
     session["top_ids"] = [item["top_uid"] for item in tops]

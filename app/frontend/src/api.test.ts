@@ -40,12 +40,14 @@ describe('api session client', () => {
     expect((fetchMock.mock.calls[0]![1]!.body as FormData).get('processing_mode')).toBe('fast');
     await expect(extractAgendaDataFromPDF(file, { processingMode: 'slow' })).rejects.toThrow(/nicht vollständig geprüft/);
     const lines = [{ speaker: 'Rat', text: 'Beratung', start: 0, end: 2 }];
-    await detectAgenda({ transcript: lines, processingMode: 'fast' });
+    await detectAgenda({ transcript: lines, processingMode: 'fast', enforceTopOrder: true });
     expect(JSON.parse(fetchMock.mock.calls[2]![1]!.body).processing_mode).toBe('fast');
+    expect(JSON.parse(fetchMock.mock.calls[2]![1]!.body).enforce_top_order).toBe(true);
     await generateSummary('Haushalt', lines, { processingMode: 'fast' });
     expect(JSON.parse(fetchMock.mock.calls[3]![1]!.body).processing_mode).toBe('fast');
-    await startPipeline(new File(['audio'], 'meeting.mp3'), { processingMode: 'fast' });
+    await startPipeline(new File(['audio'], 'meeting.mp3'), { processingMode: 'fast', enforceTopOrder: true });
     expect((fetchMock.mock.calls[4]![1]!.body as FormData).get('processing_mode')).toBe('fast');
+    expect((fetchMock.mock.calls[4]![1]!.body as FormData).get('enforce_top_order')).toBe('true');
   });
 
 

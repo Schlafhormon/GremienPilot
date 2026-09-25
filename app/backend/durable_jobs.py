@@ -94,7 +94,7 @@ def public(job):
             max(0, time.time() - result['progress']['last_delta_at'])}
     if job['kind'] == 'agenda' and job['state'] in TERMINAL and job.get('payload', {}).get('session_id'):
         request = job['payload']['request']
-        result['source'] = {key: request.get(key) for key in ('tops', 'top_ids', 'transcript', 'processing_mode')}
+        result['source'] = {key: request.get(key) for key in ('tops', 'top_ids', 'transcript', 'processing_mode', 'enforce_top_order')}
     return result
 
 
@@ -122,7 +122,7 @@ def version_snapshot(payload=None):
     # Code hashes include prompts, validators and chunking policy. No credentials.
     from llm_config import get_llm_config
     from processing_mode import VERSION as processing_version
-    files = ("processing_mode.py", "llm_config.py", "durable_jobs.py", "summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_detection.py",
+    files = ("processing_mode.py", "llm_config.py", "durable_jobs.py", "summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_order.py", "agenda_detection.py",
              "extract_tops.py", "llm_transport.py", "main.py", "agenda_context.py",
              "agenda_labels.py", "assignment_suggestions.py", "persistence.py", "source_contract.py")
     policy_keys = (

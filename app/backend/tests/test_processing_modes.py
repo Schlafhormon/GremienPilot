@@ -68,7 +68,9 @@ def test_fast_pdf_does_not_publish_blank_page_headers_as_tops(tmp_path, monkeypa
     monkeypatch.setattr(pdf, '_request', lambda *args: json.dumps(agenda(items=[real, header])))
     result = pdf.extract_agenda_data_from_pdf(path, processing_mode='fast')
     assert result.tops == ['Haushalt']
-    assert [entry['title'] for entry in result.items] == ['Haushalt']
+    assert [entry['title'] for entry in result.items if entry['kind'] == 'agenda'] == ['Haushalt']
+    assert result.items[1]['original_kind'] == 'agenda'
+    assert result.items[1]['sources']
     assert len(result.pages) == 1
 
 

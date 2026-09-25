@@ -1,7 +1,8 @@
 """Model-only invitation interpretation with retained, independently audited pages.
 
 Text extraction and rendering are technical operations. No text-layer matching,
-number parsing, title filtering or metadata guessing is used to accept results.
+number parsing or metadata guessing is used to accept results. Obvious document
+labels are excluded from actual agenda entries while their sources are retained.
 """
 import base64
 from dataclasses import dataclass, field, asdict
@@ -119,6 +120,7 @@ Bilder sind die maßgebliche Quelle; der unveränderte Textlayer ist zusätzlich
 Erhalte alle TOPs, kurze Titel, Unterpunkte (auch unnummerierte), führende Nullen, Lücken und wiederholte Originalnummern.
 number ist die Originalnummer als String oder null; niemals aus Positionen erzeugen.
 section bezeichnet den Sitzungsteil (public/nonpublic, sonst originale Bezeichnung oder null).
+Einladungstext, Anrede, Grußformel, Unterschriften und Seitenköpfe sind Dokumentbestandteile, keine TOPs.
 Abschnittsüberschriften erhalten kind=heading; tatsächliche TOPs kind=agenda. Erhalte Unterordnung über parent_id.
 IDs sind eindeutige opaque Strings, keine TOP-Nummern. Bestehende IDs bei Korrekturen erhalten.
 Jeder Eintrag benötigt Quellseiten, optional ein sichtbares Zitat. Auch Fortsetzungen über Seitenumbrüche berücksichtigen.
@@ -241,7 +243,15 @@ def _validate(value, pages, *, allow_empty=False):
 
 
 def _result(data, document=None, pages=None, audits=None, verified=False, issues=None, stop_reason=None):
-    items = data['items']
+    # Narrow artifact labels only; never compare agenda titles to transcript text.
+    # Retain original proposals and their PDF references for review.
+    artifacts = {'einladungstext', 'unterschrift', 'unterschriften', 'grußformel',
+                 'seitenkopf', 'leere seite', 'leere seite / seitenkopf'}
+    items = [dict(i, kind='heading', original_kind=i['kind'],
+                  exclusion_reason='PDF-Dokumentbestandteil, kein Tagesordnungspunkt')
+             if (i['kind'] == 'agenda' and i['number'] is None and i['parent_id'] is None
+                 and i['title'].strip().casefold().rstrip(': .') in artifacts)
+             else i for i in data['items']]
     if document:
         # Stable within a retained extraction and across job resume. IDs are not
         # inferred from agenda numbers/titles (which may legitimately repeat).
@@ -518,11 +528,6 @@ def extract_fast_pdf(path, document, model, system_prompt):
             lambda data: _validate(data, [p['page'] for p in pages], allow_empty=True)))
     if hashlib.sha256(path.read_bytes()).hexdigest() != document['sha256']:
         raise ExtractionError('Original-PDF während Verarbeitung verändert')
-    # A Fast result has no audit pass. Keep page artifacts in pages, but do not
-    # turn an explicit blank-page/header label into a meeting agenda item.
-    candidate = dict(candidate, items=[item for item in candidate['items']
-        if not (item['kind'] == 'agenda' and item['title'].strip().casefold() in
-                {'leere seite', 'seitenkopf', 'leere seite / seitenkopf'})])
     result = _result(candidate, document, [dict(page=p['page'], status='unreviewed',
         source=p['source'], text_characters=len(p['text'])) for p in pages])
     result.processing_complete = True

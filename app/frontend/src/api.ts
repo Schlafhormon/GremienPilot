@@ -141,6 +141,7 @@ export async function startPipeline(
 ): Promise<PipelineJob> {
   const formData = new FormData();
   formData.append("audio", audioFile);
+  formData.append("enforce_top_order", String(options.enforceTopOrder ?? false));
   formData.append("processing_mode", options.processingMode ?? "slow");
   if (options.autoDetectTopsFromPdf && !options.pdfFile && !options.tops?.length && !options.skipAgendaDetection) {
     throw new Error('PDF-Erkennung ist aktiviert, aber keine Einladung hochgeladen. PDF auswählen oder PDF-Erkennung ausschalten.');
@@ -609,7 +610,7 @@ export interface ModelJob {
   created_at?: number;
   updated_at?: number;
   progress?: { phase?: string; agenda_phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number; processed_lines?: number; total_lines?: number; model_calls?: number; elapsed_seconds?: number };
-  source?: { tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; processing_mode?: ProcessingMode };
+  source?: { enforce_top_order?: boolean; tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; processing_mode?: ProcessingMode };
   error?: string | null;
   result?: unknown;
   documents?: { sha256: string; deleted_at?: number | null }[];
@@ -685,6 +686,7 @@ export async function detectAgenda(
       model: request.model,
       system_prompt: request.systemPrompt,
       processing_mode: request.processingMode ?? "slow",
+      enforce_top_order: request.enforceTopOrder,
       use_llm: request.useLlm,
       preserve_transcript_structure: request.preserveTranscriptStructure,
       fresh: request.fresh,

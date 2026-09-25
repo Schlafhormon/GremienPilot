@@ -142,9 +142,11 @@ describe('App pipeline flow', () => {
     const user = userEvent.setup();
     let finish!: (job: PipelineJob) => void;
     vi.mocked(pollPipeline).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
-    vi.mocked(getPipelineResult).mockResolvedValue(pipelineResult({ processing_mode: 'fast' }, completedPipeline,
+    vi.mocked(getPipelineResult).mockResolvedValue(pipelineResult({ processing_mode: 'fast', enforce_top_order: true }, completedPipeline,
       ['Fast – ohne automatische Inhaltsprüfung.']));
     const { container } = render(<App />);
+    expect(screen.getByRole('checkbox', { name: /Feste TOP-Reihenfolge erzwingen/ })).not.toBeChecked();
+    await user.click(screen.getByRole('checkbox', { name: /Feste TOP-Reihenfolge erzwingen/ }));
     expect(screen.getByRole('switch', { name: 'Slow-Modus' })).toBeChecked();
     await user.click(screen.getByRole('switch', { name: 'Slow-Modus' }));
     expect(screen.getByRole('switch', { name: 'Slow-Modus' })).not.toBeChecked();
@@ -152,9 +154,10 @@ describe('App pipeline flow', () => {
       new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
     await user.click(screen.getByRole('checkbox', { name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i }));
     await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
-    await waitFor(() => expect(startPipeline).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({ processingMode: 'fast' })));
-    expect(saveSession).toHaveBeenCalledWith(expect.objectContaining({ processing_mode: 'fast' }));
+    await waitFor(() => expect(startPipeline).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({ processingMode: 'fast', enforceTopOrder: true })));
+    expect(saveSession).toHaveBeenCalledWith(expect.objectContaining({ processing_mode: 'fast', enforce_top_order: true }));
     expect(screen.getByRole('switch', { name: 'Slow-Modus' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: /Feste TOP-Reihenfolge erzwingen/ })).toBeDisabled();
     await act(async () => { finish(completedPipeline); });
     await waitFor(() => expect(screen.getByRole('button', { name: /text \(\.txt\)/i })).toBeInTheDocument());
     expect(screen.getByRole('switch', { name: 'Slow-Modus' })).not.toBeChecked();
@@ -183,11 +186,13 @@ describe('App pipeline flow', () => {
   it('restores the saved mode and resets new sessions to Slow', async () => {
     const user = userEvent.setup();
     window.history.replaceState(null, '', '/sessions/session-1');
-    vi.mocked(loadSession).mockResolvedValue(pipelineResult({ processing_mode: 'fast' }).session);
+    vi.mocked(loadSession).mockResolvedValue(pipelineResult({ processing_mode: 'fast', enforce_top_order: true }).session);
     render(<App />);
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Slow-Modus' })).not.toBeChecked());
+    expect(screen.getByRole('checkbox', { name: /Feste TOP-Reihenfolge erzwingen/ })).toBeChecked();
     await user.click(screen.getByRole('button', { name: /neue sitzung/i }));
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Slow-Modus' })).toBeChecked());
+    expect(screen.getByRole('checkbox', { name: /Feste TOP-Reihenfolge erzwingen/ })).not.toBeChecked();
   });
 
 

@@ -28,7 +28,50 @@ Zuordnung vollständiger Sitzungen über diese Hintergrundverarbeitung.
 
 ## Modellablauf
 
-Bekannte Agenden und Erkennung ohne Einladung verwenden denselben Ablauf.
+### Optionale feste TOP-Reihenfolge
+
+„Feste TOP-Reihenfolge erzwingen“ ist für neue und bestehende Sitzungen zunächst
+aus. Die Einstellung wird als `enforce_top_order` mit der Sitzung gespeichert
+und für Pipeline sowie spätere Neuzuordnungen übernommen. Im Editor kann sie
+auch nach dem Wiederöffnen geändert werden; vorhandene Vorschläge einer anderen
+Einstellung müssen neu berechnet werden. Ohne vorgegebene TOP-Liste bleibt der
+bisherige Ablauf erhalten, ebenso die Verarbeitung ohne TOP-Zuordnung.
+
+Mit aktivierter Option bleibt die vollständige Agenda unverändert. Ihre Positionen
+sind maßgeblich, auch wenn TOP-Nummern im nichtöffentlichen Teil erneut beginnen.
+Jede vorgeschlagene Grenze unterscheidet belegten Beginn, Fortsetzung und unklare
+Grenze. Ein Beginn braucht einen Originalbeleg innerhalb von zwei Zeilen um die
+Grenze; Vorschauen und bloße Erwähnungen reichen nicht aus. Die Bedeutung des
+Belegs beurteilt das Modell, nicht ein Titelvergleich. Das garantiert keine
+fachlich richtige Modellentscheidung.
+
+Fast ordnet in aufeinanderfolgenden Fenstern von höchstens 80 Zeilen zu, bei engem
+Kontextbudget kleiner. Nur zwei vorherige Originalzeilen dienen als Überlappung.
+Der nächste Aufruf erhält die zuletzt bestätigte Agenda-Position und die noch
+möglichen Agenda-Einträge; bereits abgeschlossene Einträge entfallen. Die
+verbleibenden Titel erlauben auch Sprünge über mehrere unbehandelte TOPs. Es gibt
+keine globale Rekonstruktion, Quellen-Nachabrufe oder fachliche Korrekturrunden.
+Thinking bleibt in diesem Ablauf aus. Slow behält seine unabhängigen
+Rekonstruktionen, Grenzprüfungen und Klärung sowie seine Thinking-Einstellungen.
+
+Beide Modi verwenden abschließend dieselbe deterministische Prüfung: Rücksprünge,
+unbelegte Sprünge und unklare Grenzen erhalten keine Ersatzzuordnung. Ein
+widersprüchlicher Rücksprung öffnet auch den vorherigen Vorwärtssprung zur Prüfung.
+Warnungen nennen konkrete Zeilenbereiche, und der Lauf endet als bearbeitbarer
+Entwurf (`review_draft` bei technisch vollständiger Verarbeitung mit offenen
+Grenzen). Ein abgelehnter Sprung wird durch Wiederholung im Folgefenster nicht
+nachträglich gültig. TOPs ohne bereinigte Zuordnungen bleiben geplant und
+`not_evidenced`; die Zusammenfassung bleibt leer und benötigt keinen Modellaufruf.
+
+`llm.provenance.original_line_results`, `original_agenda_states` und die vorhandenen
+Rekonstruktionen bewahren die Modellvorschläge mit Quellen. `order_review_ranges`
+enthält die offenen Bereiche. Zusammenfassungen verwenden ausschließlich die
+bereinigten Zuordnungen; die ursprünglichen Vorschläge dienen der Nachprüfung.
+Offensichtliche PDF-Dokumentlabels wie „Einladungstext“ und „Unterschrift“ werden
+in beiden Modi aus den tatsächlichen TOPs ausgeschlossen. Die Einträge bleiben
+mit `original_kind`, `exclusion_reason` und PDF-Quellen im Prüfmaterial erhalten.
+
+Ohne feste Reihenfolge verwenden bekannte Agenden und Erkennung ohne Einladung denselben Ablauf.
 Zwei getrennte Modellaufrufe ermitteln zuerst belegbare Punkte bzw. zusätzliche
 Punkte einer bekannten Agenda; Unterschiede werden anhand der Quellen
 modellgestützt geklärt. Bestehende TOPs bleiben mit ihren Identitäten erhalten.
@@ -91,7 +134,7 @@ Modellübereinstimmung ist **kein nachgewiesener fachlicher Qualitätsmaßstab**
 
 ## Kompakter Quellenvertrag ab September 2026
 
-Fast und optional kompaktes Slow verwenden `agenda-change-map-v12`. `initial`
+Fast und optional kompaktes Slow verwenden `agenda-change-map-v13`. `initial`
 enthält die ausdrückliche Zuordnung der ersten Zielzeile mit `top_ids`, `reason`,
 `evidence`, `uncertain`, `confidence`. Das verpflichtende Objekt `changes` enthält
 die erste Quellen-ID jedes Wechsels als Schlüssel und die neue Zuordnung als Wert.

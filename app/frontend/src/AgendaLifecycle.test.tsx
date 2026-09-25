@@ -369,3 +369,12 @@ it('appends independently detected points while preserving existing IDs and manu
   expect(assignments()).toEqual([0, 1]);
   expect(draft().agenda_proposals?.result.assignments).toEqual([0, 2]);
 });
+
+it('restores fixed agenda order and passes it to later reassignment', async () => {
+  stored.enforce_top_order = true;
+  render(<App />);
+  expect(await screen.findByRole('checkbox', { name: /Feste TOP-Reihenfolge erzwingen/ })).toBeChecked();
+  await userEvent.click(await screen.findByRole('button', { name: 'TOP-Zuordnung neu berechnen' }));
+  expect(detectAgenda).toHaveBeenCalledWith(expect.objectContaining({ enforceTopOrder: true }));
+  await waitFor(() => expect(draft().agenda_proposals?.source?.enforce_top_order).toBe(true));
+});
