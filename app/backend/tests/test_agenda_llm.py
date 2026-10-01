@@ -189,6 +189,16 @@ def test_long_transcript_all_originals_read_twice_and_context_retained(agenda_mo
     assert result.llm.provenance['context_archive']
 
 
+@pytest.mark.parametrize('mode,phase', [('fast', 'fast:discover'), ('slow', 'primary:discover')])
+def test_missing_provider_model_explains_assignment_failure(agenda_model, mode, phase):
+    from llm_transport import ProviderError
+    agenda_model.overrides[phase] = ProviderError('private provider body', 404)
+    result = run(['TOP 1 Haushalt.'], processing_mode=mode)
+    assert not result.llm.processing_complete
+    assert any('HTTP 404' in reason for reason in result.llm.failure_reasons)
+    assert all('private' not in reason for reason in result.llm.failure_reasons)
+
+
 def test_source_retrieval_is_model_requested_and_bounded(agenda_model, monkeypatch):
     monkeypatch.setenv('AGENDA_DETECTION_CHUNK_LINES', '1')
     def request(body):

@@ -213,6 +213,19 @@ def hash_value(value):
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
 
 
+def saved_checkpoint(job_id, key):
+    """Read a retained result outside the worker, verifying its integrity."""
+    with persistence.connect() as db:
+        row = db.execute("""SELECT s.value, i.sha256 FROM durable_steps s
+            LEFT JOIN durable_step_integrity i ON i.job_id=s.job_id AND i.step_key=s.step_key
+            WHERE s.job_id=? AND s.step_key=?""", (job_id, key)).fetchone()
+    if row is None:
+        return None
+    if not row[1] or row[1] != hash_value(row[0]):
+        raise ValueError('Checkpoint integrity mismatch')
+    return json.loads(row[0])
+
+
 def checkpoint(key, operation):
     ctx = CURRENT.get()
     if ctx is None:

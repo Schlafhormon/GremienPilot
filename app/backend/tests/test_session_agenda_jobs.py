@@ -71,6 +71,28 @@ def test_missing_or_changed_pdf_is_reported_without_starting_work(tmp_path):
     assert jobs.latest_for_session('session-1', 'pdf') is None
 
 
+def test_explicit_pdf_draft_adoption_preserves_open_review(tmp_path):
+    from pdf_fixtures import agenda, item
+    from extract_tops import _result
+    from processing_mode import pdf_usable
+    _, source, old_result, state = session_with_pdf(tmp_path)
+    draft = _result(agenda(items=[item('a')]), document=old_result['document'],
+        issues=[dict(kind='unclear', item_ids=[], metadata_fields=[], pages=[1],
+                     evidence=[dict(page=1, quote=None)], description='Original prüfen')],
+        stop_reason='invalid_repair').to_dict()
+    finish(source, draft, 'review_required')
+    state = {**state, 'processing_mode': 'slow', 'pdf_source_job_id': None}
+    persistence.save_session('session-1', state)
+    client = TestClient(main.app)
+    response = client.put('/api/sessions/session-1', json={**state, 'tops': draft['tops'],
+        'pdf_source_job_id': source['job_id']})
+    assert response.status_code == 200, response.text
+    accepted = response.json()['pdf_extraction']
+    assert accepted['stop_reason'] == 'invalid_repair'
+    assert accepted['review_required'] and not accepted['processing_complete']
+    assert not pdf_usable(accepted, 'slow')  # Explicit adoption never certifies automatic reuse.
+
+
 def test_agenda_job_belongs_to_session_and_exposes_frozen_source_for_reload(tmp_path):
     _, _, _, state = session_with_pdf(tmp_path)
     client = TestClient(main.app)

@@ -262,7 +262,7 @@ class Workflow:
                     raise
                 except Exception as exc:
                     self.usage.failed_calls += 1
-                    code = str(exc) if isinstance(exc, AgendaValidationError) else type(exc).__name__
+                    code = str(exc) if isinstance(exc, AgendaValidationError) else getattr(exc, 'public_message', type(exc).__name__)
                     if code not in self.usage.failure_reasons:
                         self.usage.failure_reasons.append(code)
                     if isinstance(exc, AgendaValidationError) and code not in self.usage.validation_reasons:
@@ -566,7 +566,7 @@ class Workflow:
                     except LLMCancelledError:
                         raise
                     except Exception as exc:
-                        code = str(exc) if isinstance(exc, AgendaValidationError) else type(exc).__name__
+                        code = str(exc) if isinstance(exc, AgendaValidationError) else getattr(exc, 'public_message', type(exc).__name__)
                         failures.update({identity: code for identity in pending})
                         if code not in self.usage.failure_reasons:
                             self.usage.failure_reasons.append(code)
@@ -917,7 +917,7 @@ class Workflow:
                 # Context remains identical for both children; ownership alone changes.
                 return {**self.run_details(role, context, agenda, reconstruction, start, middle, opinions, depth+1),
                         **self.run_details(role, context, agenda, reconstruction, middle+1, end, opinions, depth+1)}
-            code = str(exc) if isinstance(exc, AgendaValidationError) else type(exc).__name__
+            code = str(exc) if isinstance(exc, AgendaValidationError) else getattr(exc, 'public_message', type(exc).__name__)
             for i in range(start, end+1):
                 self.failures[(role, i)] = code
             return {}
@@ -975,7 +975,7 @@ def classify_ordered_fast(work, agenda, usage):
                 middle = (start+end)//2
                 windows.extendleft([(middle+1, end), (start, middle)])
                 continue
-            code = str(exc) if isinstance(exc, AgendaValidationError) else type(exc).__name__
+            code = str(exc) if isinstance(exc, AgendaValidationError) else getattr(exc, 'public_message', type(exc).__name__)
             for i in range(start, end+1):
                 work.failures[('fast:detail', i)] = code
             output = {}
@@ -1183,7 +1183,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
     except LLMCancelledError:
         raise
     except Exception as exc:
-        code = str(exc) if isinstance(exc, AgendaValidationError) else type(exc).__name__
+        code = str(exc) if isinstance(exc, AgendaValidationError) else getattr(exc, 'public_message', type(exc).__name__)
         if code not in usage.failure_reasons:
             usage.failure_reasons.append(code)
         for row in usage.line_results:

@@ -334,12 +334,54 @@ def test_pipeline_snapshot_rejects_manual_edits_and_retains_computed_result(monk
         target.update(start)
         ready.set()
         wait(lambda: jobs.load(start['pipeline_id'])['state'] in jobs.TERMINAL)
-        assert jobs.load(start['pipeline_id'])['state'] == 'superseded'
+        assert jobs.load(start['pipeline_id'])['state'] == 'review_required'
+        status = client.get(f"/api/pipeline/{start['pipeline_id']}").json()
+        assert status['status'] == 'completed' and status['retained_result_available']
+        result = client.get(f"/api/pipeline/{start['pipeline_id']}/result").json()
+        assert result['session']['tops'] == ['Manual edit']
+        assert result['agenda_detection'] is None
+        original = persistence.load_session(start['session_id'])
+        copied = client.post(f"/api/pipeline/{start['pipeline_id']}/draft-session")
+        assert copied.status_code == 200, copied.text
+        copied = copied.json()
+        assert copied['session_id'] != start['session_id']
+        assert copied['tops'] == ['1 Haushalt']
+        assert copied['summaries']['0'] == 'Automatic text'
+        assert copied['transcript'][0]['text'] == 'TOP 1 Haushalt.'
+        assert persistence.load_session(start['session_id']) == original
+        # Reopening must not overwrite subsequent edits to the separate result.
+        copy = persistence.load_session(copied['session_id'])
+        persistence.save_session(copied['session_id'], {**copy, 'tops': ['Edited copy']},
+                                 expected_revision=copy['revision'])
+        reopened = client.post(f"/api/pipeline/{start['pipeline_id']}/draft-session").json()
+        assert reopened['session_id'] == copied['session_id']
+        assert reopened['tops'] == ['Edited copy']
+        with persistence.connect() as db:
+            key = main._pipeline_refs(main.load_pipeline_job(start['pipeline_id']))['computed_session_key']
+            db.execute("UPDATE durable_steps SET value='{}' WHERE job_id=? AND step_key=?",
+                       (start['pipeline_id'], key))
+        assert client.post(f"/api/pipeline/{start['pipeline_id']}/draft-session").status_code == 409
     assert persistence.load_session(start['session_id'])['tops'] == ['Manual edit']
     with persistence.connect() as db:
         row = db.execute("SELECT value FROM durable_steps WHERE job_id=? AND step_key='pipeline:summaries'",
                          (start['pipeline_id'],)).fetchone()
     assert 'Automatic text' in row[0]
+
+
+def test_newer_computed_draft_is_retained_when_publication_is_retried():
+    original = persistence.save_session('s', {'tops': ['Haushalt'], 'top_ids': ['top-a']})
+    job = jobs.submit('pipeline', {'session_snapshot': original, 'session_revision': original['revision']})
+    main.save_pipeline_job(job['job_id'], {'session_id': 's', 'status': 'processing', 'stage': 'summarize'})
+    persistence.save_session('s', {**original, 'tops': ['Manual edit']}, expected_revision=original['revision'])
+    with claimed(job):
+        keys = []
+        for text in ['Partial result', 'Completed result']:
+            with pytest.raises(persistence.SessionConflictError):
+                main.save_pipeline_session('s', summaries={0: text})
+            keys.append(main._pipeline_refs(main.load_pipeline_job(job['job_id']))['computed_session_key'])
+        assert keys[0] != keys[1]
+        assert jobs.saved_checkpoint(job['job_id'], keys[-1])['summaries']['0'] == 'Completed result'
+    assert persistence.load_session('s')['tops'] == ['Manual edit']
 
 
 def test_cancellation_fences_publication_even_after_model_return(monkeypatch):

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, type DragEvent, type ChangeEvent } from 'react';
 import type { UploadStepProps, PdfAgendaExtractionResult } from '../types';
-import { extractAgendaDataFromPDF, pdfResultUsable, pollModelJob, API_BASE, type ModelJob } from '../api';
+import { extractAgendaDataFromPDF, pdfResultUsable, pdfResultReviewable, pollModelJob, API_BASE, type ModelJob } from '../api';
 import ProcessingModeSwitch from './ProcessingModeSwitch';
 import PdfSources from './PdfSources';
 import TopOrderOption from './TopOrderOption';
@@ -149,6 +149,10 @@ export default function UploadStep({
         setExtractionError('Eingaben wurden geändert. PDF-Ergebnis wurde nicht übernommen.');
         return;
       }
+      if (extracted.processing_complete === false) {
+        setRecovered(extracted);
+        return;
+      }
       onPdfExtracted?.(extracted);
       const extractedTops = extracted.tops.map((top) => top.trim()).filter(Boolean);
       applyDetectedMetadata(extracted.metadata ?? {});
@@ -287,7 +291,7 @@ export default function UploadStep({
         try {
           const result = await pollModelJob<PdfAgendaExtractionResult>(savedJobId, controller.signal,
             job => { setPdfJob(job); setJobPhase(`Gespeicherter PDF-Job: ${job.state}`); });
-          if (!pdfResultUsable(result, processingMode)) throw new Error(result.processing_mode === 'fast'
+          if (!pdfResultReviewable(result, processingMode)) throw new Error(result.processing_mode === 'fast'
             ? 'Gespeicherte Fast-Auswertung: Fast auswählen oder das PDF in Slow erneut auswerten.'
             : 'PDF-Ergebnis benötigt weitere Prüfung.');
           if (mounted.current) setRecovered(result);
@@ -303,7 +307,7 @@ export default function UploadStep({
         setTops(recovered.tops); applyDetectedMetadata(recovered.metadata);
         setAutoDetectTopsFromPdf(false); setSkipAgendaDetection(false);
         onPdfExtracted?.(recovered); setRecovered(null);
-      }}>{recovered.processing_mode === 'fast' ? 'PDF-TOPs ohne Inhaltsprüfung übernehmen' : 'Geprüfte PDF-TOPs übernehmen'}</button>}
+      }}>{!pdfResultUsable(recovered, processingMode) ? 'PDF-TOP-Entwurf übernehmen – Prüfung offen' : recovered.processing_mode === 'fast' ? 'PDF-TOPs ohne Inhaltsprüfung übernehmen' : 'Geprüfte PDF-TOPs übernehmen'}</button>}
       <ProcessingModeSwitch mode={processingMode} onChange={mode => { setRecovered(null); setProcessingMode?.(mode); }} disabled={processingModeDisabled || isExtractingTops} />
       <TopOrderOption checked={enforceTopOrder} onChange={setEnforceTopOrder} disabled={processingModeDisabled} />
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-5">

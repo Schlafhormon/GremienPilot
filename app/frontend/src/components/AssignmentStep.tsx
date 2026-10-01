@@ -7,6 +7,7 @@ import type {
 } from '../types';
 import AudioPlayer from './AudioPlayer';
 import ModelJobStatus from './ModelJobStatus';
+import PdfSources from './PdfSources';
 import { useAudioSync } from '../hooks/useAudioSync';
 import SpeakerNameEditor from './SpeakerNameEditor';
 import { mergedTiming } from '../transcriptTiming';
@@ -596,12 +597,16 @@ export default function AssignmentStep({
       </section>
       {pdfCandidate && <section aria-label="Neue PDF-Tagesordnung" className="rounded-lg border border-blue-200 bg-white p-4">
         <h3 className="font-medium">Neue PDF-Tagesordnung: {pdfCandidate.tops.length} TOPs</h3>
+        {pdfCandidate.processing_complete === false && <p role="status" className="my-2 text-amber-900">
+          Die automatische Prüfung konnte nicht abgeschlossen werden. Die extrahierten TOPs bleiben als Entwurf erhalten; bitte die offenen Fragen prüfen.
+        </p>}
+        <PdfSources result={pdfCandidate} />
         <p className="my-2 text-sm text-gray-600">Übernehmen ersetzt die aktuelle TOP-Liste. Zuordnungen und Zusammenfassungen bleiben für eindeutig unveränderte TOPs erhalten; entfallene oder geänderte TOPs müssen neu zugeordnet und zusammengefasst werden.</p>
         <details><summary className="cursor-pointer text-blue-700">Extrahierte TOPs anzeigen</summary>
           <ol className="mt-2 list-decimal space-y-1 pl-6 text-sm">{pdfCandidate.tops.map((title, index) => <li key={index}>{title}</li>)}</ol>
         </details>
         <button type="button" onClick={onApplyPdfCandidate} disabled={isDetectingAgenda || isExtractingPdf || !onApplyPdfCandidate}
-          className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-white disabled:opacity-50">TOP-Liste übernehmen</button>
+          className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-white disabled:opacity-50">{pdfCandidate.processing_complete === false ? 'TOP-Entwurf übernehmen – Prüfung offen' : 'TOP-Liste übernehmen'}</button>
       </section>}
       {agendaDetectionStale && <p className="rounded border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900">Vorschläge veraltet oder ohne überprüfbaren Quellenstand. Übernehmen gesperrt; bitte erneut berechnen. Bisherige Unsicherheiten bleiben sichtbar, Zeilenangaben beziehen sich auf den alten Stand.</p>}
 

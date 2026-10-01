@@ -32,7 +32,7 @@ Ein separater Modellaufruf je Originalseite prüft das Gesamtergebnis visuell oh
 Extraktionsdialog. Er meldet fehlende/doppelte Einträge, Unterordnung, Nummerierung,
 Abschnitte, Fortsetzungen und Metadatenwidersprüche. Befunde führen zu gezielten
 Modellreparaturen mit den betroffenen Originalbildern. Danach werden **alle** Seiten
-neu geprüft. Nur ein nichtleeres Ergebnis ohne offene Befunde wird übernommen.
+neu geprüft. Nur ein nichtleeres Ergebnis ohne offene Befunde gilt als vollständig geprüft.
 Die unabhängigen Aufrufe verwenden derzeit dieselbe konfigurierte Modellinstanz;
 das ist keine Unabhängigkeit unterschiedlicher Modellfamilien.
 
@@ -40,9 +40,17 @@ Alle Modellantworten (auch ungültige), reparierten Kandidaten und Seitenprüfun
 bleiben in `durable_steps`. Nach Prozessunterbrechung nutzt der Job vollständige
 Checkpoints; Abbruch wird vor Seiten und während Modelltransport geprüft. Bei
 veränderter Modell-/Code-/PDF-Konfiguration verweigert die vorhandene Jobversionierung
-eine gemischte Wiederaufnahme. Dann ist ein neuer Lauf erforderlich. Nach ausgeschöpften
-Reparaturbudgets endet der Job sichtbar fehlerhaft; das Original bleibt erhalten.
+eine gemischte Wiederaufnahme. Dann ist ein neuer Lauf erforderlich. Ohne gültigen
+Gesamtkandidaten endet der Job nach ausgeschöpften Reparaturversuchen sichtbar
+fehlerhaft; das Original bleibt erhalten. Liegt bereits ein strukturell gültiger
+Gesamtkandidat vor, führen ungültige Nachprüfungen und Korrekturen stattdessen zu
+einem prüfbaren Entwurf (`invalid_review` bzw. `invalid_repair`). Die Korrekturgrammatik
+begrenzt IDs, Metadatenfelder und Quellseiten auf den beanstandeten Bereich.
+Abgelehnte Änderungen werden nicht übernommen; Abbruch und Transportfehler werden weitergegeben.
 Die Oberfläche kann eine gespeicherte eigenständige PDF-Auswertung erneut öffnen.
+Ein Slow-Entwurf mit offenen Prüffragen kann ausdrücklich übernommen werden.
+Seine Quellen, Fragen und `processing_complete=false` bleiben dabei erhalten.
+Auch eine nachfolgende Pipeline kennzeichnet die PDF-Prüfung weiterhin als offen.
 
 Die bestehenden `tops`-Strings und Metadatenfelder bleiben als API-Projektion bestehen;
 zusätzliche Felder sind `items`, `metadata_sources`, `document`, `pages`, `audits`,
@@ -53,8 +61,9 @@ Schema, können aber keine visuelle Vollständigkeit bescheinigen.
 Geprüfte IDs werden bei unveränderter Agenda zu Sitzungs-TOP-IDs. Die ursprüngliche
 PDF-Auswertung wird in `agenda_proposals.source.pdf_extraction` erhalten und unabhängig
 von manuellen Änderungen angezeigt. Wiederverwendung einer eigenständigen Auswertung
-nutzt `pdf_source_job_id`; nur ein abgeschlossener, geprüfter Serverjob mit passender
-Dokumentidentität ist zulässig. Sitzungsübernahme verwendet die bestehende atomare
+nutzt `pdf_source_job_id`; zulässig sind abgeschlossene Serverjobs mit passender
+Dokumentidentität, einschließlich ausdrücklich übernommener prüfbarer Entwürfe.
+Sitzungsübernahme verwendet die bestehende atomare
 Revision-/Lease-Prüfung. Quellenabruf erfolgt über Job-ID und Hash, niemals über einen
 vom Client gelieferten Dateipfad. Die vorhandenen Zugriffsregeln der Anwendung gelten
 auch für diese Route. PDF- und Job-Daten gehören in private, gesicherte Datenvolumes.

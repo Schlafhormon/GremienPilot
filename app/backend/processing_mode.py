@@ -57,3 +57,12 @@ def pdf_usable(result, mode='slow'):
     if result.get('processing_mode', 'slow') == 'fast':
         return mode == 'fast' and result.get('review_status') == 'skipped'
     return not result.get('review_required')
+
+
+def pdf_reviewable(result, mode='slow'):
+    """Allow explicit adoption of a retained draft without certifying its review."""
+    return pdf_usable(result, mode) or bool(result and mode == 'slow'
+        and result.get('processing_mode', 'slow') == 'slow'
+        and result.get('contract_version') == 'page-evidence-v3'
+        and result.get('tops') and result.get('items')
+        and result.get('review_required') and result.get('review_questions'))

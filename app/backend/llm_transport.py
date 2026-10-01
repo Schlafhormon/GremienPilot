@@ -47,6 +47,21 @@ class ProviderError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
 
+    @property
+    def public_message(self):
+        # Provider bodies can contain prompts or secrets. Expose only fixed,
+        # actionable categories; retain the original in private diagnostics.
+        if self.status_code == 404:
+            return 'KI-Modell oder Modell-Endpunkt nicht gefunden (HTTP 404). Modellname und Verfügbarkeit auf dem Modellserver prüfen.'
+        if self.status_code in {401, 403}:
+            return 'Zugriff auf den KI-Modellserver verweigert. Zugangsdaten und Berechtigungen prüfen.'
+        if self.status_code == 429:
+            return 'KI-Modellserver ist ausgelastet oder das Anfragelimit ist erreicht. Bitte später erneut versuchen.'
+        if any(word in str(self).lower() for word in ('out of memory', 'requires more system memory',
+                'insufficient memory', 'unable to allocate', 'failed to allocate', 'cuda error')):
+            return 'Der KI-Modellserver hat nicht genügend Speicher für diese Anfrage. Modell- und Kontextgröße prüfen.'
+        return 'Anfrage an den KI-Modellserver fehlgeschlagen. Verfügbarkeit und Serverprotokoll prüfen.'
+
 
 _CONTROL = ContextVar('llm_control', default=(None, None))
 _EXPECTED_DIGEST = ContextVar('llm_expected_digest', default=None)

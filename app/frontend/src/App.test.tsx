@@ -7,6 +7,7 @@ import {
   checkBackendHealth,
   extractAgendaDataFromPDF,
   getPipelineResult,
+  openRetainedPipelineResult,
   getPipelineStatus,
   loadSession,
   listSessions,
@@ -30,6 +31,7 @@ vi.mock('./api', () => ({
   pollPipeline: vi.fn(),
   getPipelineStatus: vi.fn(),
   getPipelineResult: vi.fn(),
+  openRetainedPipelineResult: vi.fn(),
   cancelPipeline: vi.fn(),
   startSummaryJob: vi.fn(),
   pollSummaryJob: vi.fn(),
@@ -138,6 +140,33 @@ async function uploadAndStart(user = userEvent.setup()) {
 }
 
 describe('App pipeline flow', () => {
+  it('offers a separate result after a revision conflict without applying it to the edited session', async () => {
+    const user = userEvent.setup();
+    const conflict = { ...completedPipeline, retained_result_available: true };
+    const edited = pipelineResult({ tops: ['Manuell bearbeitet'], agenda_proposals: null }, conflict);
+    vi.mocked(getPipelineResult).mockResolvedValue(edited);
+    vi.mocked(pollPipeline).mockResolvedValue(conflict);
+    vi.mocked(openRetainedPipelineResult).mockResolvedValue(pipelineResult({ session_id: 'result-copy' }).session);
+    vi.mocked(loadSession).mockImplementation(async id => id === 'result-copy'
+      ? pipelineResult({ session_id: 'result-copy' }).session : edited.session);
+    await uploadAndStart(user);
+    const open = await screen.findByRole('button', { name: 'Ergebnis als eigene Sitzung öffnen' });
+    expect(screen.getByText(/Sitzung wurde während der Verarbeitung geändert/)).toBeInTheDocument();
+    expect(openRetainedPipelineResult).not.toHaveBeenCalled();
+    await user.click(open);
+    await waitFor(() => expect(window.location.pathname).toBe('/sessions/result-copy'));
+    expect(openRetainedPipelineResult).toHaveBeenCalledWith('pipeline-1');
+  });
+
+  it('keeps the separate result accessible when reopening the edited session', async () => {
+    window.history.replaceState(null, '', '/sessions/session-1');
+    vi.mocked(loadSession).mockResolvedValue(pipelineResult({
+      latest_pipeline: { ...completedPipeline, retained_result_available: true },
+    }).session);
+    render(<App />);
+    expect(await screen.findByRole('button', { name: 'Ergebnis als eigene Sitzung öffnen' })).toBeInTheDocument();
+  });
+
   it('persists Fast, locks it during processing and opens the unreviewed result directly', async () => {
     const user = userEvent.setup();
     let finish!: (job: PipelineJob) => void;

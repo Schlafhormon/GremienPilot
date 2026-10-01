@@ -34,4 +34,17 @@ Eingaben, Dokumenthashes, öffentliche Modellkonfiguration, Code-/Promptversione
 
 Veröffentlichungen prüfen Lease und Abbruch in derselben SQLite-Transaktion wie die Sitzungsänderung. Pipeline-Ergebnisse werden gegen die Startrevision übernommen; selektive Zusammenfassungen prüfen TOP-Identität, Eingabe- und Bearbeitungsfingerabdruck. Konflikte erhalten manuelle Änderungen. Abgeschlossene Zusammenfassungen besitzen eine atomare Veröffentlichungsmarke, sodass auch ein Absturz unmittelbar nach dem Speichern keinen erfolgreichen TOP erneut generiert. Ältere Daten und Statuswerte bleiben lesbar; aktive alte Jobs werden beim Start in die neue Warteschlange aufgenommen.
 
+Bei einem Revisionskonflikt nach abgeschlossener Pipeline-Berechnung bleibt der
+vollständige Sitzungsentwurf im integritätsgeprüften Checkpoint
+`pipeline:computed-session:<hash>` erhalten. Der Job endet als `review_required`; der
+Pipeline-Status enthält `retained_result_available=true`. Die Oberfläche lässt
+die bearbeitete Sitzung unverändert und bietet „Ergebnis als eigene Sitzung
+öffnen“ an. `POST /api/pipeline/{id}/draft-session` erstellt diese separate Sitzung;
+weitere Aufrufe öffnen dieselbe Kopie, ohne deren spätere Bearbeitungen zu überschreiben.
+Abbruch und abgelaufene Worker-Leases erlauben weiterhin keine Veröffentlichung.
+
+Providerfehler liefern feste öffentliche Fehlermeldungen, beispielsweise für
+HTTP 404 (Modell oder Endpunkt fehlt), fehlende Zugriffsrechte oder Speichermangel.
+Private Providerantworten bleiben in den vorhandenen Diagnoseartefakten.
+
 PDFs werden nicht beim Jobende gelöscht. `MODEL_DOCUMENT_RETENTION_DAYS=0` bewahrt sie unbegrenzt auf. Bei einem positiven Wert sind nur abgeschlossene oder abgebrochene Jobs nach Ablauf bereinigbar; aktive, gestörte, fehlgeschlagene und prüfbedürftige Jobs bleiben gesperrt. Aus dem Backend-Verzeichnis zeigt `python -m durable_jobs --cleanup-documents` die Kandidaten, erst `--apply` löscht diese Dateien und speichert den Löschzeitpunkt mit dem Dokumenthash. Jobdaten, geprüfte Ergebnisse und die Nachweisdaten bleiben erhalten. Es erfolgt keine automatische Bereinigung beim Start oder im Worker.

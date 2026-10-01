@@ -351,6 +351,28 @@ it('keeps existing TOPs when PDF processing fails and shows the failure', async 
   expect(screen.queryByRole('button', { name: 'TOP-Liste übernehmen' })).not.toBeInTheDocument();
 });
 
+it('retains an incomplete Slow PDF as an explicitly adoptable draft with open questions', async () => {
+  stored.has_pdf_source = true;
+  stored.processing_mode = 'slow';
+  const result: PdfAgendaExtractionResult = { ...extractedPdf, processing_mode: 'slow',
+    processing_complete: false, review_status: 'pending', contract_version: 'page-evidence-v3',
+    document: { job_id: 'pdf-new', sha256: 'pdf-hash', page_count: 2, url: '/api/model-jobs/pdf-new/documents/pdf-hash' },
+    items: [{ id: 'a', title: 'Schulbau', number: null, section: null, kind: 'agenda', parent_id: null,
+      sources: [{ page: 1, quote: null }] }],
+    review_questions: [{ kind: 'unclear', item_ids: [], pages: [1], description: 'Bitte Originalseite prüfen' }],
+  };
+  vi.mocked(reextractSessionPDF).mockResolvedValueOnce(result);
+  render(<App />);
+  await userEvent.click(await screen.findByRole('button', { name: 'TOPs aus PDF neu extrahieren' }));
+  const apply = await screen.findByRole('button', { name: 'TOP-Entwurf übernehmen – Prüfung offen' });
+  expect(draft().tops).toEqual(['Haushalt', 'Schulbau']);
+  expect(screen.getByText(/Bitte Originalseite prüfen/)).toBeInTheDocument();
+  await userEvent.click(apply);
+  expect(draft().tops).toEqual(result.tops);
+  expect(draft().pdf_source_job_id).toBe('pdf-new');
+  expect(screen.getByText(/Dieser Entwurf ist nicht vollständig bestätigt/)).toBeInTheDocument();
+});
+
 it('appends independently detected points while preserving existing IDs and manual assignments', async () => {
   vi.mocked(detectAgenda).mockImplementation(async input => {
     const result = detection(input);

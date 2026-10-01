@@ -4,6 +4,7 @@ import {
   archiveSpeakerProfile,
   backfillSpeakerEmbeddings,
   getPipelineResult,
+  openRetainedPipelineResult,
   pollPipeline,
   pollSummaryJob,
   pollModelJob,
@@ -30,6 +31,13 @@ import {
 } from './api';
 
 describe('api session client', () => {
+  it('opens a retained pipeline result as a separate session', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ session_id: 'copy' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    expect((await openRetainedPipelineResult('pipeline-1')).session_id).toBe('copy');
+    expect(fetchMock).toHaveBeenCalledWith('/api/pipeline/pipeline-1/draft-session', { method: 'POST' });
+  });
+
   it('sends Fast to every standalone generation endpoint and accepts its unreviewed PDF', async () => {
     const pdf = { tops: ['Haushalt'], metadata: {}, processing_complete: true,
       processing_mode: 'fast', review_status: 'skipped', review_required: true };

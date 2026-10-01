@@ -38,6 +38,17 @@ export class SessionConflictError extends Error {
   }
 }
 
+export async function openRetainedPipelineResult(pipelineId: string): Promise<SessionResponse> {
+  const response = await fetch(`${API_BASE}/api/pipeline/${encodeURIComponent(pipelineId)}/draft-session`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Verarbeitungsergebnis konnte nicht geöffnet werden');
+  }
+  return response.json();
+}
+
 export const API_BASE = import.meta.env.VITE_API_URL || "";
 const configuredClientLlmTextChars = Number(
   import.meta.env.VITE_MAX_CLIENT_LLM_TEXT_CHARS
@@ -1022,6 +1033,12 @@ export function pdfResultUsable(data: PdfAgendaExtractionResult, mode: Processin
     : !data.review_required;
 }
 
+export function pdfResultReviewable(data: PdfAgendaExtractionResult, mode: ProcessingMode): boolean {
+  return pdfResultUsable(data, mode) || Boolean(mode === 'slow' && (data.processing_mode ?? 'slow') === 'slow'
+    && data.contract_version === 'page-evidence-v3' && data.tops?.length && data.items?.length
+    && data.review_required && data.review_questions?.length);
+}
+
 export async function extractAgendaDataFromPDF(
   pdfFile: File,
   options?: ExtractTOPsOptions
@@ -1053,7 +1070,7 @@ export async function extractAgendaDataFromPDF(
   const data = started.job_id
     ? await pollModelJob<PdfAgendaExtractionResult>(started.job_id, options?.signal, options?.onStatus)
     : started;
-  if (!pdfResultUsable(data, options?.processingMode ?? "slow")) {
+  if (!pdfResultReviewable(data, options?.processingMode ?? "slow")) {
     throw new Error('PDF-Auswertung ist nicht vollständig geprüft. Ergebnis wurde nicht übernommen.');
   }
   return { ...data, tops: data.tops ?? [], metadata: data.metadata ?? {} };

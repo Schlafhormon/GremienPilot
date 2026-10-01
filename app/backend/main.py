@@ -50,7 +50,7 @@ from summarize import (
     meeting_context_from_transcript,
     summarize_segment,
 )
-from processing_mode import ProcessingMode, agenda_complete as agenda_processing_complete, pdf_usable
+from processing_mode import ProcessingMode, agenda_complete as agenda_processing_complete, pdf_usable, pdf_reviewable
 from extract_tops import extract_agenda_data_from_pdf
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
@@ -628,6 +628,7 @@ class PipelineStartResponse(BaseModel):
 
 
 class PipelineStatusResponse(BaseModel):
+    retained_result_available: bool = False
     execution: Optional[Dict[str, Any]] = None
     pipeline_id: str
     session_id: Optional[str] = None
@@ -1142,7 +1143,8 @@ def session_pdf_extraction(session, pipeline=None):
         source = durable.load(source_id)
         if source and source['kind'] == 'pdf' and source.get('result'):
             return source['result']
-    return _pipeline_refs(pipeline).get('pdf_extraction') if pipeline else None
+    return ((_pipeline_refs(pipeline).get('pdf_extraction') if pipeline else None) or
+            ((session.get('agenda_proposals') or {}).get('source') or {}).get('pdf_extraction'))
 
 
 def session_pdf_document(session, pipeline=None):
@@ -1904,6 +1906,7 @@ def parse_pipeline_options(raw_options: str | None) -> dict[str, Any]:
 def build_pipeline_status_response(job: dict[str, Any]) -> PipelineStatusResponse:
     refs = _pipeline_refs(job)
     return PipelineStatusResponse(
+        retained_result_available=bool(refs.get('retained_result_available')),
         execution=durable.public(work) if (work := durable.load(job["pipeline_job_id"])) else None,
         pipeline_id=job["pipeline_job_id"],
         session_id=job.get("session_id"),
@@ -1923,6 +1926,8 @@ def session_agenda_proposals(
 ) -> dict[str, Any] | None:
     if session.get("agenda_proposals") is not None:
         return session["agenda_proposals"]
+    if latest_pipeline and _pipeline_refs(latest_pipeline).get('retained_result_available'):
+        return None
     # Old pipeline artifacts have no immutable input snapshot. Preserve warnings,
     # but never rebind their positional indices to today's edited session.
     info = _pipeline_refs(latest_pipeline).get("agenda") if latest_pipeline else None
@@ -2688,7 +2693,7 @@ def save_pipeline_session(
     publication_key = "pipeline:draft:" + draft_phase if draft_phase else "pipeline:published"
     if ctx and durable.published(publication_key):
         return session
-    state = dict(session)
+    state = dict(ctx.payload.get('session_snapshot') or session) if ctx else dict(session)
     if enforce_top_order is not None:
         state["enforce_top_order"] = enforce_top_order
     if processing_mode is not None:
@@ -2742,6 +2747,16 @@ def save_pipeline_session(
     state.setdefault("summary_states", {})
     state.setdefault("export_metadata", {})
     state.setdefault("skipped_assignment", False)
+    if ctx and summaries is not None:
+        # Preserve an independently reviewable result before the revision fence.
+        # Use the job's original editing state, not concurrent session edits.
+        retained = dict(state)
+        retained['processing_mode'] = ctx.payload['versions']['processing']['mode']
+        retained['enforce_top_order'] = (ctx.payload.get('legacy_snapshot', {}).get('result_refs', {})
+                                       .get('options', {}).get('enforce_top_order', False))
+        result_key = 'pipeline:computed-session:' + durable.hash_value(json.dumps(retained, sort_keys=True))
+        durable.checkpoint(result_key, lambda: retained)
+        save_pipeline_state(ctx.job_id, result_refs={'computed_session_key': result_key})
     with durable.publication(publication_key):
         return save_session(session_id, state,
             expected_revision=ctx.payload.get("session_revision") if ctx else session.get("revision"),
@@ -2785,6 +2800,9 @@ def detect_pipeline_agenda(
     pdf_extraction = options.get("pdf_source_extraction")
     if pdf_extraction:
         save_pipeline_state(pipeline_id, result_refs={"pdf_extraction": pdf_extraction})
+        pdf_incomplete = not pdf_usable(pdf_extraction, options.get('processing_mode', 'slow'))
+        if pdf_incomplete:
+            append_pipeline_warning(pipeline_id, 'Übernommener PDF-Entwurf benötigt weiterhin manuelle Prüfung.')
         pdf_metadata = pdf_extraction["metadata"]
         if not agenda_tops:
             agenda_tops = pdf_extraction["tops"]
@@ -3446,10 +3464,11 @@ async def start_pipeline(
         if not source_job or source_job['kind'] != 'pdf' or source_job['state'] not in {'completed', 'review_required'}:
             raise HTTPException(422, 'PDF-Quelljob ist nicht vollständig abgeschlossen')
         source_extraction = source_job.get('result')
-        if not pdf_usable(source_extraction, effective_mode) or source_extraction.get('contract_version') not in {'page-evidence-v3', 'fast-extraction-v1'}:
+        if not pdf_reviewable(source_extraction, effective_mode) or source_extraction.get('contract_version') not in {'page-evidence-v3', 'fast-extraction-v1'}:
             raise HTTPException(422, 'PDF-Quelljob hat keine vollständige visuelle Quellenprüfung nach aktuellem Vertrag; neue Auswertung erforderlich')
         source_hash = (source_extraction.get('document') or {}).get('sha256')
-        if not source_hash or not source_extraction.get('items') or (source_extraction.get('processing_mode', 'slow') == 'slow' and not source_extraction.get('audits')) or not any(
+        if not source_hash or not source_extraction.get('items') or (source_extraction.get('processing_mode', 'slow') == 'slow'
+                and source_extraction.get('processing_complete') and not source_extraction.get('audits')) or not any(
             doc['sha256'] == source_hash for doc in source_job.get('documents') or []
         ):
             raise HTTPException(422, 'PDF-Quelljob hat keine vollständige visuelle Quellenprüfung; neue Auswertung erforderlich')
@@ -3460,7 +3479,7 @@ async def start_pipeline(
     pipeline_id = str(uuid.uuid4())
     transcription_job_id = str(uuid.uuid4())
     effective_session_id = session_id or str(uuid.uuid4())
-    parsed_options.pop("pdf_source_extraction", None)  # only verified server-owned provenance
+    parsed_options.pop("pdf_source_extraction", None)  # only server-owned provenance
     if agenda_fresh:
         parsed_options['agenda_cache_namespace'] = str(uuid.uuid4())
     if agenda_use_llm is not None:
@@ -3627,7 +3646,7 @@ async def get_pipeline_result(pipeline_id: str):
         for observation in load_speaker_observations(session_id=session_id)
     ]
     status = build_pipeline_status_response(pipeline_job)
-    agenda_detection = build_pipeline_agenda_detection_response(
+    agenda_detection = None if status.retained_result_available else build_pipeline_agenda_detection_response(
         _pipeline_refs(pipeline_job).get("agenda"),
         session_response,
     )
@@ -3640,6 +3659,37 @@ async def get_pipeline_result(pipeline_id: str):
         warnings=status.warnings,
         agenda_detection=agenda_detection,
     )
+
+
+@app.post('/api/pipeline/{pipeline_id}/draft-session', response_model=SessionResponse)
+async def open_retained_pipeline_result(pipeline_id: str):
+    pipeline = load_pipeline_job(pipeline_id)
+    if pipeline is None:
+        raise HTTPException(404, 'Pipeline nicht gefunden')
+    if not _pipeline_refs(pipeline).get('retained_result_available'):
+        raise HTTPException(409, 'Kein separates Verarbeitungsergebnis vorhanden')
+    work = durable.load(pipeline_id)
+    if not work or work['state'] not in {'completed', 'review_required'}:
+        raise HTTPException(409, 'Verarbeitungsergebnis ist noch nicht verfügbar')
+    try:
+        state = durable.saved_checkpoint(pipeline_id, _pipeline_refs(pipeline).get('computed_session_key'))
+    except ValueError:
+        raise HTTPException(409, 'Gespeichertes Verarbeitungsergebnis ist beschädigt')
+    if state is None:
+        raise HTTPException(404, 'Gespeichertes Verarbeitungsergebnis fehlt')
+    # A repeat click opens the same copy, including subsequent manual edits.
+    session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'pipeline-result:' + pipeline_id))
+    session = load_session(session_id)
+    if session is None:
+        state = {**state, 'session_id': session_id, 'current_step': 2}
+        if not state.get('tops'):
+            for summary in (state.get('summary_states') or {}).values():
+                summary['top_id'] = f'whole-session:{session_id}'
+        try:
+            session = save_session(session_id, state, expected_revision=0)
+        except SessionConflictError:
+            session = load_session(session_id)
+    return build_session_response(session)
 
 
 @app.get("/api/sessions", response_model=SessionListResponse)
@@ -3716,7 +3766,7 @@ def reconcile_pdf_source(request, state, existing, session_id):
         source = durable.load(source_id)
         if (not source or source['kind'] != 'pdf' or source['state'] not in {'completed', 'review_required'}
                 or source['payload'].get('session_id') not in {None, session_id}
-                or not pdf_usable(source.get('result'), state.get('processing_mode', 'slow'))):
+                or not pdf_reviewable(source.get('result'), state.get('processing_mode', 'slow'))):
             raise HTTPException(422, 'PDF-Auswertung ist für diese Sitzung noch nicht verwendbar')
 
 
@@ -5032,7 +5082,18 @@ def run_durable_job(job):
             return result, 'failed'
         return result, 'review_required' if (result.get('llm') or {}).get('review_required', True) or result.get('uncertain_count') or None in result.get('assignments', []) else 'completed'
     if job['kind'] == 'pipeline':
-        run_pipeline_job(job['job_id'], app.state.models)
+        try:
+            run_pipeline_job(job['job_id'], app.state.models)
+        except SessionConflictError:
+            result_key = _pipeline_refs(load_pipeline_job(job['job_id'])).get('computed_session_key')
+            if durable.saved_checkpoint(job['job_id'], result_key) is None:
+                raise
+            append_pipeline_warning(job['job_id'], 'Die Sitzung wurde während der Verarbeitung geändert. '
+                'Das berechnete Ergebnis kann als eigene Sitzung geöffnet werden; Ihre Änderungen bleiben erhalten.')
+            save_pipeline_state(job['job_id'], status=PIPELINE_STATUS_COMPLETED,
+                stage=PIPELINE_STAGE_READY_FOR_REVIEW, progress=100, error=None,
+                result_refs={'retained_result_available': True, 'publication_status': 'conflict_draft',
+                             'ready_for_review': True, 'processing_complete': False})
         old = load_pipeline_job(job['job_id'])
         refs = _pipeline_refs(old)
         state = old['status']

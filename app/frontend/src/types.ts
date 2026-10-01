@@ -108,6 +108,7 @@ export type PipelineStage =
   | string;
 
 export interface PipelineJob {
+  retained_result_available?: boolean;
   execution?: import('./api').ModelJob | null;
   pipeline_id: string;
   session_id?: string | null;

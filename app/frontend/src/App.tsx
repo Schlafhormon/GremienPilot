@@ -20,6 +20,7 @@ import {
   pollPipeline,
   getPipelineStatus,
   getPipelineResult,
+  openRetainedPipelineResult,
   cancelPipeline,
   startSummaryJob,
   pollSummaryJob,
@@ -29,7 +30,7 @@ import {
   detectAgenda,
   reextractSessionPDF,
   pollModelJob,
-  pdfResultUsable,
+  pdfResultReviewable,
   type ModelJob,
   saveSession,
   loadSession,
@@ -442,6 +443,7 @@ export default function App() {
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [pipelineJob, setPipelineJob] = useState<PipelineJob | null>(null);
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null);
+  const [openingRetainedResult, setOpeningRetainedResult] = useState(false);
   const [directProtocolAvailable, setDirectProtocolAvailable] = useState(false);
   const [restoreCandidate, setRestoreCandidate] = useState<{
     sessionId: string | null;
@@ -686,6 +688,18 @@ export default function App() {
   }, []);
 
   const applyPipelineResult = useCallback((result: PipelineResultResponse) => {
+    if (result.pipeline.retained_result_available) {
+      // Keep the edited session intact; computed assignments belong to the copy.
+      applySession(result.session);
+      setPipelineJob(result.pipeline);
+      setPipelineId(null);
+      setIsProcessing(false);
+      setProcessingError(null);
+      setDirectProtocolAvailable(false);
+      setPipelineNotice('Die Sitzung wurde während der Verarbeitung geändert. Das berechnete Ergebnis steht als eigene Sitzung bereit.');
+      localStorage.removeItem(ACTIVE_PIPELINE_KEY);
+      return;
+    }
     const speakerObservations = result.speaker_observations ?? [];
     const suggestedSpeakerNames = applySuggestedSpeakerNames(result.session, speakerObservations);
     const speakerReplacements: Record<string, string> = {};
@@ -1312,6 +1326,19 @@ export default function App() {
     navigate(`/sessions/${encodeURIComponent(targetSessionId)}`);
   };
 
+  const handleOpenRetainedResult = async () => {
+    if (!pipelineJob || openingRetainedResult) return;
+    setOpeningRetainedResult(true);
+    try {
+      const result = await openRetainedPipelineResult(pipelineJob.pipeline_id);
+      handleOpenSession(result.session_id);
+    } catch (error) {
+      setPipelineNotice(error instanceof Error ? error.message : 'Verarbeitungsergebnis konnte nicht geöffnet werden');
+    } finally {
+      setOpeningRetainedResult(false);
+    }
+  };
+
   const handleReloadCurrentSession = async () => {
     if (!sessionId) return;
     setIsLoadingRouteSession(true);
@@ -1556,7 +1583,7 @@ export default function App() {
       const result = resume ? await pollModelJob<PdfAgendaExtractionResult>(resume.job_id, controller.signal, onStatus)
         : await reextractSessionPDF(sessionId, { model: llmSettings.model, processingMode, signal: controller.signal, onStatus });
       if (requestId !== pdfRequestRef.current) return;
-      if (!pdfResultUsable(result, processingMode) || !result.tops.length) {
+      if (!pdfResultReviewable(result, processingMode) || !result.tops.length) {
         throw new Error('Die PDF-Extraktion ist unvollständig oder passt nicht zum gewählten Modus. Die bisherige TOP-Liste bleibt erhalten.');
       }
       setPdfCandidate(result);
@@ -1625,7 +1652,7 @@ export default function App() {
   };
 
   const handleApplyPdfCandidate = () => {
-    if (!pdfCandidate || !pdfResultUsable(pdfCandidate, processingMode) || isDetectingAgenda || isExtractingPdf) return;
+    if (!pdfCandidate || !pdfResultReviewable(pdfCandidate, processingMode) || isDetectingAgenda || isExtractingPdf) return;
     const sourceId = pdfCandidate.document?.job_id ?? pdfJob?.job_id;
     if (!sourceId) {
       setPdfExtractionError('Die neue PDF-Auswertung hat keine gespeicherte Quellenreferenz. Bitte erneut extrahieren.');
@@ -1791,10 +1818,16 @@ export default function App() {
 
       {!isProcessing && <StepIndicator currentStep={currentStep} />}
 
-      {!isProcessing && pipelineNotice && (
+      {!isProcessing && (pipelineNotice || pipelineJob?.retained_result_available) && (
         <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span>{pipelineNotice}</span>
+            <span>{pipelineNotice || 'Ein separat gespeichertes Verarbeitungsergebnis steht zur Prüfung bereit.'}</span>
+            {pipelineJob?.retained_result_available && (
+              <button type="button" onClick={handleOpenRetainedResult} disabled={openingRetainedResult}
+                className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+                {openingRetainedResult ? 'Ergebnis wird geöffnet…' : 'Ergebnis als eigene Sitzung öffnen'}
+              </button>
+            )}
             {directProtocolAvailable && hasFreshSummariesInState &&
               agendaDetection && !agendaDetectionStale && !hasAgendaUncertainty(agendaDetection) && (
               <button
@@ -1883,7 +1916,7 @@ export default function App() {
           onExtractPdf={() => void handleExtractPdf()}
           onCancelPdf={() => pdfAbortRef.current?.abort()}
           pdfCandidate={pdfCandidate}
-          onApplyPdfCandidate={pdfCandidate && pdfResultUsable(pdfCandidate, processingMode) ? handleApplyPdfCandidate : undefined}
+          onApplyPdfCandidate={pdfCandidate && pdfResultReviewable(pdfCandidate, processingMode) ? handleApplyPdfCandidate : undefined}
           onTranscriptStructureChange={handleTranscriptStructureChange}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}

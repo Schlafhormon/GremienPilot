@@ -5,7 +5,8 @@ import { extractAgendaDataFromPDF } from '../api';
 import type { UploadStepProps } from '../types';
 import UploadStep from './UploadStep';
 
-vi.mock('../api', () => ({
+vi.mock('../api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api')>(),
   extractAgendaDataFromPDF: vi.fn(),
 }));
 
@@ -43,6 +44,25 @@ function renderUploadStep(overrides: Partial<UploadStepProps> = {}) {
 }
 
 describe('UploadStep', () => {
+  it('shows an incomplete PDF draft and waits for explicit adoption', async () => {
+    const setTops = vi.fn();
+    const onPdfExtracted = vi.fn();
+    vi.mocked(extractAgendaDataFromPDF).mockResolvedValueOnce({ tops: ['Haushalt'], metadata: {},
+      processing_complete: false, processing_mode: 'slow', review_required: true,
+      document: { job_id: 'pdf-draft', sha256: 'hash', page_count: 1, url: '/api/model-jobs/pdf-draft/documents/hash' },
+      review_questions: [{ kind: 'unclear', item_ids: [], pages: [1], description: 'Nummer prüfen' }] });
+    const { container } = renderUploadStep({ setTops, onPdfExtracted, processingMode: 'slow' });
+    fireEvent.change(container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]')!, {
+      target: { files: [new File(['pdf'], 'invitation.pdf', { type: 'application/pdf' })] },
+    });
+    const apply = await screen.findByRole('button', { name: 'PDF-TOP-Entwurf übernehmen – Prüfung offen' });
+    expect(setTops).not.toHaveBeenCalled();
+    expect(onPdfExtracted).not.toHaveBeenCalled();
+    await userEvent.click(apply);
+    expect(setTops).toHaveBeenCalledWith(['Haushalt']);
+    expect(onPdfExtracted).toHaveBeenCalledWith(expect.objectContaining({ processing_complete: false }));
+  });
+
   it('uses the selected mode for PDF extraction and locks the switch while it runs', async () => {
     let finish!: (value: { tops: string[]; metadata: object }) => void;
     vi.mocked(extractAgendaDataFromPDF).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));

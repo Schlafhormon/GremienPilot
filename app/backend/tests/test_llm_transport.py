@@ -78,6 +78,14 @@ def call(config=None, **kwargs):
                               max_tokens=kwargs.pop('max_tokens', 100), **kwargs)
 
 
+@pytest.mark.parametrize('status,expected', [(404, 'Modellname'), (401, 'Zugangsdaten'),
+    (403, 'Berechtigungen'), (429, 'Anfragelimit'), (500, 'Serverprotokoll')])
+def test_provider_public_errors_are_actionable_without_exposing_response(status, expected):
+    error = transport.ProviderError('private transcript and secret key', status)
+    assert expected in error.public_message
+    assert 'private' not in error.public_message and 'secret' not in error.public_message
+
+
 def test_budget_counts_utf8_system_user_and_output(monkeypatch):
     monkeypatch.setenv('LLM_CONTEXT_TOKENS', '4096')
     messages = [{'role': 'system', 'content': 'ä' * 1000}, {'role': 'user', 'content': 'x' * 1000}]

@@ -82,6 +82,64 @@ def test_failed_pdf_job_retains_attempts_and_reports_safe_reason(monkeypatch):
         assert len([step for step in steps if ':attempt:' in step[0]]) == 2
 
 
+def test_failed_pdf_repair_finishes_as_accessible_draft(monkeypatch):
+    import extract_tops as pdf
+    from test_main import wait_until
+    from pdf_fixtures import item
+    candidate = agenda(items=[item('a'), item('b', title='Bau')])
+    issue = dict(kind='unsupported', item_ids=['a'], metadata_fields=[], pages=[1],
+                 evidence=[dict(page=1, quote=None)], description='Bitte Haushalt prüfen')
+    wrong = dict(upsert=[dict(item=item('b', title='Wrong change'), after_id=None)], delete_ids=[], metadata=[])
+    answers = iter([candidate, candidate, audit(1, [issue]), audit(0), wrong, wrong])
+    monkeypatch.setattr(pdf, '_request', lambda *args: json.dumps(next(answers)))
+    with TestClient(main.app) as client:
+        started = client.post('/api/extract-tops/jobs', files={'pdf': ('source.pdf', pdf_bytes(), 'application/pdf')}).json()
+        assert wait_until(lambda: jobs.load(started['job_id'])['state'] in jobs.TERMINAL)
+        result = client.get('/api/model-jobs/' + started['job_id']).json()
+        assert result['state'] == 'review_required' and result['error'] is None
+        draft = result['result']
+        assert draft['tops'] == ['Haushalt', 'Bau']
+        assert not draft['processing_complete'] and draft['stop_reason'] == 'invalid_repair'
+        assert client.get(draft['document']['url']).status_code == 200
+
+
+@pytest.mark.parametrize('has_audit', [False, True])
+def test_explicit_draft_source_can_start_pipeline_without_losing_open_review(tmp_path, monkeypatch, has_audit):
+    import persistence
+    import extract_tops as pdf
+    from types import SimpleNamespace
+    from conftest import FakeTranscriptionModels
+    monkeypatch.setattr(main.app.state, 'models_loaded', True, raising=False)
+    monkeypatch.setattr(main.app.state, 'models', FakeTranscriptionModels(device='cpu'), raising=False)
+    main.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / 'draft.pdf'
+    path.write_bytes(pdf_bytes())
+    document = jobs.document(path)
+    source = jobs.submit('pdf', {}, documents=[document])
+    issue = dict(kind='unclear', item_ids=[], metadata_fields=[], pages=[1],
+                 evidence=[dict(page=1, quote=None)], description='Originalseite prüfen')
+    draft = pdf._result(agenda(), document={'job_id': source['job_id'], 'sha256': document['sha256']},
+        audits=[audit(1, [issue])] if has_audit else [], issues=[issue], stop_reason='invalid_review').to_dict()
+    with persistence.connect() as db:
+        db.execute("UPDATE durable_jobs SET state='review_required',result=? WHERE job_id=?",
+                   (json.dumps(draft), source['job_id']))
+    async def enqueue(_):
+        pass
+    async def manager():
+        return SimpleNamespace(enqueue=enqueue)
+    monkeypatch.setattr(main, 'get_or_create_pipeline_manager', manager)
+    client = TestClient(main.app)
+    response = client.post('/api/pipeline/start', files={'audio': ('a.mp3', b'audio', 'audio/mpeg')},
+        data={'pdf_source_job_id': source['job_id'], 'processing_mode': 'slow', 'agenda_use_llm': 'false'})
+    assert response.status_code == 200, response.text
+    pipeline_id = response.json()['pipeline_id']
+    options = main._pipeline_refs(main.load_pipeline_job(pipeline_id))['options']
+    monkeypatch.setattr(main, 'extract_agenda_data_from_pdf', lambda *a, **kw: pytest.fail('Draft was re-extracted'))
+    _, _, info, _ = main.detect_pipeline_agenda(pipeline_id, [], known_tops=[], pdf_path=None, options=options)
+    assert info['pdf_incomplete']
+    assert info['pdf_extraction']['review_questions'] == [issue]
+
+
 def test_attached_broken_pdf_is_not_ignored_when_auto_flag_is_false(tmp_path, monkeypatch):
     source = tmp_path / 'broken.pdf'; source.write_bytes(b'broken')
     monkeypatch.setattr(main, 'detect_agenda_from_transcript', lambda *a, **kw: pytest.fail('Transcript fallback called'))
