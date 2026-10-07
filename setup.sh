@@ -49,12 +49,12 @@ else
 fi
 
 BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
-OLLAMA_IMAGE="${OLLAMA_IMAGE:-ollama/ollama:${OLLAMA_IMAGE_TAG:-0.34.4}}"
-OLLAMA_MODEL="${LLM_MODEL:-qwen3.5:9b}"
+LLAMA_IMAGE="${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-${LLAMA_IMAGE_TAG:-b11429}}"
+LLAMA_MODEL="${LLM_MODEL:-gemma-4-31b}"
 
-# Compose must still honor OLLAMA_IMAGE from .env. A shell override remains
+# Compose must still honor LLAMA_IMAGE from .env. A shell override remains
 # exported naturally; only an explicitly selected tag needs a new export.
-if [ -n "${OLLAMA_IMAGE_TAG:-}" ]; then export OLLAMA_IMAGE; fi
+if [ -n "${LLAMA_IMAGE_TAG:-}" ]; then export LLAMA_IMAGE; fi
 export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 
 # Global state
@@ -63,7 +63,7 @@ MISSING_ITEMS=()
 # Ports used by the application
 PORT_FRONTEND=3000
 PORT_BACKEND=8010
-PORT_OLLAMA=11434
+PORT_LLM=8080
 
 # Print colored messages (German)
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -83,7 +83,7 @@ initialize_configuration() {
         return 1
     fi
     info ".env mit den Standardwerten fuer lange Sitzungen angelegt."
-    echo "Qwen3.5:9b wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
+    echo "Gemma 4 31B Q4_K_M und Protokoll-LoRA werden lokal vorbereitet."
     echo "Fuer Audio mit Sprechererkennung ggf. HF_TOKEN in .env setzen (Anleitung in README.md)."
 }
 
@@ -125,9 +125,9 @@ elif ! falsy "$PROTOKOLL_BUILD_LOCAL" && [ "$(printf '%s' "$PROTOKOLL_BUILD_LOCA
 fi
 
 if [ "$BUILD_LOCAL_IMAGES" = true ]; then
-    FRONTEND_IMAGE="ki-protokollierung-frontend:local"
-    BACKEND_CPU_IMAGE="ki-protokollierung-backend:local"
-    BACKEND_GPU_IMAGE="ki-protokollierung-backend:gpu-local"
+    FRONTEND_IMAGE="gremienpilot-frontend:gemma4-lora"
+    BACKEND_CPU_IMAGE="gremienpilot-backend:gemma4-lora"
+    BACKEND_GPU_IMAGE="gremienpilot-backend:gpu-gemma4-lora"
     BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
     export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 fi
@@ -178,9 +178,9 @@ show_help() {
 set_local_application_images() {
     BUILD_LOCAL_IMAGES=true
     PROTOKOLL_PULL_POLICY="missing"
-    FRONTEND_IMAGE="ki-protokollierung-frontend:local"
-    BACKEND_CPU_IMAGE="ki-protokollierung-backend:local"
-    BACKEND_GPU_IMAGE="ki-protokollierung-backend:gpu-local"
+    FRONTEND_IMAGE="gremienpilot-frontend:gemma4-lora"
+    BACKEND_CPU_IMAGE="gremienpilot-backend:gemma4-lora"
+    BACKEND_GPU_IMAGE="gremienpilot-backend:gpu-gemma4-lora"
     BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
     export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 }
@@ -340,11 +340,10 @@ image_exists() {
 }
 
 ########################################
-# Check if Ollama model is downloaded
+# Check if llama.cpp model is downloaded
 ########################################
-ollama_model_exists() {
-    # Ask for the effective Compose model; unrelated cached weights are not proof.
-    docker compose exec -T ollama sh -c 'ollama show "$OLLAMA_MODEL" >/dev/null 2>&1' >/dev/null 2>&1
+gemma_model_exists() {
+    [ -s "$SCRIPT_DIR/data/gemma4/checksums.sha256" ]
 }
 
 ########################################
@@ -367,12 +366,12 @@ check_disk_space() {
         MISSING_ITEMS+=("Frontend-Image (~1GB)")
     fi
 
-    if ! image_exists "$OLLAMA_IMAGE"; then
+    if ! image_exists "$LLAMA_IMAGE"; then
         required_gb=$((required_gb + 2))
-        MISSING_ITEMS+=("Ollama-Image (~2GB)")
+        MISSING_ITEMS+=("llama.cpp-Image (~2GB)")
     fi
 
-    if ! ollama_model_exists; then
+    if ! gemma_model_exists; then
         local model_disk_gb="${PROTOKOLL_MODEL_DISK_GB:-40}"
         if ! [[ "$model_disk_gb" =~ ^[1-9][0-9]*$ ]]; then
             error "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
@@ -537,7 +536,7 @@ check_ports() {
     local conflict_ports=()
 
     # Check each port (but ignore if our own containers are using them)
-    for port in $PORT_FRONTEND $PORT_BACKEND $PORT_OLLAMA; do
+    for port in $PORT_FRONTEND $PORT_BACKEND $PORT_LLM; do
         if port_in_use "$port"; then
             # Check if it's our own Docker container
             local is_our_container=false
@@ -555,7 +554,7 @@ check_ports() {
     done
 
     if [ ${#conflicts[@]} -eq 0 ]; then
-        success "Alle Ports verfuegbar (${PORT_FRONTEND}, ${PORT_BACKEND}, ${PORT_OLLAMA})"
+        success "Alle Ports verfuegbar (${PORT_FRONTEND}, ${PORT_BACKEND}, ${PORT_LLM})"
         return 0
     fi
 
@@ -905,6 +904,11 @@ do_build() {
     # Create uploads directory
     mkdir -p uploads
 
+    if ! gemma_model_exists; then
+        info "Lade Gemma-Gewichte und konvertiere den Protokoll-Adapter..."
+        python3 scripts/prepare_gemma4.py --bootstrap || return 1
+    fi
+
     # Start the application
     echo ""
     info "Baue und starte die Anwendung..."
@@ -916,8 +920,8 @@ do_build() {
 
     if [ "$BUILD_LOCAL_IMAGES" = true ]; then
         build_local_images || exit 1
-        info "Pruefe Runtime-Image fuer Ollama..."
-        docker compose pull ollama 2>/dev/null || warn "Konnte Ollama-Image nicht aktualisieren. Docker versucht es beim Start erneut."
+        info "Pruefe Runtime-Image fuer llama.cpp..."
+        docker compose pull llama 2>/dev/null || warn "Konnte llama.cpp-Image nicht aktualisieren. Docker versucht es beim Start erneut."
     else
         pull_images
     fi
@@ -1033,10 +1037,10 @@ do_status() {
         echo -e "${RED}Frontend: Nicht erreichbar${NC}"
     fi
 
-    if curl -s "http://localhost:${PORT_OLLAMA}/api/tags" > /dev/null 2>&1; then
-        echo -e "${GREEN}Ollama: Erreichbar${NC}"
+    if curl -s "http://localhost:${PORT_LLM}/health" > /dev/null 2>&1; then
+        echo -e "${GREEN}llama.cpp: Erreichbar${NC}"
     else
-        echo -e "${RED}Ollama: Nicht erreichbar${NC}"
+        echo -e "${RED}llama.cpp: Nicht erreichbar${NC}"
     fi
 
     echo ""

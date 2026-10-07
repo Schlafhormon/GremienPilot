@@ -1,6 +1,6 @@
 # Docker Compose for GremienPilot
-# Uses pre-built images from GitHub Container Registry (ghcr.io)
-# No HuggingFace token required - models are pre-bundled in the images!
+# The model runtime uses the pinned llama.cpp image from ghcr.io.
+# Build application images from this branch; prepare Gemma assets with scripts/prepare_gemma4.py.
 #
 # Usage: docker compose up -d
 # GPU mode: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
@@ -45,10 +45,13 @@ services:
       - SPEAKER_EMBEDDING_MAX_SEGMENTS=${SPEAKER_EMBEDDING_MAX_SEGMENTS:-8}
       - SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL=${SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL:-16}
       - APP_RUNTIME=docker
-      - LLM_BASE_URL=${LLM_BASE_URL:-http://ollama:11434/v1}
-      - LLM_MODEL=${LLM_MODEL:-qwen3.5:9b}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://llama:8080/v1}
+      - LLM_MODEL=${LLM_MODEL:-gemma-4-31b}
       - LLM_API_KEY=${LLM_API_KEY:-ollama}
-      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-llama-cpp}
+      - LLM_SUMMARY_STYLE=${LLM_SUMMARY_STYLE:-gemma4-lora}
+      - LLM_LORA_ID=${LLM_LORA_ID:-0}
+      - LLM_ADAPTER_REVISION=${LLM_ADAPTER_REVISION:-153460cf9a7c566df4a809a2f454c7b854c2405c}
       - LLM_THINKING=${LLM_THINKING:-}
       - LLM_THINKING_TOKENS=${LLM_THINKING_TOKENS:-}
       - LLM_OUTPUT_TOKENS=${LLM_OUTPUT_TOKENS:-}
@@ -66,9 +69,9 @@ services:
       - LLM_IMAGE_TOKENS=${LLM_IMAGE_TOKENS:-}
       - LLM_TOKENIZER_PATH=${LLM_TOKENIZER_PATH:-}
       - LLM_TOKENIZER_MODEL=${LLM_TOKENIZER_MODEL:-}
-      - LLM_MODEL_REVISION=${LLM_MODEL_REVISION:-}
+      - LLM_MODEL_REVISION=${LLM_MODEL_REVISION:-38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84}
       - LLM_OLLAMA_NATIVE=${LLM_OLLAMA_NATIVE:-}
-      - LLM_CONTEXT_TOKENS=${LLM_CONTEXT_TOKENS:-131072}
+      - LLM_CONTEXT_TOKENS=${LLM_CONTEXT_TOKENS:-16384}
       - LLM_CPU_THREADS=${LLM_CPU_THREADS:-}
       - LLM_CACHE_DIR=${LLM_CACHE_DIR:-/app/data/llm-cache}
       - LLM_AUDIT_DIR=${LLM_AUDIT_DIR:-}
@@ -94,7 +97,7 @@ services:
       - LLM_CHUNK_CHARS=${LLM_CHUNK_CHARS:-12000}
       - SUMMARY_RECONCILIATION_ROUNDS=${SUMMARY_RECONCILIATION_ROUNDS:-2}
       - SUMMARY_MODEL_ATTEMPTS=${SUMMARY_MODEL_ATTEMPTS:-2}
-      - SUMMARY_OUTPUT_TOKENS=${SUMMARY_OUTPUT_TOKENS:-8192}
+      - SUMMARY_OUTPUT_TOKENS=${SUMMARY_OUTPUT_TOKENS:-4096}
       - PERSISTENCE_DB_PATH=${PERSISTENCE_DB_PATH:-/app/state/sessions.sqlite3}
       - JOB_MAX_AGE_SECONDS=${JOB_MAX_AGE_SECONDS:-7200}
       - JOB_MAX_COUNT=${JOB_MAX_COUNT:-100}
@@ -129,36 +132,30 @@ services:
       retries: 3
       start_period: 120s # Reduced from 20 min - models are pre-loaded
     depends_on:
-      - ollama
+      - llama
     restart: unless-stopped
 
-  ollama:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.34.4}
+  llama:
+    image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b11429}
     ports:
-      - "11434:11434"
+      - "127.0.0.1:8080:8080"
     volumes:
-      - ollama_data:/root/.ollama
-      - ./scripts/ollama-entrypoint.sh:/ollama-entrypoint.sh:ro
-      - ./.certs:/usr/local/share/ca-certificates/gremienpilot:ro
+      - ./data/gemma4:/models:ro
+      - ./scripts/llama-entrypoint.sh:/llama-entrypoint.sh:ro
     environment:
-      - OLLAMA_MODEL=${LLM_MODEL:-qwen3.5:9b}
-      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
-      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
-      - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
-      - OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE:-f16}
-      - OLLAMA_LOAD_TIMEOUT=${OLLAMA_LOAD_TIMEOUT:-30m}
-      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
-    entrypoint: ["/bin/bash", "-c", "sed 's/\\r$//' /ollama-entrypoint.sh > /tmp/entrypoint.sh && /bin/bash /tmp/entrypoint.sh"]
+      - LLM_CONTEXT_TOKENS=${LLM_CONTEXT_TOKENS:-16384}
+      - LLM_GPU_LAYERS=${LLM_GPU_LAYERS:-16}
+      - LLM_CPU_THREADS=${LLM_CPU_THREADS:-12}
+    entrypoint: ["/bin/sh", "-c", "sed 's/\\r$//' /llama-entrypoint.sh > /tmp/entrypoint.sh && /bin/sh /tmp/entrypoint.sh"]
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 60
-      start_period: 300s # 5 min grace period for model download
+      start_period: 300s # Grace period for checksum verification and model loading
     restart: unless-stopped
 
 volumes:
   backend_state:
-  ollama_data:
   backend_hf_cache:
   backend_torch_cache:

@@ -5,6 +5,8 @@ import re
 import subprocess
 import pytest
 
+pytestmark = pytest.mark.skipif(os.name == 'nt', reason='Run POSIX shell contracts in the Linux test container')
+
 ROOT=Path(__file__).resolve().parents[3]
 
 

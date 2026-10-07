@@ -7,7 +7,7 @@ Kubernetes manifests for deploying GremienPilot on the HPI cluster with GPU-acce
 - `kubectl` configured with access to the HPI Kubernetes cluster
 - A node with an NVIDIA A30 GPU (label: `accelerator: a30`)
 - NVIDIA runtime class configured (`runtimeClassName: nvidia`)
-- Sufficient cluster RAM/storage for the configured Ollama model; an external OpenAI-compatible endpoint remains optional.
+- Sufficient cluster RAM/storage for the configured llama.cpp model; an external OpenAI-compatible endpoint remains optional.
 
 ## Architecture
 
@@ -18,12 +18,12 @@ Internet → LoadBalancer Service (tops-frontend)
               ↓ proxy_pass /api/ & /health
          Backend (FastAPI:8010) — WhisperX transcription + summarization
               ↓ OpenAI SDK
-         Ollama service — model inference (external endpoint optional)
+         llama.cpp service — model inference (external endpoint optional)
 ```
 
 - **Frontend**: nginx serving the React SPA, proxies API requests to the backend
-- **Backend**: FastAPI with WhisperX (GPU) for transcription and PyAnnote for diarization; uses the AISC LLM API for summarization via the OpenAI SDK
-- **No Ollama needed**: The AISC LLM API replaces the local Ollama instance used in Docker Compose
+- **Backend**: FastAPI with WhisperX (GPU) for transcription and PyAnnote for diarization; uses the internal Gemma service for inference
+- **Model service**: Gemma 4 31B Q4_K_M; the protocol LoRA is selected per request.
 - **External access**: The checked-in default is a `LoadBalancer` Service. An optional Ingress example is provided but not applied by Kustomize.
 
 ## Directory Structure
@@ -50,7 +50,13 @@ k8s/
 
 ## Configuration
 
-The base includes a CPU Ollama StatefulSet with persistent model storage. Set cluster resource requests/limits for the chosen model after measurement; no GPU is requested for Ollama by default. For an existing external installation, retain its endpoint, model and secret, set `LLM_PROVIDER=openai-compatible`, and omit `ollama/deployment.yaml` in your overlay. No provider fallback occurs. Backend GPU scheduling remains independently configurable.
+Prepare assets with `python scripts/prepare_gemma4.py --bootstrap` and provision the
+contents of `data/gemma4/weights/` plus `gemma-4-31b-protokoll-f16.gguf` and `checksums.sha256` on the
+`models-llama-0` PVC under `/models` before starting the model pod. The CPU default
+needs sufficient RAM (at least 24 GiB for the model service); GPU scheduling is optional.
+Use images built from this branch, not the upstream application images.
+
+The base includes a CPU llama.cpp StatefulSet with persistent model storage. Set cluster resource requests/limits for the chosen model after measurement; no GPU is requested for llama.cpp by default. For an existing external installation, retain its endpoint, model and secret, set `LLM_PROVIDER=openai-compatible` and `LLM_SUMMARY_STYLE=structured`, and omit `llama/deployment.yaml` in your overlay. No provider fallback occurs. Backend GPU scheduling remains independently configurable.
 
 ### Backend ConfigMap (`backend/configmap.yaml`)
 
@@ -60,9 +66,9 @@ The base includes a CPU Ollama StatefulSet with persistent model storage. Set cl
 | `WHISPER_DEVICE` | `cuda` | Compute device (cuda for GPU) |
 | `WHISPER_BATCH_SIZE` | `16` | Transcription batch size |
 | `WHISPER_LANGUAGE` | `de` | Audio language |
-| `LLM_BASE_URL` | `http://ollama:11434/v1` | Internal Ollama endpoint |
-| `LLM_MODEL` | `qwen3.5:9b` | Model name for summarization |
-| `LLM_PROVIDER` | `ollama` | Provider contract; model IDs must exist on that server |
+| `LLM_BASE_URL` | `http://llama:8080/v1` | Internal llama.cpp endpoint |
+| `LLM_MODEL` | `gemma-4-31b` | Model name for summarization |
+| `LLM_PROVIDER` | `llama-cpp` | Provider contract; model IDs must exist on that server |
 | `LLM_TIMEOUT_SECONDS` | `120` | Summary/diagnostics request timeout (not transcript agenda detection) |
 | `LLM_MAX_RETRIES` | `2` | Retries for transient LLM errors |
 | `LLM_RETRY_BACKOFF_SECONDS` | `0.5` | Backoff between retries |
@@ -173,7 +179,7 @@ kubectl rollout status deployment/tops-frontend -n tops
 ### LLM summarization fails
 - Test connectivity from the backend pod:
   ```bash
-  kubectl exec -n tops deploy/tops-backend -- curl -s http://ollama:11434/api/tags
+  kubectl exec -n tops deploy/tops-backend -- curl -s http://llama:8080/props
   ```
 - Check the API key is set: `kubectl get secret tops-secret -n tops -o yaml`
 
@@ -188,7 +194,7 @@ kubectl rollout status deployment/tops-frontend -n tops
 
 | Concern | Docker Compose | Kubernetes |
 |---------|---------------|------------|
-| LLM inference | Local Ollama container | Configurable Ollama service or explicit external endpoint |
+| LLM inference | Local llama.cpp container | Configurable llama.cpp service or explicit external endpoint |
 | GPU access | Docker `--gpus` / compose `deploy.resources` | `runtimeClassName: nvidia` + `nodeSelector` |
 | Backend image | `backend:cpu-latest` or `backend:gpu-latest` | Commit-pinned `sha-...-gpu` image (always GPU) |
 | Networking | Docker network (service names) | K8s Services + DNS |
@@ -201,4 +207,4 @@ retries). Explicit API `use_llm` / pipeline `agenda_use_llm` overrides the serve
 default; model/prompt alone does not enable it. See the [configuration contract](../README.md#llm-nutzung-für-automatische-top-zuordnung).
 Restart backend pods after ConfigMap changes to load the new values.
 
-Model/stream settings are shared with Compose: [configuration](../docs/llm-configuration.md). For native Ollama, configure server load/KV-cache settings on the separate model deployment and mount optional local tokenizer assets into the backend.
+Model/stream settings are shared with Compose: [configuration](../docs/llm-configuration.md). For native llama.cpp, configure server load/KV-cache settings on the separate model deployment and mount optional local tokenizer assets into the backend.

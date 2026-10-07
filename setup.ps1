@@ -43,21 +43,21 @@ if ($PROTOKOLL_IMAGE_TAG) {
     $BACKEND_GPU_IMAGE = if ($env:BACKEND_GPU_IMAGE) { $env:BACKEND_GPU_IMAGE } else { "${IMAGE_BASE}/backend:gpu-latest" }
 }
 
-$OLLAMA_IMAGE_TAG = if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE_TAG } else { "0.34.4" }
-$OLLAMA_IMAGE = if ($env:OLLAMA_IMAGE) { $env:OLLAMA_IMAGE } else { "ollama/ollama:${OLLAMA_IMAGE_TAG}" }
-$OLLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "qwen3.5:9b" }
+$LLAMA_IMAGE_TAG = if ($env:LLAMA_IMAGE_TAG) { $env:LLAMA_IMAGE_TAG } else { "b11429" }
+$LLAMA_IMAGE = if ($env:LLAMA_IMAGE) { $env:LLAMA_IMAGE } else { "ghcr.io/ggml-org/llama.cpp:server-${LLAMA_IMAGE_TAG}" }
+$LLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "gemma-4-31b" }
 
 $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
 $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
 $env:BACKEND_GPU_IMAGE = $BACKEND_GPU_IMAGE
-# Let Compose honor OLLAMA_IMAGE in .env. Export only an explicit shell tag;
-# an existing shell OLLAMA_IMAGE already has precedence and stays unchanged.
-if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE = $OLLAMA_IMAGE }
+# Let Compose honor LLAMA_IMAGE in .env. Export only an explicit shell tag;
+# an existing shell LLAMA_IMAGE already has precedence and stays unchanged.
+if ($env:LLAMA_IMAGE_TAG) { $env:LLAMA_IMAGE = $LLAMA_IMAGE }
 
 # Ports used by the application
 $PORT_FRONTEND = 3000
 $PORT_BACKEND = 8010
-$PORT_OLLAMA = 11434
+$PORT_LLM = 8080
 
 # Global state
 $script:USE_GPU = $false
@@ -90,7 +90,7 @@ function Initialize-Configuration {
     try {
         Copy-Item -LiteralPath (Join-Path $ScriptDir '.env.example') -Destination $destination -ErrorAction Stop
         Write-Info ".env mit den Standardwerten fuer lange Sitzungen angelegt."
-        Write-Host "Qwen3.5:9b wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
+        Write-Host "Gemma 4 31B Q4_K_M und Protokoll-LoRA werden lokal vorbereitet."
         Write-Host "Fuer Audio mit Sprechererkennung ggf. HF_TOKEN in .env setzen (Anleitung in README.md)."
         return $true
     } catch {
@@ -110,9 +110,9 @@ if (Test-Truthy $PROTOKOLL_BUILD_LOCAL) {
 }
 
 if ($script:BUILD_LOCAL_IMAGES) {
-    $FRONTEND_IMAGE = "ki-protokollierung-frontend:local"
-    $BACKEND_CPU_IMAGE = "ki-protokollierung-backend:local"
-    $BACKEND_GPU_IMAGE = "ki-protokollierung-backend:gpu-local"
+    $FRONTEND_IMAGE = "gremienpilot-frontend:gemma4-lora"
+    $BACKEND_CPU_IMAGE = "gremienpilot-backend:gemma4-lora"
+    $BACKEND_GPU_IMAGE = "gremienpilot-backend:gpu-gemma4-lora"
     $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
     $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
     $env:BACKEND_GPU_IMAGE = $BACKEND_GPU_IMAGE
@@ -164,9 +164,9 @@ function Show-Help {
 function Set-LocalApplicationImages {
     $script:BUILD_LOCAL_IMAGES = $true
     $script:PROTOKOLL_PULL_POLICY = "missing"
-    $script:FRONTEND_IMAGE = "ki-protokollierung-frontend:local"
-    $script:BACKEND_CPU_IMAGE = "ki-protokollierung-backend:local"
-    $script:BACKEND_GPU_IMAGE = "ki-protokollierung-backend:gpu-local"
+    $script:FRONTEND_IMAGE = "gremienpilot-frontend:gemma4-lora"
+    $script:BACKEND_CPU_IMAGE = "gremienpilot-backend:gemma4-lora"
+    $script:BACKEND_GPU_IMAGE = "gremienpilot-backend:gpu-gemma4-lora"
     $env:FRONTEND_IMAGE = $script:FRONTEND_IMAGE
     $env:BACKEND_IMAGE = $script:BACKEND_CPU_IMAGE
     $env:BACKEND_GPU_IMAGE = $script:BACKEND_GPU_IMAGE
@@ -387,12 +387,10 @@ function Test-ImageExists {
 }
 
 #######################################
-# Check if Ollama model is downloaded
+# Check if llama.cpp model is downloaded
 #######################################
-function Test-OllamaModelExists {
-    # Ask for the effective Compose model; unrelated cached weights are not proof.
-    docker compose exec -T ollama sh -c 'ollama show "$OLLAMA_MODEL" >/dev/null 2>&1' 2>&1 | Out-Null
-    return ($LASTEXITCODE -eq 0)
+function Test-GemmaModelExists {
+    return Test-Path -LiteralPath (Join-Path $ScriptDir 'data/gemma4/checksums.sha256')
 }
 
 #######################################
@@ -415,12 +413,12 @@ function Test-DiskSpace {
         $script:MissingItems += "Frontend-Image (~1GB)"
     }
 
-    if (-not (Test-ImageExists $OLLAMA_IMAGE)) {
+    if (-not (Test-ImageExists $LLAMA_IMAGE)) {
         $requiredGB += 2
-        $script:MissingItems += "Ollama-Image (~2GB)"
+        $script:MissingItems += "llama.cpp-Image (~2GB)"
     }
 
-    if (-not (Test-OllamaModelExists)) {
+    if (-not (Test-GemmaModelExists)) {
         $modelDiskGB = if ($env:PROTOKOLL_MODEL_DISK_GB) { $env:PROTOKOLL_MODEL_DISK_GB } else { "40" }
         if ($modelDiskGB -notmatch '^[1-9][0-9]*$') {
             Write-Err "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
@@ -547,7 +545,7 @@ function Test-Ports {
     $conflictPorts = @()
 
     # Check each port (but ignore if our own containers are using them)
-    foreach ($port in @($PORT_FRONTEND, $PORT_BACKEND, $PORT_OLLAMA)) {
+    foreach ($port in @($PORT_FRONTEND, $PORT_BACKEND, $PORT_LLM)) {
         if (Test-PortInUse $port) {
             # Check if it's our own Docker container
             $isOurContainer = $false
@@ -565,7 +563,7 @@ function Test-Ports {
     }
 
     if ($conflicts.Count -eq 0) {
-        Write-Success "Alle Ports verfuegbar ($PORT_FRONTEND, $PORT_BACKEND, $PORT_OLLAMA)"
+        Write-Success "Alle Ports verfuegbar ($PORT_FRONTEND, $PORT_BACKEND, $PORT_LLM)"
         return $true
     }
 
@@ -810,7 +808,7 @@ function Wait-ForServices {
         Write-Host ""
         Write-Warn "Wartezeit erreicht; die Anwendung ist noch nicht bereit."
         Write-Host "Die Warteanzeige beendet weder Container noch Downloads. Ein Timeout allein bedeutet keinen Startfehler."
-        Write-Host "Fortschritt: docker compose logs -f --tail=5 ollama backend"
+        Write-Host "Fortschritt: docker compose logs -f --tail=5 llama backend"
         Write-Host "Spaeter erneut pruefen: .\setup.ps1 start"
         Write-Host ""
         Show-FailureDiagnostics
@@ -825,10 +823,10 @@ function Wait-ForServices {
 }
 
 function Show-StartupProgress {
-    foreach ($service in @("backend", "ollama")) {
+    foreach ($service in @("backend", "llama")) {
         $lines = @(docker compose logs --no-color --tail=10 $service 2>&1)
         if ($LASTEXITCODE -ne 0) { continue }
-        # Ollama uses terminal escape sequences even in captured logs.
+        # llama.cpp uses terminal escape sequences even in captured logs.
         $clean = @($lines | ForEach-Object {
             $_.ToString() -replace '\x1B\[[0-?]*[ -/]*[@-~]', ''
         } | Where-Object { $_ -match '\S' })
@@ -944,6 +942,12 @@ function Invoke-Build {
     # Create uploads directory
     New-Item -ItemType Directory -Force -Path "uploads" | Out-Null
 
+    if (-not (Test-GemmaModelExists)) {
+        Write-Info "Lade Gemma-Gewichte und konvertiere den Protokoll-Adapter..."
+        python scripts/prepare_gemma4.py --bootstrap
+        if ($LASTEXITCODE -ne 0) { Write-Err "Modellvorbereitung fehlgeschlagen."; exit 1 }
+    }
+
     # Start the application
     Write-Host ""
     Write-Info "Baue und starte die Anwendung..."
@@ -958,10 +962,10 @@ function Invoke-Build {
             Read-Host "Druecken Sie Enter zum Beenden"
             exit 1
         }
-        Write-Info "Pruefe Runtime-Image fuer Ollama..."
-        docker compose pull ollama 2>&1 | Out-Null
+        Write-Info "Pruefe Runtime-Image fuer llama.cpp..."
+        docker compose pull llama 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Konnte Ollama-Image nicht aktualisieren. Docker versucht es beim Start erneut."
+            Write-Warn "Konnte llama.cpp-Image nicht aktualisieren. Docker versucht es beim Start erneut."
         }
     } else {
         Invoke-PullImages
@@ -1097,10 +1101,10 @@ function Show-Status {
     }
 
     try {
-        $response = Invoke-WebRequest -Uri "http://localhost:$PORT_OLLAMA/api/tags" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-        Write-Host "Ollama: Erreichbar" -ForegroundColor Green
+        $response = Invoke-WebRequest -Uri "http://localhost:$PORT_LLM/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        Write-Host "llama.cpp: Erreichbar" -ForegroundColor Green
     } catch {
-        Write-Host "Ollama: Nicht erreichbar" -ForegroundColor Red
+        Write-Host "llama.cpp: Nicht erreichbar" -ForegroundColor Red
     }
 
     Write-Host ""

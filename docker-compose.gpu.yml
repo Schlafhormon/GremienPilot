@@ -20,7 +20,8 @@ services:
               count: 1
               capabilities: [gpu]
 
-  ollama:
+  llama:
+    image: ${LLAMA_GPU_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b11429}
     deploy:
       resources:
         reservations:
