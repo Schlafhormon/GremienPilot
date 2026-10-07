@@ -124,7 +124,8 @@ def version_snapshot(payload=None):
     from processing_mode import VERSION as processing_version
     files = ("processing_mode.py", "llm_config.py", "durable_jobs.py", "summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_order.py", "agenda_detection.py",
              "extract_tops.py", "llm_transport.py", "main.py", "agenda_context.py",
-             "agenda_labels.py", "assignment_suggestions.py", "persistence.py", "source_contract.py")
+             "agenda_labels.py", "assignment_suggestions.py", "persistence.py", "source_contract.py",
+             "gemma_summary.py", "prompt_gemma.txt")
     policy_keys = (
         "PDF_RENDER_DPI", "PDF_MAX_PAGE_PIXELS", "PDF_MAX_PAGES", "PDF_OUTPUT_TOKENS",
         "PDF_MODEL_ATTEMPTS", "PDF_REVIEW_ROUNDS",

@@ -33,6 +33,7 @@ RUN pip install --no-cache-dir uv
 # Copy project files
 COPY pyproject.toml uv.lock ./
 COPY *.py ./
+COPY prompt_gemma.txt ./
 
 # Install dependencies
 ENV UV_NO_CACHE=1

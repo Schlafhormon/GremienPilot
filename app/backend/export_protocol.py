@@ -119,6 +119,8 @@ def parse_summary_sections(summary: str | None) -> dict[str, list[str]]:
         return sections
 
     label_to_key = {
+        "aus der beratung": "discussion",
+        "beschlüsse und festlegungen": "decisions",
         "diskussion": "discussion",
         "beschluss": "decisions",
         "beschluesse": "decisions",

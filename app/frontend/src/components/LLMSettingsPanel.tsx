@@ -30,6 +30,26 @@ Strukturiere die Auswertung fachlich nach:
 - Maßnahmen und offene Punkte
 - Unsicherheiten`;
 
+export const GEMMA_SYSTEM_PROMPT = `Du bist Protokollführer/in eines Ausschusses. Wandle das wörtliche Transkript des folgenden Tagesordnungspunkts (TOP) in den entsprechenden Abschnitt eines formellen Ausschussprotokolls im amtlichen Stil um.
+
+Sprache und Stil:
+- Schreibe ausschließlich auf Deutsch in korrektem, sachlichem Verwaltungsdeutsch.
+- Gib Wortbeiträge in indirekter Rede (Konjunktiv I) und in der dritten Person wieder (z. B. „Er betont, dass …“, „Sie verweist darauf, dass …“).
+- Nenne Sprecher/innen mit Name und, wenn bekannt, Rolle/Fraktion, z. B. „Gustav Gans“, „Kristy Augustin (CDU)“, „Steffen Freiberg (Minister für Bildung, Jugend und Sport)“.
+
+Formatierung:
+- Beginne mit der Überschrift „## Zu TOP N:“ (N ist die Nummer aus der vorangestellten „TOP:“-Angabe).
+- Formuliere Beschlüsse als „Der [Gremium] beschließt einstimmig/mehrheitlich (Ja : Nein : Enthaltungen) …“ und gib Abstimmungsergebnisse stets als konkretes Tripel (Ja : Nein : Enthaltungen) bzw. als „einstimmig“/„mehrheitlich“ an — niemals als leeren Platzhalter.
+- Trenne, sofern vorhanden, Beschlüsse/Festlegungen von der Zusammenfassung der Beratung („Aus der Beratung“).
+
+Umgang mit dem Rohmaterial (Transkript):
+- Das Transkript ist eine automatische Verschriftlichung (ASR) mit Sprecher-Diarisierung; jede Zeile hat die Form „Name: Wortbeitrag“ und kann Erkennungsfehler enthalten, die NICHT ins Protokoll gehören.
+- Ignoriere offensichtliche Transkriptionsfehler und sinnlose Wiederholungen (z. B. mehrfach hintereinander „Vielen Dank.“); wiederhole sie nicht und werte sie nicht als Inhalt.
+
+Inhaltliche Treue:
+- Fasse ausschließlich zusammen, was tatsächlich gesagt wurde. Füge keine Inhalte, Wertungen oder Fakten hinzu, die nicht im Transkript stehen, und verändere oder verfälsche keine Aussagen (auch keine Namen oder Zahlen).
+- Im Zweifel knapper und näher am Wortlaut bleiben.`;
+
 export const DEFAULT_LLM_SETTINGS: LLMSettings = {
   model: '',
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -42,6 +62,7 @@ export default function LLMSettingsPanel({
   onSettingsChange,
 }: LLMSettingsPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const protocolStyle = !settings.model || settings.model === 'gemma-4-31b';
 
   // Close on escape key
   useEffect(() => {
@@ -124,6 +145,7 @@ export default function LLMSettingsPanel({
               </label>
               <button
                 onClick={handleResetPrompt}
+                disabled={protocolStyle}
                 className="text-xs text-blue-600 hover:text-blue-700 flex items-center gap-1"
               >
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -133,7 +155,8 @@ export default function LLMSettingsPanel({
               </button>
             </div>
             <textarea
-              value={settings.systemPrompt}
+              value={protocolStyle ? GEMMA_SYSTEM_PROMPT : settings.systemPrompt}
+              readOnly={protocolStyle}
               onChange={(e) => handlePromptChange(e.target.value)}
               aria-label="System-Prompt"
               rows={16}
@@ -141,7 +164,9 @@ export default function LLMSettingsPanel({
               placeholder="System-Prompt eingeben..."
             />
             <p className="mt-2 text-xs text-gray-500">
-              Der System-Prompt definiert, wie die KI die Zusammenfassungen erstellt.
+              {protocolStyle
+                ? 'Gemma 4 verwendet den festen Protokollstil des HPI-Adapters. PDF-Auswertung, TOP-Zuordnung und Quellenprüfung verwenden das Basismodell.'
+                : 'Der System-Prompt definiert, wie die KI die Zusammenfassungen erstellt.'}
             </p>
           </div>
 

@@ -32,7 +32,7 @@ from llm_transport import complete, fits, structured_output_budget, ContextBudge
 # Compatibility exports for integrations importing configuration from summarize.
 from llm_config import (LLMConfig, get_llm_config as _get_llm_config,
                         resolve_llm_base_url, is_docker_runtime)
-LLM_MODEL = os.environ.get("LLM_MODEL", "").strip() or "qwen3.5:9b"
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip() or "gemma-4-31b"
 LLM_BASE_URL, LLM_BASE_URL_SOURCE = resolve_llm_base_url()
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS") or "120")
@@ -315,7 +315,10 @@ def _model_matches_configured(available_model: str, configured_model: str) -> bo
 
 
 def _llm_hint(config: LLMConfig, *, model_missing: bool = False) -> str:
-    if config.uses_internal_ollama:
+    if config.provider == 'llama-cpp':
+        pull_hint = (' Prüfen Sie docker compose logs llama und die lokal vorbereiteten Gemma-Gewichte '
+                     '(python scripts/prepare_gemma4.py --bootstrap).')
+    elif config.uses_internal_ollama:
         pull_hint = (
             f" Starten Sie Ollama mit Docker Compose und laden Sie das Modell: "
             f"docker compose exec ollama ollama pull {config.model}."
@@ -675,8 +678,14 @@ def summarize_segment(
         raise StructuredOutputError("Quellzeilen stimmen nicht mit Transkript überein")
     start = time.monotonic()
     usage = {'configuration': config.public_snapshot()}
-    workflow = Workflow(client, config, build_structured_system_prompt(system_prompt)
-                        + "\nTOP: " + top_title, meeting_context, usage)
+    if config.summary_style == 'gemma4-lora':
+        from gemma_summary import GemmaWorkflow, render_protocol
+        workflow = GemmaWorkflow(client, config, top_title, meeting_context, usage)
+        render = render_protocol
+    else:
+        workflow = Workflow(client, config, build_structured_system_prompt(system_prompt)
+                            + "\nTOP: " + top_title, meeting_context, usage)
+        render = render_structured_summary
     def attach_partial(error):
         if not workflow.latest_claims:
             return error
@@ -689,7 +698,7 @@ def summarize_segment(
             partial.evidence.append(dict(section=claim['section'],item_index=len(items),item_text=text,
                 original_text=claim['text'],scope=claim['scope'],sources=claim['evidence'],grounding=g))
             items.append(text)
-        text = render_structured_summary(partial)
+        text = render(partial)
         partial.verification = dict(processing_complete=False,source_contract='graded-sources-v1',
             source_sha256=digest(lines),summary_sha256=digest(text),sources=list(workflow.partial_rows.values()))
         error.partial_result = SummarizationResult(summary=text,structured=partial,duration_seconds=time.monotonic()-start,
@@ -725,7 +734,8 @@ def summarize_segment(
         processing_complete=True, source_sha256=digest(lines),
         sources=rows, checks=usage['required_checks'], prompt_version=usage['prompt_version'],
         source_contract='graded-sources-v1')
-    summary = render_structured_summary(structured)
+    structured.verification['summary_style'] = config.summary_style
+    summary = render(structured)
     if not summary:
         # No semantic filler. Absence is a model result, with evidence and completed checks.
         summary = "Keine protokollrelevanten Inhalte festgestellt."

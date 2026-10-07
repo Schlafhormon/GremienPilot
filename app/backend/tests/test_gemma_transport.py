@@ -30,6 +30,8 @@ def test_request_local_adapter_and_thinking(monkeypatch, adapter):
         payloads.append(payload)
         yield {'choices': [{'delta': {'content': 'Text'}, 'finish_reason': 'stop'}]}
     async def metadata(*args, **kwargs):
+        if args[2].endswith('/lora-adapters'):
+            return [{'id': 0, 'path': '/models/gemma-4-31b-protokoll-f16.gguf'}]
         return {'default_generation_settings': {'n_ctx': 131072}}
     monkeypatch.setattr(transport, '_openai_stream', stream)
     monkeypatch.setattr(transport, '_json', metadata)

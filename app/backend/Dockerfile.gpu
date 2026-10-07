@@ -46,6 +46,7 @@ RUN pip install --no-cache-dir uv
 # Copy project files
 COPY pyproject.toml uv.lock ./
 COPY *.py ./
+COPY prompt_gemma.txt ./
 
 # Install dependencies with CUDA support
 # Note: torch will automatically use CUDA when available

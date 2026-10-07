@@ -56,8 +56,14 @@ def resolve_llm_base_url(raw_base_url: str | None = None) -> tuple[str, str]:
 
     configured = (raw_base_url or "").strip()
     docker_runtime = is_docker_runtime()
+    gemma_default = (os.environ.get('LLM_PROVIDER', '').strip() == 'llama-cpp' or
+        (not os.environ.get('LLM_PROVIDER', '').strip() and not os.environ.get('LLM_OLLAMA_NATIVE', '').strip()
+         and os.environ.get('LLM_MODEL', '').strip() in {'', 'gemma-4-31b'}))
 
     if not configured:
+        if gemma_default:
+            return ('http://llama:8080/v1', 'internal_docker_default') if docker_runtime else (
+                'http://localhost:8080/v1', 'local_development_default')
         if docker_runtime:
             return DOCKER_OLLAMA_BASE_URL, "internal_docker_default"
         return LOCAL_OLLAMA_BASE_URL, "local_development_default"
@@ -250,13 +256,15 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
         raise ModelConfigurationError('LLM_OLLAMA_NATIVE must be true or false')
     if not provider:
         provider = ('ollama' if native == 'true' else 'openai-compatible') if native else (
+            'llama-cpp' if _base_url_host(base) == 'llama' or
+                (_base_url_host(base) in LOCAL_LLM_HOSTS and urlparse(base).port == 8080) else
             'ollama' if _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS else 'openai-compatible')
     # Mode defaults are deliberate, never inherited from legacy global switches.
     effort_key = 'LLM_FAST_REASONING_EFFORT' if mode == 'fast' else 'LLM_SLOW_REASONING_EFFORT'
     effort = os.environ.get(effort_key, '').strip().lower() or ('none' if mode == 'fast' or provider == 'llama-cpp' else 'medium')
     if effort not in {'none', 'low', 'medium', 'high', 'max'}:
         raise ModelConfigurationError(f'Invalid {effort_key}')
-    effective_model = model if model else os.environ.get('LLM_MODEL', '').strip() or 'qwen3.5:9b'
+    effective_model = model if model else os.environ.get('LLM_MODEL', '').strip() or 'gemma-4-31b'
     qwen_default = provider == 'ollama' and effective_model == 'qwen3.5:9b'
     gemma_default = provider == 'llama-cpp' and effective_model == 'gemma-4-31b'
     tokenizer_path = os.environ.get('LLM_TOKENIZER_PATH', '').strip()
@@ -270,15 +278,15 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
         base_url=base, base_url_source=source, provider=provider,
         model=effective_model,
         model_source='request' if model else 'environment',
-        ollama_endpoint=not os.environ.get("LLM_PROVIDER", "").strip() and _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS,
+        ollama_endpoint=provider != 'llama-cpp' and not os.environ.get("LLM_PROVIDER", "").strip() and _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS,
         api_key=os.environ.get('LLM_API_KEY', 'ollama'),
         reasoning_effort=effort, processing_mode=mode,
-        context_tokens=_number('LLM_CONTEXT_TOKENS', 131072, integer=True, minimum=4096),
+        context_tokens=_number('LLM_CONTEXT_TOKENS', 16384 if gemma_default else 131072, integer=True, minimum=4096),
         output_tokens=optional('LLM_OUTPUT_TOKENS', integer=True, minimum=1),
-        thinking_tokens=0 if effort == 'none' else _number('LLM_THINKING_TOKENS', 4096 if provider == 'ollama' else 0, integer=True),
+        thinking_tokens=0 if effort == 'none' else _number('LLM_THINKING_TOKENS', 4096 if provider in {'ollama', 'llama-cpp'} else 0, integer=True),
         temperature=optional('LLM_TEMPERATURE', default=1.0 if qwen_default else None),
         top_p=optional('LLM_TOP_P', default=0.95 if qwen_default else None),
-        top_k=optional('LLM_TOP_K', integer=True, minimum=1, default=20 if qwen_default else None), seed=optional('LLM_SEED', integer=True),
+        top_k=optional('LLM_TOP_K', integer=True, minimum=0 if provider == 'llama-cpp' else 1, default=20 if qwen_default else None), seed=optional('LLM_SEED', integer=True),
         cpu_threads=optional('LLM_CPU_THREADS', integer=True, minimum=1),
         gpu_layers=optional('LLM_GPU_LAYERS', integer=True),
         keep_alive=os.environ.get('LLM_KEEP_ALIVE') or os.environ.get('OLLAMA_KEEP_ALIVE', '5m'),
@@ -293,7 +301,8 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
         tokenizer_model=tokenizer_model,
         model_revision=os.environ.get('LLM_MODEL_REVISION', ''),
         output_parameter=os.environ.get('LLM_OUTPUT_PARAMETER') or 'max_tokens',
-        summary_style=(os.environ.get('LLM_SUMMARY_STYLE', '').strip() or
+        summary_style=('structured' if model and model != (os.environ.get('LLM_MODEL', '').strip() or 'gemma-4-31b') else
+                       os.environ.get('LLM_SUMMARY_STYLE', '').strip() or
                        ('gemma4-lora' if gemma_default else 'structured')),
         lora_id=_number('LLM_LORA_ID', 0, integer=True),
         adapter_revision=os.environ.get('LLM_ADAPTER_REVISION', '').strip(),
