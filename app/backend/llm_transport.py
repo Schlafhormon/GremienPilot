@@ -390,7 +390,28 @@ async def _generate(client, config, kwargs, progress):
         else:
             payload = {'model': config.model, 'messages': _openai_messages(messages), 'stream': True,
                        config.output_parameter: cap, 'temperature': snapshot['temperature']}
-            payload.update(config.reasoning_options)
+            if config.provider == 'llama-cpp':
+                # Per-request selection avoids a global mutable adapter toggle.
+                payload.update(lora=[{'id': config.lora_id, 'scale': config.lora_scale}],
+                    chat_template_kwargs={'enable_thinking': think not in (False, None)},
+                    stream_options={'include_usage': True},
+                    repeat_penalty=1.0, min_p=0.0, top_k=config.top_k if config.top_k is not None else 64,
+                    stop=['<turn|>', '<|end_of_turn|>'])
+                if config.lora_scale:
+                    if response_format and response_format.get('type') != 'text':
+                        raise ModelConfigurationError('Protocol LoRA must not be used for structured output')
+                    if any(_parts(messages)[1]):
+                        raise ModelConfigurationError('Protocol LoRA must not be used for images')
+                # Verify the fixed service contract before every request, including
+                # resumed jobs. This endpoint does not wake a sleeping server.
+                async with httpx.AsyncClient(timeout=config.http_timeout, headers=_headers(config)) as http:
+                    props = await _json(http, 'GET', _native_url(config) + '/props')
+                    actual = props.get('default_generation_settings', {}).get('n_ctx')
+                    if type(actual) is not int or actual < config.context_tokens:
+                        raise ModelConfigurationError('llama.cpp context is smaller than LLM_CONTEXT_TOKENS')
+                    snapshot['verified_context_tokens'] = actual
+            else:
+                payload.update(config.reasoning_options)
             if response_format:
                 payload['response_format'] = response_format
             for key, value in [('top_p', config.top_p), ('seed', config.seed)]:
@@ -416,7 +437,8 @@ async def _generate(client, config, kwargs, progress):
                         raise ContextBudgetError('Provider context usage exceeds configured budget')
             if finish != 'stop':
                 raise IncompleteResponseError(f'LLM output incomplete ({finish})')
-            snapshot.update(digest=config.model_revision or None, verified_context_tokens=None)
+            snapshot.update(digest=config.model_revision or None)
+            snapshot.setdefault('verified_context_tokens', None)
         answer = ''.join(content)
         if not answer.strip():
             raise IncompleteResponseError('LLM returned no final content')

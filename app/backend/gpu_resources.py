@@ -58,7 +58,7 @@ def gpu_slot(check_cancel=None):
 
 @contextmanager
 def llm_gpu_slot(config, check_cancel=None):
-    if switching_enabled() and (config.uses_local_ollama or config.uses_internal_ollama):
+    if switching_enabled() and (config.uses_local_ollama or config.uses_internal_ollama or config.uses_local_llama):
         with gpu_slot(check_cancel):
             yield
     else:
@@ -71,6 +71,8 @@ def unload_local_ollama(config, check_cancel=None):
 Call only while holding gpu_slot. Refuse to load Whisper if Ollama cannot
 confirm the handover, including after a timed-out inference request.
 """
+    if config.uses_local_llama:
+        return wait_for_llama_sleep(config, check_cancel)
     if not (config.uses_local_ollama or config.uses_internal_ollama):
         return
     import httpx
@@ -116,3 +118,33 @@ confirm the handover, including after a timed-out inference request.
             "Ollama-Speicherfreigabe konnte nicht bestaetigt werden; "
             "Transkriptionsmodelle wurden nicht geladen."
         ) from exc
+
+
+def wait_for_llama_sleep(config, check_cancel=None):
+    """Wait for --sleep-idle-seconds to release model, projector and KV memory.
+
+    Hold gpu_slot throughout. /props does not reset the idle timer; no new LLM
+    calls can start while Whisper owns the slot. The service must be dedicated
+    to this single backend process, just like the Ollama switching contract.
+    """
+    import httpx
+    deadline = time.monotonic() + unload_timeout()
+    url = config.base_url.rstrip('/').removesuffix('/v1') + '/props'
+    try:
+        while True:
+            if check_cancel:
+                check_cancel()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GPUResourceError('llama.cpp gibt den Speicher nicht frei; --sleep-idle-seconds prüfen.')
+            response = httpx.get(url, headers={'Authorization': 'Bearer ' + config.api_key},
+                                 timeout=min(remaining, config.connect_seconds))
+            response.raise_for_status()
+            sleeping = response.json().get('is_sleeping')
+            if type(sleeping) is not bool:
+                raise GPUResourceError('llama.cpp liefert keinen gültigen Speicherstatus.')
+            if sleeping:
+                return
+            time.sleep(min(0.25, remaining))
+    except (httpx.HTTPError, ValueError) as exc:
+        raise GPUResourceError('llama.cpp-Speicherfreigabe konnte nicht bestätigt werden.') from exc

@@ -7,7 +7,7 @@ import re
 import inspect
 from contextvars import ContextVar
 from functools import wraps
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from urllib.parse import urlparse
 import httpx
 from llm_assets import bundled_tokenizer
@@ -64,6 +64,10 @@ def resolve_llm_base_url(raw_base_url: str | None = None) -> tuple[str, str]:
 
     normalized = _normalize_base_url(configured)
     host = _base_url_host(normalized)
+    if os.environ.get('LLM_PROVIDER', '').strip() == 'llama-cpp':
+        if docker_runtime and host in LOCAL_LLM_HOSTS:
+            return 'http://llama:8080/v1', 'internal_docker_default_from_local_value'
+        return normalized, 'configured'
     if docker_runtime and host in LOCAL_LLM_HOSTS:
         return DOCKER_OLLAMA_BASE_URL, "internal_docker_default_from_local_value"
     if host in INTERNAL_LLM_HOSTS:
@@ -121,6 +125,10 @@ class LLMConfig:
     tokenizer_model: str = ''
     model_revision: str = ''
     output_parameter: str = 'max_tokens'
+    summary_style: str = 'structured'
+    lora_id: int = 0
+    lora_scale: float = 0.0
+    adapter_revision: str = ''
 
     def __post_init__(self):
         for name in ('context_tokens', 'timeout_seconds', 'connect_seconds', 'total_seconds',
@@ -131,8 +139,14 @@ class LLMConfig:
         url = urlparse(self.base_url)
         if url.scheme not in {'http', 'https'} or not url.hostname or url.username or url.password or url.query or url.fragment:
             raise ModelConfigurationError('LLM_BASE_URL must be an HTTP(S) URL without credentials/query')
-        if not self.model.strip() or self.provider not in {'ollama', 'openai-compatible'}:
+        if not self.model.strip() or self.provider not in {'ollama', 'openai-compatible', 'llama-cpp'}:
             raise ModelConfigurationError('Invalid LLM_MODEL or LLM_PROVIDER')
+        if self.summary_style not in {'structured', 'gemma4-lora'}:
+            raise ModelConfigurationError('Invalid LLM_SUMMARY_STYLE')
+        if self.summary_style == 'gemma4-lora' and self.provider != 'llama-cpp':
+            raise ModelConfigurationError('gemma4-lora requires LLM_PROVIDER=llama-cpp')
+        if type(self.lora_id) is not int or self.lora_id < 0 or self.lora_scale not in {0.0, 1.0}:
+            raise ModelConfigurationError('Invalid LoRA adapter selection')
         if self.reasoning_effort not in {None, 'none', 'low', 'medium', 'high', 'max'}:
             raise ModelConfigurationError('Invalid LLM_REASONING_EFFORT')
         if self.context_tokens < 4096 or self.timeout_seconds <= 0 or self.connect_seconds <= 0:
@@ -173,6 +187,19 @@ class LLMConfig:
     @property
     def uses_local_ollama(self):
         return self.uses_ollama and _base_url_host(self.base_url) in LOCAL_LLM_HOSTS
+
+    @property
+    def uses_local_llama(self):
+        return self.provider == 'llama-cpp' and _base_url_host(self.base_url) in (
+            LOCAL_LLM_HOSTS | {'llama', 'host.docker.internal'})
+
+    def for_protocol(self):
+        """The adapter is enabled only for prose, never JSON/vision/review tasks."""
+        if self.summary_style != 'gemma4-lora':
+            raise ModelConfigurationError('Protocol adapter is not configured')
+        return replace(self, lora_scale=1.0, reasoning_effort='none', thinking=None,
+                       thinking_tokens=0, temperature=0.3, top_p=0.9, top_k=0,
+                       image_tokens=0)
 
     @property
     def http_timeout(self):
@@ -226,14 +253,15 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
             'ollama' if _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS else 'openai-compatible')
     # Mode defaults are deliberate, never inherited from legacy global switches.
     effort_key = 'LLM_FAST_REASONING_EFFORT' if mode == 'fast' else 'LLM_SLOW_REASONING_EFFORT'
-    effort = os.environ.get(effort_key, '').strip().lower() or ('none' if mode == 'fast' else 'medium')
+    effort = os.environ.get(effort_key, '').strip().lower() or ('none' if mode == 'fast' or provider == 'llama-cpp' else 'medium')
     if effort not in {'none', 'low', 'medium', 'high', 'max'}:
         raise ModelConfigurationError(f'Invalid {effort_key}')
     effective_model = model if model else os.environ.get('LLM_MODEL', '').strip() or 'qwen3.5:9b'
     qwen_default = provider == 'ollama' and effective_model == 'qwen3.5:9b'
+    gemma_default = provider == 'llama-cpp' and effective_model == 'gemma-4-31b'
     tokenizer_path = os.environ.get('LLM_TOKENIZER_PATH', '').strip()
     tokenizer_model = os.environ.get('LLM_TOKENIZER_MODEL', '').strip()
-    if not tokenizer_path and not tokenizer_model and qwen_default:
+    if not tokenizer_path and not tokenizer_model and (qwen_default or gemma_default):
         tokenizer_path = bundled_tokenizer(effective_model)
         tokenizer_model = effective_model if tokenizer_path else ''
     def optional(name, *, integer=False, minimum=0, default=None):
@@ -260,9 +288,13 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
         total_seconds=_number('LLM_TOTAL_TIMEOUT_SECONDS', 0),
         max_retries=_number('LLM_MAX_RETRIES', 2, integer=True),
         retry_backoff_seconds=_number('LLM_RETRY_BACKOFF_SECONDS', 0.5),
-        image_tokens=_number('LLM_IMAGE_TOKENS', 17408 if qwen_default else 0, integer=True),
+        image_tokens=_number('LLM_IMAGE_TOKENS', 17408 if qwen_default else 1120 if gemma_default else 0, integer=True),
         tokenizer_path=tokenizer_path,
         tokenizer_model=tokenizer_model,
         model_revision=os.environ.get('LLM_MODEL_REVISION', ''),
         output_parameter=os.environ.get('LLM_OUTPUT_PARAMETER') or 'max_tokens',
+        summary_style=(os.environ.get('LLM_SUMMARY_STYLE', '').strip() or
+                       ('gemma4-lora' if gemma_default else 'structured')),
+        lora_id=_number('LLM_LORA_ID', 0, integer=True),
+        adapter_revision=os.environ.get('LLM_ADAPTER_REVISION', '').strip(),
     )
