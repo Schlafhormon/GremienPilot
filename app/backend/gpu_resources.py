@@ -58,7 +58,7 @@ def gpu_slot(check_cancel=None):
 
 @contextmanager
 def llm_gpu_slot(config, check_cancel=None):
-    if switching_enabled() and (config.uses_local_ollama or config.uses_internal_ollama):
+    if switching_enabled() and (config.uses_local_ollama or config.uses_internal_ollama or config.uses_local_llama_cpp):
         with gpu_slot(check_cancel):
             yield
     else:
@@ -71,6 +71,8 @@ def unload_local_ollama(config, check_cancel=None):
 Call only while holding gpu_slot. Refuse to load Whisper if Ollama cannot
 confirm the handover, including after a timed-out inference request.
 """
+    if config.uses_local_llama_cpp:
+        return wait_for_llama_sleep(config, check_cancel)
     if not (config.uses_local_ollama or config.uses_internal_ollama):
         return
     import httpx
@@ -116,3 +118,32 @@ confirm the handover, including after a timed-out inference request.
             "Ollama-Speicherfreigabe konnte nicht bestaetigt werden; "
             "Transkriptionsmodelle wurden nicht geladen."
         ) from exc
+
+
+def wait_for_llama_sleep(config, check_cancel=None):
+    """Wait for llama.cpp's idle unload while holding the shared GPU gate.
+
+    /props neither wakes the server nor resets its idle timer. Only an explicit
+    sleeping state confirms release; a crashed/unreachable server is not proof.
+    The next completion wakes it automatically, after Whisper has been released.
+    """
+    import httpx
+    deadline = time.monotonic() + unload_timeout()
+    url = config.base_url.removesuffix('/v1') + '/props'
+    try:
+        while True:
+            if check_cancel:
+                check_cancel()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GPUResourceError('Zeitlimit beim Entladen von Kolibri erreicht; --sleep-idle-seconds prüfen.')
+            response = httpx.get(url, headers={'Authorization': 'Bearer ' + config.api_key}, timeout=min(remaining, 5))
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or type(payload.get('is_sleeping')) is not bool:
+                raise GPUResourceError('llama.cpp liefert keinen gültigen Speicherstatus.')
+            if payload['is_sleeping']:
+                return
+            time.sleep(min(0.1, remaining))
+    except (httpx.HTTPError, ValueError) as exc:
+        raise GPUResourceError('Kolibri-Speicherfreigabe konnte nicht bestätigt werden; Transkription nicht geladen.') from exc

@@ -15,6 +15,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # Optional local CA for HTTPS inspection (provided by setup.ps1 via BuildKit).

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal, Optional
 import uuid
 import copy
+import subprocess
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import durable_jobs as durable
@@ -116,6 +117,7 @@ class Patch(StrictModel):
 
 
 PDF_CONTRACT = 'page-evidence-v3'
+TEXT_PDF_CONTRACT = 'text-ocr-evidence-v1'
 
 
 DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT = """Du wertest Sitzungseinladungen vollständig aus. Gib ausschließlich JSON gemäß Schema aus.
@@ -293,7 +295,7 @@ def _request(config, prompt, content, schema):
     client = OpenAI(base_url=config.base_url, api_key=config.api_key,
                     timeout=config.http_timeout, max_retries=0)
     response = complete(client, config, model=config.model,
-        messages=[{'role': 'system', 'content': prompt}, {'role': 'user', 'content': content}],
+        messages=[{'role': 'system', 'content': _source_prompt(prompt, config)}, {'role': 'user', 'content': content}],
         response_format={'type': 'json_schema', 'json_schema': {
             'name': schema.__name__, 'strict': True, 'schema': schema.model_json_schema()}},
         max_tokens=_limit('PDF_OUTPUT_TOKENS', '8192'), temperature=0.1,
@@ -350,12 +352,54 @@ def _render_page(page, number):
             'width': image.width, 'height': image.height, 'dpi': dpi}
 
 
+def _source_prompt(prompt, config):
+    if not config.is_kolibri:
+        return prompt
+    # The same extraction/review contracts apply, but this model cannot see images.
+    for old, new in {
+        'Bilder sind die maßgebliche Quelle; der unveränderte Textlayer ist zusätzliche Hilfe und kann falsch sein.':
+            'Quellen sind der unveränderte Textlayer und die lokale OCR je Originalseite. Beide können Fehler enthalten.',
+        'Prüfe die Originalseite zuerst visuell, dann den Kandidaten.':
+            'Prüfe zuerst Textlayer und OCR jeder Originalseite, dann den Kandidaten.',
+        'Textlayer können beschädigt sein; Bildbelege dürfen ihnen widersprechen.':
+            'Textlayer und OCR können beschädigt sein; melde Widersprüche zwischen beiden.',
+        'Prüfe den Kandidaten gegen die Bilder:': 'Prüfe den Kandidaten gegen Textlayer und OCR:',
+        'Bilder sind maßgeblich.': 'Textlayer und OCR sind die verfügbaren Quellen.',
+        'sichtbaren': 'überlieferten',
+        'sichtbare': 'überlieferte',
+    }.items():
+        prompt = prompt.replace(old, new)
+    return prompt + ('\nDu erhältst keine Bilder. Behaupte keine visuelle Prüfung. '
+        'OCR kann Zeichen, Tabellen und Reihenfolge falsch erkennen. Bei leeren Quellen, '
+        'Widersprüchen oder unlesbaren Stellen konkrete Prüffragen stellen, niemals Inhalte erfinden.')
+
+
+def _ocr_image(encoded):
+    try:
+        result = subprocess.run(['tesseract', 'stdin', 'stdout', '-l', 'deu+eng', '--psm', '3'],
+            input=base64.b64decode(encoded), capture_output=True, timeout=120, check=True)
+        return result.stdout.decode('utf-8').strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExtractionError('Lokale PDF-OCR fehlgeschlagen. Tesseract mit deu/eng installieren bzw. Backend neu bauen.') from exc
+
+
+def _source_page(page, number, config):
+    rendered = _render_page(page, number)
+    if config.is_kolibri:
+        rendered['ocr_text'] = _ocr_image(rendered['image'])
+        rendered['ocr_sha256'] = hashlib.sha256(rendered['ocr_text'].encode()).hexdigest()
+        rendered['source'] = 'text+ocr'
+    return rendered
+
+
 def _content(pages, instruction):
     content = [{'type': 'text', 'text': instruction}]
     for page in pages:
         content.extend([
             {'type': 'text', 'text': f"Originalseite {page['page']}; unveränderter Textlayer:\n{page['text']}"},
-            *([{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + page['image'], 'detail': 'high'}}] if page.get('image') else []),
+            *([{'type': 'text', 'text': f"Lokale OCR derselben Seite (kann Erkennungsfehler enthalten):\n{page['ocr_text']}"}]
+              if 'ocr_text' in page else
+              [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + page['image'], 'detail': 'high'}}] if page.get('image') else []),
         ])
     return content
 
@@ -522,7 +566,7 @@ def extract_fast_pdf(path, document, model, system_prompt):
                     text = ''
                 if text.strip():
                     return {'page': number, 'text': text, 'source': 'text'}
-                return {**_render_page(page, number), 'source': 'image'}
+                return {**_source_page(page, number, config), 'source': 'ocr' if config.is_kolibri else 'image'}
             pages.append(durable.checkpoint(f'{prefix}:page:{number}', read_page))
     instruction = ('Erfasse diese Originalseiten vollständig in Dokumentreihenfolge. '
         'Erhalte Nummern, Sitzungsteile, Unterordnung und Metadatenquellen. '
@@ -583,6 +627,9 @@ def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_p
         return extract_fast_pdf(path, document, model, system_prompt)
     prefix = 'pdf:v2:' + document['sha256']
     config = get_llm_config(model)
+    if config.is_kolibri:
+        document['source_mode'] = 'text+ocr'
+        prefix = 'pdf:' + TEXT_PDF_CONTRACT + ':' + document['sha256']
     prompt = build_extraction_system_prompt(system_prompt)
     pages, inventories = [], []
     with pdfplumber.open(path) as pdf:
@@ -595,7 +642,7 @@ def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_p
         for number, page in enumerate(pdf.pages, 1):
             durable.check()
             durable.progress({'phase': 'pdf_extract', 'page': number, 'total_pages': count})
-            rendered = durable.checkpoint(f'{prefix}:page:{number}:render', lambda: _render_page(page, number))
+            rendered = durable.checkpoint(f'{prefix}:page:{number}:render', lambda: _source_page(page, number, config))
             pages.append(rendered)
             inventory = durable.checkpoint(f'{prefix}:page:{number}:inventory', lambda: _call(
                 f'{prefix}:page:{number}:extract', config, prompt,
@@ -613,7 +660,8 @@ def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_p
         merge_content, Agenda, lambda data: _validate(data, all_pages)))
     # Inventories are retained drafts, never certificates under the new contract.
     candidate = _validate(candidate, all_pages)
-    review_prefix = 'pdf:' + PDF_CONTRACT + ':' + document['sha256']
+    contract = TEXT_PDF_CONTRACT if config.is_kolibri else PDF_CONTRACT
+    review_prefix = 'pdf:' + contract + ':' + document['sha256']
     audits, seen_findings = [], set()
     issues, stop_reason = [], None
     for round_number in range(_limit('PDF_REVIEW_ROUNDS', '3')):
@@ -626,7 +674,7 @@ def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_p
             visible = [p['page'] for p in originals]
             # Reuse only checks of exactly the same projection, original images and contract.
             key = review_prefix + ':audit:' + _digest([number, projection,
-                [p['image_sha256'] for p in originals], audit_prompt])
+                [(p['image_sha256'], p.get('ocr_sha256')) for p in originals], audit_prompt])
             validate = lambda value: validate_audit(value, projection, visible, number)
             try:
                 audit = durable.checkpoint(key, lambda: _call(key, config, audit_prompt,
@@ -678,10 +726,17 @@ def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_p
         candidate = corrected
     if hashlib.sha256(path.read_bytes()).hexdigest() != document['sha256']:
         raise ExtractionError('Original-PDF während Verarbeitung verändert')
-    statuses = [{k: v for k, v in p.items() if k not in {'image', 'text'}} |
+    for p in pages:
+        if config.is_kolibri and not (p['text'].strip() or p.get('ocr_text', '').strip()):
+            issues.append(dict(kind='unclear', item_ids=[], metadata_fields=[], pages=[p['page']],
+                evidence=[dict(page=p['page'], quote=None)],
+                description='Textlayer und OCR sind leer. Ist diese Originalseite leer oder enthält sie unlesbare Inhalte?'))
+            stop_reason = 'empty_text_source'
+    statuses = [{k: v for k, v in p.items() if k not in {'image', 'text', 'ocr_text'}} |
                 {'text_characters': len(p['text']), 'status': 'review_required' if issues else 'verified'} for p in pages]
     durable.progress({'phase': 'pdf_review_required' if issues else 'pdf_verified', 'total_pages': len(pages)})
     result = _result(candidate, document, statuses, audits, verified=not issues,
                      issues=issues, stop_reason=stop_reason)
+    result.contract_version = contract
     durable.checkpoint(review_prefix + ':result:' + _digest(candidate), result.to_dict)
     return result

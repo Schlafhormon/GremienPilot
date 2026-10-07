@@ -1,4 +1,4 @@
-"""Validated, immutable per-request model settings. No machine-specific defaults."""
+"""Validated, immutable per-request model settings."""
 import hashlib
 import json
 import math
@@ -10,7 +10,10 @@ from functools import wraps
 from dataclasses import asdict, dataclass, field
 from urllib.parse import urlparse
 import httpx
-from llm_assets import bundled_tokenizer
+from llm_assets import MODEL as DEFAULT_MODEL, bundled_tokenizer
+
+LOCAL_KOLIBRI_BASE_URL = "http://localhost:8080/v1"
+DOCKER_KOLIBRI_BASE_URL = "http://kolibri:8080/v1"
 
 LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DOCKER_OLLAMA_BASE_URL = "http://ollama:11434/v1"
@@ -57,16 +60,22 @@ def resolve_llm_base_url(raw_base_url: str | None = None) -> tuple[str, str]:
     configured = (raw_base_url or "").strip()
     docker_runtime = is_docker_runtime()
 
+    provider = os.environ.get('LLM_PROVIDER', '').strip()
+    default = DOCKER_KOLIBRI_BASE_URL if docker_runtime else LOCAL_KOLIBRI_BASE_URL
+    if provider == 'ollama':
+        default = DOCKER_OLLAMA_BASE_URL if docker_runtime else LOCAL_OLLAMA_BASE_URL
     if not configured:
         if docker_runtime:
-            return DOCKER_OLLAMA_BASE_URL, "internal_docker_default"
-        return LOCAL_OLLAMA_BASE_URL, "local_development_default"
+            return default, "internal_docker_default"
+        return default, "local_development_default"
 
     normalized = _normalize_base_url(configured)
     host = _base_url_host(normalized)
-    if docker_runtime and host in LOCAL_LLM_HOSTS:
+    if docker_runtime and host in LOCAL_LLM_HOSTS and (provider == 'llama-cpp' or urlparse(normalized).port == 8080):
+        return DOCKER_KOLIBRI_BASE_URL, "internal_docker_default_from_local_value"
+    if docker_runtime and host in LOCAL_LLM_HOSTS and urlparse(normalized).port == 11434:
         return DOCKER_OLLAMA_BASE_URL, "internal_docker_default_from_local_value"
-    if host in INTERNAL_LLM_HOSTS:
+    if host in INTERNAL_LLM_HOSTS | {'kolibri'}:
         return normalized, "internal_configured"
     if host in LOCAL_LLM_HOSTS:
         return normalized, "local_development_configured"
@@ -131,10 +140,14 @@ class LLMConfig:
         url = urlparse(self.base_url)
         if url.scheme not in {'http', 'https'} or not url.hostname or url.username or url.password or url.query or url.fragment:
             raise ModelConfigurationError('LLM_BASE_URL must be an HTTP(S) URL without credentials/query')
-        if not self.model.strip() or self.provider not in {'ollama', 'openai-compatible'}:
+        if not self.model.strip() or self.provider not in {'ollama', 'llama-cpp', 'openai-compatible'}:
             raise ModelConfigurationError('Invalid LLM_MODEL or LLM_PROVIDER')
         if self.reasoning_effort not in {None, 'none', 'low', 'medium', 'high', 'max'}:
             raise ModelConfigurationError('Invalid LLM_REASONING_EFFORT')
+        if self.is_kolibri and self.reasoning_effort == 'max':
+            raise ModelConfigurationError('Kolibri-1 supports reasoning levels none, low, medium and high')
+        if self.is_kolibri and self.image_tokens:
+            raise ModelConfigurationError('Kolibri-1 is text-only; LLM_IMAGE_TOKENS must be 0')
         if self.context_tokens < 4096 or self.timeout_seconds <= 0 or self.connect_seconds <= 0:
             raise ModelConfigurationError('Context >= 4096 and positive connect/read timeouts required')
         if self.thinking is not None and self.reasoning_effort is not None:
@@ -142,7 +155,8 @@ class LLMConfig:
         if self.provider == 'openai-compatible' and self.thinking is not None:
             raise ModelConfigurationError('Use LLM_REASONING_EFFORT for OpenAI-compatible providers')
         if self.provider == 'openai-compatible' and self.top_k is not None:
-            raise ModelConfigurationError('LLM_TOP_K requires native Ollama')
+            if not self.is_kolibri:
+                raise ModelConfigurationError('LLM_TOP_K requires Ollama, llama.cpp or Kolibri-1')
         if self.output_parameter not in {'max_tokens', 'max_completion_tokens'}:
             raise ModelConfigurationError('Invalid LLM_OUTPUT_PARAMETER')
         if self.thinking_tokens and self.provider == 'openai-compatible' and self.output_parameter != 'max_completion_tokens':
@@ -161,6 +175,14 @@ class LLMConfig:
     @property
     def reasoning_options(self):
         return {} if self.reasoning_effort is None else {'reasoning_effort': self.reasoning_effort}
+
+    @property
+    def is_kolibri(self):
+        return self.model.rsplit('/', 1)[-1].lower().startswith('kolibri-1')
+
+    @property
+    def uses_local_llama_cpp(self):
+        return self.provider == 'llama-cpp' and _base_url_host(self.base_url) in LOCAL_LLM_HOSTS | {'kolibri'}
 
     @property
     def uses_ollama(self):
@@ -221,6 +243,9 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
     native = os.environ.get('LLM_OLLAMA_NATIVE', '').strip().lower()
     if native not in {'', 'true', 'false'}:
         raise ModelConfigurationError('LLM_OLLAMA_NATIVE must be true or false')
+    if not provider and (_base_url_host(base) == 'kolibri' or
+                         (_base_url_host(base) in LOCAL_LLM_HOSTS and urlparse(base).port == 8080)):
+        provider = 'llama-cpp'
     if not provider:
         provider = ('ollama' if native == 'true' else 'openai-compatible') if native else (
             'ollama' if _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS else 'openai-compatible')
@@ -229,11 +254,12 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
     effort = os.environ.get(effort_key, '').strip().lower() or ('none' if mode == 'fast' else 'medium')
     if effort not in {'none', 'low', 'medium', 'high', 'max'}:
         raise ModelConfigurationError(f'Invalid {effort_key}')
-    effective_model = model if model else os.environ.get('LLM_MODEL', '').strip() or 'qwen3.5:9b'
+    effective_model = model if model else os.environ.get('LLM_MODEL', '').strip() or DEFAULT_MODEL
+    kolibri_default = effective_model == DEFAULT_MODEL
     qwen_default = provider == 'ollama' and effective_model == 'qwen3.5:9b'
     tokenizer_path = os.environ.get('LLM_TOKENIZER_PATH', '').strip()
     tokenizer_model = os.environ.get('LLM_TOKENIZER_MODEL', '').strip()
-    if not tokenizer_path and not tokenizer_model and qwen_default:
+    if not tokenizer_path and not tokenizer_model and kolibri_default:
         tokenizer_path = bundled_tokenizer(effective_model)
         tokenizer_model = effective_model if tokenizer_path else ''
     def optional(name, *, integer=False, minimum=0, default=None):
@@ -242,15 +268,15 @@ def get_llm_config(model=None, *, resolved=None, processing_mode=None):
         base_url=base, base_url_source=source, provider=provider,
         model=effective_model,
         model_source='request' if model else 'environment',
-        ollama_endpoint=not os.environ.get("LLM_PROVIDER", "").strip() and _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS,
+        ollama_endpoint=provider != 'llama-cpp' and not os.environ.get("LLM_PROVIDER", "").strip() and _base_url_host(base) in LOCAL_LLM_HOSTS | INTERNAL_LLM_HOSTS,
         api_key=os.environ.get('LLM_API_KEY', 'ollama'),
         reasoning_effort=effort, processing_mode=mode,
-        context_tokens=_number('LLM_CONTEXT_TOKENS', 131072, integer=True, minimum=4096),
+        context_tokens=_number('LLM_CONTEXT_TOKENS', 32768 if kolibri_default else 131072, integer=True, minimum=4096),
         output_tokens=optional('LLM_OUTPUT_TOKENS', integer=True, minimum=1),
-        thinking_tokens=0 if effort == 'none' else _number('LLM_THINKING_TOKENS', 4096 if provider == 'ollama' else 0, integer=True),
-        temperature=optional('LLM_TEMPERATURE', default=1.0 if qwen_default else None),
-        top_p=optional('LLM_TOP_P', default=0.95 if qwen_default else None),
-        top_k=optional('LLM_TOP_K', integer=True, minimum=1, default=20 if qwen_default else None), seed=optional('LLM_SEED', integer=True),
+        thinking_tokens=0 if effort == 'none' else _number('LLM_THINKING_TOKENS', 4096 if provider in {'ollama', 'llama-cpp'} else 0, integer=True),
+        temperature=optional('LLM_TEMPERATURE', default=1.0 if qwen_default or kolibri_default else None),
+        top_p=optional('LLM_TOP_P', default=0.97 if kolibri_default else 0.95 if qwen_default else None),
+        top_k=optional('LLM_TOP_K', integer=True, minimum=1, default=128 if kolibri_default else 20 if qwen_default else None), seed=optional('LLM_SEED', integer=True),
         cpu_threads=optional('LLM_CPU_THREADS', integer=True, minimum=1),
         gpu_layers=optional('LLM_GPU_LAYERS', integer=True),
         keep_alive=os.environ.get('LLM_KEEP_ALIVE') or os.environ.get('OLLAMA_KEEP_ALIVE', '5m'),

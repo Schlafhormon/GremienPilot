@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     ffmpeg \
     curl \
+    tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3.10 /usr/bin/python \
     && ln -sf /usr/bin/python3.10 /usr/bin/python3

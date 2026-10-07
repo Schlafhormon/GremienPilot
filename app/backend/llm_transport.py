@@ -388,9 +388,27 @@ async def _generate(client, config, kwargs, progress):
                     raise IncompleteResponseError('Unexpected context usage or generation cap reached')
                 snapshot['verified_context_tokens'] = await _verify_context(http, config, metadata['digest'])
         else:
+            if config.provider == 'llama-cpp':
+                async with httpx.AsyncClient(timeout=config.http_timeout, headers=_headers(config)) as http:
+                    props = await _json(http, 'GET', _native_url(config) + '/props')
+                actual = props.get('default_generation_settings', {}).get('n_ctx')
+                if type(actual) is not int or actual < config.context_tokens:
+                    raise ContextBudgetError('llama.cpp context is smaller than LLM_CONTEXT_TOKENS or cannot be verified')
+                snapshot['verified_context_tokens'] = actual
             payload = {'model': config.model, 'messages': _openai_messages(messages), 'stream': True,
                        config.output_parameter: cap, 'temperature': snapshot['temperature']}
-            payload.update(config.reasoning_options)
+            if config.is_kolibri:
+                payload['chat_template_kwargs'] = {
+                    'reasoning_effort': config.reasoning_effort or 'none',
+                    'enable_thinking': config.reasoning_effort not in {None, 'none'},
+                }
+            else:
+                payload.update(config.reasoning_options)
+            if config.provider == 'llama-cpp' or config.is_kolibri:
+                if config.top_k is not None:
+                    payload['top_k'] = config.top_k
+            if config.provider == 'llama-cpp':
+                payload['stream_options'] = {'include_usage': True}
             if response_format:
                 payload['response_format'] = response_format
             for key, value in [('top_p', config.top_p), ('seed', config.seed)]:
@@ -416,7 +434,7 @@ async def _generate(client, config, kwargs, progress):
                         raise ContextBudgetError('Provider context usage exceeds configured budget')
             if finish != 'stop':
                 raise IncompleteResponseError(f'LLM output incomplete ({finish})')
-            snapshot.update(digest=config.model_revision or None, verified_context_tokens=None)
+            snapshot['digest'] = config.model_revision or None
         answer = ''.join(content)
         if not answer.strip():
             raise IncompleteResponseError('LLM returned no final content')
