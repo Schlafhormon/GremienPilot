@@ -1,4 +1,4 @@
-"""Exclusive GPU use by local Ollama and on-demand transcription models.
+"""Exclusive GPU use by local LLM servers and on-demand transcription models.
 
 The application runs one backend process. Its worker threads share this gate;
 other applications using the GPU are outside this coordinator's control.
@@ -66,9 +66,9 @@ def llm_gpu_slot(config, check_cancel=None):
 
 
 def unload_local_ollama(config, check_cancel=None):
-    """Unload all runners on our local Ollama service and verify completion.
+    """Confirm local LLM unload (Ollama runners or llama.cpp idle sleep).
 
-Call only while holding gpu_slot. Refuse to load Whisper if Ollama cannot
+Call only while holding gpu_slot. Refuse to load Whisper if the server cannot
 confirm the handover, including after a timed-out inference request.
 """
     if config.uses_local_llama_cpp:

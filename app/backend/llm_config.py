@@ -48,10 +48,8 @@ def resolve_llm_base_url(raw_base_url: str | None = None) -> tuple[str, str]:
     """
     Resolve the effective LLM endpoint and describe where it came from.
 
-    A copied root .env used to contain LLM_BASE_URL=http://localhost:11434/v1,
-    which is correct for local backend development but wrong inside Docker.
-    In Docker, localhost points at the backend container, so local Ollama values
-    are treated as the internal Compose default unless a non-local URL is set.
+    In Docker, localhost points at the backend container. Rewrite the known
+    local Kolibri/Ollama ports to their Compose service, preserving external URLs.
     """
 
     if raw_base_url is None:

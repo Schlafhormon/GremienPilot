@@ -28,7 +28,8 @@ spec:
               mountPath: /storage
       containers:
         - name: backend
-          image: ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:sha-74353f6-gpu
+          # Publish the locally built Kolibri branch image to your cluster registry.
+          image: gremienpilot-backend:kolibri-gpu
           ports:
             - containerPort: 8010
           volumeMounts:

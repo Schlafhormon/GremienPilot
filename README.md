@@ -196,8 +196,8 @@ chmod +x ./setup.sh
 ```
 
 Beim ersten Start prüft das Setup Docker, erkennt optional eine NVIDIA-GPU, baut lokale
-Docker-Images aus diesem Repository und startet Frontend, Backend und Ollama per
-Docker Compose. Qwen3.5:9b wird automatisch heruntergeladen; der passende Tokenizer
+Docker-Images aus diesem Repository und startet Frontend, Backend und Kolibri per
+Docker Compose. Kolibri-1 IQ2_XS (22,5 GB Download) wird automatisch heruntergeladen; der passende Tokenizer
 wird bereits beim Image-Bau mitgeliefert. Dafür ist kein HuggingFace-Token nötig.
 Vorhandene Container werden mit `start` ohne Neubau gestartet. Nach Code- oder
 Konfigurationsänderungen baut `setup.ps1 build` beziehungsweise `./setup.sh build`
@@ -207,18 +207,19 @@ Die Standardwerte im Überblick:
 
 | Einstellung | Standard |
 | --- | --- |
-| Sprachmodell | Qwen3.5:9b, lokales Ollama 0.34.4 |
-| Kontext für beide Modi | 131.072 Tokens; längere Sitzungen werden in Abschnitten verarbeitet |
+| Sprachmodell | [Aleph-Alpha/Kolibri-1](https://huggingface.co/Aleph-Alpha/Kolibri-1), [IQ2_XS-Mischquantisierung](https://huggingface.co/webmp3/Sakura-MicroQuality-Kolibri-1-GGUF), gepatchtes llama.cpp `hob-b11434` |
+| Kontext für beide Modi | 32.768 Tokens; längere Sitzungen werden in Abschnitten verarbeitet |
 | Ausgabe je Agenda-, Zusammenfassungs- und PDF-Aufruf | bis zu 8.192 Tokens |
-| Thinking | Fast aus, Slow an; Slow erhält bei Ollama zusätzlich 4.096 Tokens Reserve |
+| Thinking | Fast aus, Slow `medium`; Slow erhält zusätzlich 4.096 Tokens Reserve |
 | Zuordnungsblöcke | bis zu 80 Zeilen, kompaktes Antwortformat |
 | Audio-Upload | bis zu 2 GiB |
 
 Diese Budgets sind Obergrenzen, keine vorgegebene Antwortlänge. Fast bleibt ohne
 zusätzliche Inhaltsprüfung. Slow kann mit Thinking deutlich länger dauern.
-131.072 Tokens sind bewusst großzügig, ohne das größtmögliche Modellfenster
-auf jeder Installation zu reservieren. Auf kleineren Grafikkarten nutzt Ollama
-zusätzlich den Arbeitsspeicher; das kann langsamer sein. Es wird kein Quelltext
+Das lokale Profil ist für 32 GB RAM und eine RTX 3070 Ti (8 GB) ausgelegt:
+20,9 GiB Modellgewichte, 10 GPU-Layer, Q8-KV-Cache und eine parallele Anfrage.
+Die starke Quantisierung kostet Qualität; CPU-Offloading kostet Zeit. Kolibri ist
+ein Textmodell: PDFs werden über Textlayer und lokale OCR verarbeitet. Es wird kein Quelltext
 still abgeschnitten. Details und optionale Anpassungen stehen im
 [Konfigurationsleitfaden](docs/llm-configuration.md).
 
@@ -288,7 +289,7 @@ Sprecherinformationen lokal in der Docker-Umgebung. Persistente Daten liegen in:
 
 - `./data/sessions.sqlite3` für Sitzungen, Jobs, TOPs, Zuordnungen, Sprecherprofile und Export-Metadaten
 - `./uploads` für gespeicherte Audiodateien zur Wiedergabe und Sitzungswiederherstellung
-- Docker-Volume `ollama_data` für lokale Ollama-Modelle
+- Docker-Volume `kolibri_data` für die Kolibri-GGUF-Datei
 - Docker-Volumes `backend_hf_cache` und `backend_torch_cache` für lokal geladene WhisperX-, HuggingFace- und Torch-Modelle
 
 Das dauerhafte Merken von Sprechern ist standardmäßig ausgeschaltet. Ohne Opt-in
@@ -349,22 +350,22 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `TORCH_NUM_INTEROP_THREADS` | optionale PyTorch-Inter-op-Threads | leer |
 | `OMP_NUM_THREADS` / `MKL_NUM_THREADS` | optionale OpenMP/MKL-Threadlimits | leer |
 | `WHISPER_LANGUAGE` | Sprache | `de` |
-| `GPU_MODEL_SWITCHING` | Whisper und lokales Ollama abwechselnd auf einer GPU laden; erfordert einen Backend-Prozess | `false` |
-| `GPU_MODEL_UNLOAD_TIMEOUT_SECONDS` | Positives, endliches Zeitlimit für die bestätigte Ollama-Speicherfreigabe vor der Transkription | `120` |
-| `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://ollama:11434/v1`, lokale Backend-Entwicklung: `http://localhost:11434/v1` |
+| `GPU_MODEL_SWITCHING` | Whisper und lokales Kolibri abwechselnd auf einer GPU laden; erfordert einen Backend-Prozess | `false` |
+| `GPU_MODEL_UNLOAD_TIMEOUT_SECONDS` | Positives, endliches Zeitlimit für die bestätigte Kolibri-Speicherfreigabe vor der Transkription | `120` |
+| `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://kolibri:8080/v1`, lokale Backend-Entwicklung: `http://localhost:8080/v1` |
 | `PROTOKOLL_MODEL_DISK_GB` | Setup-Umgebungsvariable: Modell-Speicherplatzreserve in GB, keine RAM-Messung | `40` |
-| `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3.5:9b` |
-| `LLM_PROVIDER` | `ollama` oder `openai-compatible`; leer erhält bisherige Erkennung | leer |
+| `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `Aleph-Alpha/Kolibri-1` |
+| `LLM_PROVIDER` | `llama-cpp`, `ollama` oder `openai-compatible` | `llama-cpp` |
 | `LLM_FAST_REASONING_EFFORT` / `LLM_SLOW_REASONING_EFFORT` | Thinking je Modus; leere Werte verwenden den Modusstandard | Fast `none`, Slow `medium` |
-| `LLM_THINKING_TOKENS` | Zusätzliche Reserve, kein separates hartes Denklimit; leer wählt Providerstandard | Ollama `4096`, externe API `0`; Fast ohne Thinking immer `0` |
+| `LLM_THINKING_TOKENS` | Zusätzliche Reserve, kein separates hartes Denklimit; leer wählt Providerstandard | llama.cpp/Ollama `4096`, externe API `0`; Fast ohne Thinking immer `0` |
 | `LLM_OUTPUT_TOKENS` / `LLM_OUTPUT_PARAMETER` | Ausgabe überschreiben / externe API: `max_tokens` oder `max_completion_tokens` | leer / `max_tokens` |
-| `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K`, `LLM_SEED` | Sampling; `top_k` nur natives Ollama | leer |
+| `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K`, `LLM_SEED` | Kolibri-Sampling; explizite Werte überschreiben Modellstandard | `1.0`, `0.97`, `128`, leer |
 | `LLM_CONNECT_TIMEOUT_SECONDS`, `LLM_READ_TIMEOUT_SECONDS`, `LLM_TOTAL_TIMEOUT_SECONDS` | Verbindung / Inaktivität / Gesamtlimit; Gesamtwert `0` erlaubt lange Streams | `10` / Legacy-Alias / `0` |
 | `LLM_GPU_LAYERS` / `LLM_KEEP_ALIVE` | Native GPU-Layer (`0`: CPU) / Modellhaltezeit | Providerwahl / Ollama-Wert |
-| `LLM_IMAGE_TOKENS` | Reserve je Bild; leer modellabhängig, explizit `0` verweigert Bilder | Qwen3.5:9b/Ollama `17408`, sonst `0` |
-| `LLM_TOKENIZER_PATH` / `LLM_TOKENIZER_MODEL` | Leer: mitgelieferter Qwen-Tokenizer; explizite Pfade müssen zum Modell passen | automatisch für Qwen3.5:9b/Ollama |
-| `LLM_MODEL_REVISION` | Unveränderliche externe Modellrevision für Cache; Ollama nutzt Digest | leer |
-| `OLLAMA_LOAD_TIMEOUT` | Serverseitiger Watchdog für das Modellladen | `30m` |
+| `LLM_IMAGE_TOKENS` | Kolibri verarbeitet keine Bilder; PDF-OCR erfolgt lokal | `0` |
+| `LLM_TOKENIZER_PATH` / `LLM_TOKENIZER_MODEL` | Leer: mitgelieferter Kolibri-Tokenizer; explizite Pfade müssen zum Modell passen | automatisch für Kolibri-1 |
+| `LLM_MODEL_REVISION` | Unveränderliche Modellrevision für Cache | SHA-256 der GGUF-Datei |
+| `KOLIBRI_GPU_LAYERS` | GPU-Layer des llama.cpp-Servers; nach Änderung Container neu erstellen | CPU `0`, GPU `10` |
 | `LLM_REASONING_EFFORT` / `LLM_THINKING` | Veraltete globale Schalter; die getrennten Moduseinstellungen haben Vorrang | nicht mehr für Fast/Slow verwenden |
 | `LLM_TIMEOUT_SECONDS` | Veralteter Alias für das gemeinsame Lese-/Inaktivitätslimit | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
@@ -372,16 +373,11 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `SUMMARY_MODEL_ATTEMPTS` | Versuche für ungültige strukturierte Modellantworten | `2` |
 | `SUMMARY_RECONCILIATION_ROUNDS` | Gezielte Modellklärung, danach konkrete Prüffragen | `2` |
 | `LLM_OLLAMA_NATIVE` | Veraltete Providerwahl; `LLM_PROVIDER` hat Vorrang | leer |
-| `LLM_CONTEXT_TOKENS` | Gemeinsames Eingabe-/Ausgabebudget; wird an Ollama übermittelt | `131072` |
-| `LLM_CPU_THREADS` | Ollama-Inferenzthreads, unabhängig von Whisper; leer: Providerwahl | leer |
+| `LLM_CONTEXT_TOKENS` | Gemeinsames Eingabe-/Ausgabebudget; zugleich Server-Kontext | `32768` |
+| `LLM_CPU_THREADS` | llama.cpp-Inferenzthreads, unabhängig von Whisper | `8` |
 | `LLM_MAX_RETRIES` | Gemeinsame Wiederholungen vorübergehender Transportfehler | `2` |
 | `LLM_CACHE_DIR` | Cache validierter Antworten; enthält vertrauliche Sitzungsdaten, leer deaktiviert | Compose: `/app/data/llm-cache` |
 | `LLM_AUDIT_DIR` | Optionaler privater Diagnoseordner für Anfrage, Endergebnis und Konfigurationsstand | leer |
-| `OLLAMA_NUM_PARALLEL` | Gleichzeitige Anfragen je Ollama-Modell | Compose: `1` |
-| `OLLAMA_MAX_LOADED_MODELS` | Maximal gleichzeitig geladene Ollama-Modelle | Compose: `1` |
-| `OLLAMA_FLASH_ATTENTION` | Flash Attention für geringeren Kontext-Speicherbedarf aktivieren | Compose: `1` |
-| `OLLAMA_KV_CACHE_TYPE` | Präzision des Kontext-Caches; `q8_0` spart Speicher und benötigt Flash Attention | Compose: `f16` |
-| `OLLAMA_KEEP_ALIVE` | Wie lange Ollama Modelle nach einer Anfrage geladen hält | Compose: `5m` |
 | `SPEAKER_EMBEDDING_ENABLED` | lokale Sprecher-Embeddings für prüfbare Matches erzeugen | `true` |
 | `SPEAKER_EMBEDDING_MODEL` | primäres Embedding-Modell | `pyannote/embedding` |
 | `SPEAKER_EMBEDDING_FALLBACK_MODELS` | kommagetrennte Fallback-Modelle, falls das primäre Modell nicht lädt | `pyannote/wespeaker-voxceleb-resnet34-LM` |
@@ -415,8 +411,8 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `PDF_OUTPUT_TOKENS` | Gewünschtes Ausgabebudget je Extraktions-, Zusammenführungs- und Prüfaufruf; `LLM_OUTPUT_TOKENS` hat gegebenenfalls Vorrang | `8192` |
 | `PDF_MODEL_ATTEMPTS` / `PDF_REVIEW_ROUNDS` | Schema-/Leerantwort-Reparaturversuche je Schritt / vollständige unabhängige Seitenprüfrunden | `3` / `3` |
 
-PDF-Auswertung benötigt ein bildfähiges Modell und eine passende, explizit gesetzte
-`LLM_IMAGE_TOKENS`-Reserve (`0` verweigert Bilder). Auch das Zusammenführen aller
+Kolibri wertet PDFs über Textlayer und Tesseract-OCR (`deu+eng`) aus; eine visuelle
+Modellprüfung findet dabei nicht statt. Auch das Zusammenführen aller
 Seiteninventare und die Prüfung des Gesamtergebnisses müssen in `LLM_CONTEXT_TOKENS`
 passen; überschrittene Budgets führen zu einem sichtbaren Fehler. Es gibt keine
 Text-Heuristik und keine Ersatzagenda aus dem Transkript bei vorgesehenem PDF.
@@ -429,7 +425,7 @@ verlinkt. Details und Grenzen: [PDF-Auswertung](docs/pdf-extraction.md).
 
 Weitere Optionen stehen in `.env.example`. In Docker Compose sollte
 `LLM_BASE_URL` normalerweise nicht gesetzt werden; der Backend-Container nutzt
-dann automatisch den internen Ollama-Service. Ein `localhost`-Wert ist nur für
+dann automatisch den internen Kolibri-Service. Ein `localhost`-Wert ist nur für
 lokale Backend-Entwicklung außerhalb von Docker sinnvoll. Externe
 OpenAI-kompatible Endpunkte müssen explizit mit vollständiger `/v1`-URL
 konfiguriert werden.
@@ -441,7 +437,7 @@ Der Cache wird nicht automatisch geleert; nach einem Modellwechsel unter gleiche
 Modellnamen sollte er außerhalb laufender Jobs gelöscht werden.
 
 Details zu Providerverträgen, Tokenzählung und Migration: [Modellkonfiguration](docs/llm-configuration.md).
-Natives Ollama benötigt ab diesem Vertrag Version 0.34.2; vorhandene Browser-/API-Modellüberschreibungen bleiben wirksam.
+Vorhandene Browser-/API-Modellüberschreibungen bleiben wirksam; für Kolibri im Einstellungsdialog „Servermodell verwenden“ wählen.
 
 ### LLM-Nutzung für automatische TOP-Zuordnung
 
@@ -461,16 +457,16 @@ Für NVIDIA-GPUs unter Windows oder Linux:
 3. Docker neu starten.
 4. Setup ausführen und GPU-Modus auswählen, wenn das Skript danach fragt.
 
-`docker-compose.gpu.yml` stellt Backend und Ollama die NVIDIA-GPU bereit.
+`docker-compose.gpu.yml` stellt Backend und Kolibri die NVIDIA-GPU bereit.
 Für GPU-Transkription `WHISPER_DEVICE=cuda` in `.env` setzen; der Wert hat
 Vorrang vor dem GPU-Override. macOS unterstützt diesen NVIDIA-GPU-Modus nicht.
 
 Bei knappem Grafikspeicher aktiviert `GPU_MODEL_SWITCHING=true` den automatischen
-Wechsel: Ollama wird vor der Transkription entladen, Whisper und seine Zusatzmodelle
-danach. Das erfordert einen Backend-Prozess und einen erreichbaren lokalen
-Ollama-Dienst (`ollama`, `localhost` oder Loopback-Adresse), der ausschließlich
-von dieser Anwendung genutzt wird. Modelle werden erst beim ersten Auftrag
-geladen; das Nachladen benötigt zusätzliche Zeit. Die Speicher- und
+Wechsel: Vor Whisper wartet das Backend auf Kolibris bestätigten Ruhezustand
+(15 Sekunden ohne Modellanfrage); danach werden Whisper und Zusatzmodelle freigegeben.
+Der nächste LLM-Aufruf lädt Kolibri automatisch nach. Das erfordert einen
+Backend-Prozess und einen ausschließlich hier genutzten lokalen Modellserver.
+Das Nachladen benötigt zusätzliche Zeit. Die Speicher- und
 Timeout-Einstellungen stehen unter [Konfiguration](#konfiguration).
 
 ## Fehlerbehebung
@@ -492,7 +488,7 @@ Windows:
 ```
 
 Das Skript entfernt vorhandene Container automatisch. Modell-Volumes werden
-standardmäßig behalten, damit Ollama-, HuggingFace- und Torch-Modelle nicht bei
+standardmäßig behalten, damit Kolibri-, HuggingFace- und Torch-Modelle nicht bei
 jedem Backend-/Frontend-Build erneut heruntergeladen werden.
 
 ### Vorhandene Container nur starten
@@ -519,23 +515,22 @@ Wenn lokale Images ohne vorinstallierte Modelle gebaut wurden, setzen Sie in
 HF_TOKEN=hf_...
 ```
 
-### Zusammenfassung meldet LLM-/Ollama-Fehler
+### Zusammenfassung meldet LLM-Fehler
 
-Docker Compose startet einen internen Ollama-Dienst und lädt standardmäßig
-`LLM_MODEL=qwen3.5:9b`. Prüfen Sie die LLM-Diagnose mit:
+Docker Compose startet Kolibri-1 über llama.cpp. Prüfen Sie die LLM-Diagnose mit:
 
 ```bash
 curl http://localhost:8010/api/llm/diagnostics
 ```
 
-Wenn das Modell fehlt, laden Sie es nach:
+Download- und Ladefortschritt:
 
 ```bash
-docker compose exec ollama ollama pull qwen3.5:9b
+docker compose logs -f kolibri
 ```
 
-Für lokale Backend-Entwicklung ohne Docker muss Ollama lokal laufen und
-`LLM_BASE_URL=http://localhost:11434/v1` gesetzt sein.
+Für lokale Backend-Entwicklung muss der gepatchte llama.cpp-Server laufen und
+`LLM_BASE_URL=http://localhost:8080/v1` gesetzt sein.
 
 Danach neu starten:
 
@@ -570,7 +565,7 @@ oder über das Setup:
 ### Cleanup
 
 Das entfernt Container und Docker-Volumes, insbesondere heruntergeladene
-Ollama-, HuggingFace- und Torch-Modelle. Die lokalen Bind-Mounts `uploads/` und
+Kolibri-, HuggingFace- und Torch-Modelle. Die lokalen Bind-Mounts `uploads/` und
 `data/` bleiben bestehen; löschen Sie diese Ordner nur bewusst, wenn auch
 hochgeladene Dateien und gespeicherte Sitzungen entfernt werden sollen.
 
@@ -665,7 +660,7 @@ Bei Zertifikatsfehlern hinter Norton oder einem Firmenproxy siehe
 Beim ersten Start können die Modelldownloads deutlich länger als zehn Minuten
 dauern. Das Windows-Setup zeigt den Fortschritt und wartet bis zu einer Stunde.
 Die Downloads laufen auch nach Ablauf der Warteanzeige weiter. Mit
-`docker compose logs -f --tail=5 ollama backend` lässt sich der Fortschritt
+`docker compose logs -f --tail=5 kolibri backend` lässt sich der Fortschritt
 verfolgen; `.\setup.ps1 start` prüft die vorhandenen Dienste erneut.
 
 CPU:
@@ -734,7 +729,7 @@ die verbindlichen Ausgabeformate und Aufgabenregeln bestehen.
 
 Unter `k8s/` liegen Manifeste für ein GPU-beschleunigtes Deployment. Die
 Kubernetes-Variante nutzt standardmäßig eine externe OpenAI-kompatible LLM-API
-statt des lokalen Ollama-Containers. Details stehen in `k8s/README.md`.
+statt des lokalen Kolibri-Containers. Details stehen in `k8s/README.md`.
 
 ## Ursprung und Förderung
 

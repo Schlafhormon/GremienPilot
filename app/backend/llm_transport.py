@@ -435,6 +435,7 @@ async def _generate(client, config, kwargs, progress):
             if finish != 'stop':
                 raise IncompleteResponseError(f'LLM output incomplete ({finish})')
             snapshot['digest'] = config.model_revision or None
+            snapshot.setdefault('verified_context_tokens', None)
         answer = ''.join(content)
         if not answer.strip():
             raise IncompleteResponseError('LLM returned no final content')

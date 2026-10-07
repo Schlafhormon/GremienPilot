@@ -116,3 +116,26 @@ def test_ocr_failure_is_actionable(monkeypatch):
     monkeypatch.setattr(pdf.subprocess, 'run', missing)
     with pytest.raises(pdf.ExtractionError, match='Tesseract'):
         pdf._ocr_image('')
+
+
+def test_kolibri_empty_ocr_source_cannot_be_verified(tmp_path, monkeypatch, kolibri):
+    path = tmp_path / 'empty-source.pdf'
+    path.write_bytes(pdf_bytes())
+    monkeypatch.setattr(pdf, '_source_page', lambda *a: {
+        'page': 1, 'text': '', 'ocr_text': '', 'image_sha256': 'image',
+        'ocr_sha256': 'ocr', 'source': 'text+ocr'})
+    answers = iter([agenda(), agenda(), audit(1), audit(0)])
+    monkeypatch.setattr(pdf, '_request', lambda *a: json.dumps(next(answers)))
+    result = pdf.extract_agenda_data_from_pdf(path)
+    assert not result.processing_complete and result.review_required
+    assert result.stop_reason == 'empty_text_source' and result.review_questions
+
+
+@pytest.mark.parametrize('docker,expected', [(False, 'http://localhost:8080/v1'), (True, 'http://kolibri:8080/v1')])
+def test_kolibri_endpoint_and_provider_defaults(monkeypatch, docker, expected):
+    import llm_config
+    monkeypatch.setattr(llm_config, 'is_docker_runtime', lambda: docker)
+    for name in ['LLM_BASE_URL', 'LLM_PROVIDER', 'LLM_OLLAMA_NATIVE', 'LLM_MODEL']:
+        monkeypatch.delenv(name, raising=False)
+    assert resolve_llm_base_url()[0] == expected
+    assert get_llm_config().provider == 'llama-cpp'

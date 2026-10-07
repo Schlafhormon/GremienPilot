@@ -8,7 +8,9 @@
 
 services:
   backend:
-    image: ${BACKEND_GPU_IMAGE:-ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:gpu-latest}
+    build:
+      dockerfile: Dockerfile.gpu
+    image: ${BACKEND_GPU_IMAGE:-gremienpilot-backend:kolibri-gpu}
     environment:
       # Allow CPU transcription when the LLM needs the available VRAM.
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
@@ -20,7 +22,9 @@ services:
               count: 1
               capabilities: [gpu]
 
-  ollama:
+  kolibri:
+    environment:
+      - KOLIBRI_GPU_LAYERS=${KOLIBRI_GPU_LAYERS:-10}
     deploy:
       resources:
         reservations:

@@ -43,21 +43,17 @@ if ($PROTOKOLL_IMAGE_TAG) {
     $BACKEND_GPU_IMAGE = if ($env:BACKEND_GPU_IMAGE) { $env:BACKEND_GPU_IMAGE } else { "${IMAGE_BASE}/backend:gpu-latest" }
 }
 
-$OLLAMA_IMAGE_TAG = if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE_TAG } else { "0.34.4" }
-$OLLAMA_IMAGE = if ($env:OLLAMA_IMAGE) { $env:OLLAMA_IMAGE } else { "ollama/ollama:${OLLAMA_IMAGE_TAG}" }
-$OLLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "qwen3.5:9b" }
+$KOLIBRI_IMAGE = if ($env:KOLIBRI_IMAGE) { $env:KOLIBRI_IMAGE } else { "gremienpilot-kolibri:hob-b11434" }
 
 $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
 $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
 $env:BACKEND_GPU_IMAGE = $BACKEND_GPU_IMAGE
-# Let Compose honor OLLAMA_IMAGE in .env. Export only an explicit shell tag;
-# an existing shell OLLAMA_IMAGE already has precedence and stays unchanged.
-if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE = $OLLAMA_IMAGE }
+# Compose also honors KOLIBRI_IMAGE in .env.
 
 # Ports used by the application
 $PORT_FRONTEND = 3000
 $PORT_BACKEND = 8010
-$PORT_OLLAMA = 11434
+$PORT_KOLIBRI = 8080
 
 # Global state
 $script:USE_GPU = $false
@@ -90,7 +86,7 @@ function Initialize-Configuration {
     try {
         Copy-Item -LiteralPath (Join-Path $ScriptDir '.env.example') -Destination $destination -ErrorAction Stop
         Write-Info ".env mit den Standardwerten fuer lange Sitzungen angelegt."
-        Write-Host "Qwen3.5:9b wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
+        Write-Host "Kolibri-1 IQ2_XS wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
         Write-Host "Fuer Audio mit Sprechererkennung ggf. HF_TOKEN in .env setzen (Anleitung in README.md)."
         return $true
     } catch {
@@ -110,9 +106,9 @@ if (Test-Truthy $PROTOKOLL_BUILD_LOCAL) {
 }
 
 if ($script:BUILD_LOCAL_IMAGES) {
-    $FRONTEND_IMAGE = "ki-protokollierung-frontend:local"
-    $BACKEND_CPU_IMAGE = "ki-protokollierung-backend:local"
-    $BACKEND_GPU_IMAGE = "ki-protokollierung-backend:gpu-local"
+    $FRONTEND_IMAGE = "gremienpilot-frontend:kolibri"
+    $BACKEND_CPU_IMAGE = "gremienpilot-backend:kolibri-cpu"
+    $BACKEND_GPU_IMAGE = "gremienpilot-backend:kolibri-gpu"
     $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
     $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
     $env:BACKEND_GPU_IMAGE = $BACKEND_GPU_IMAGE
@@ -164,9 +160,9 @@ function Show-Help {
 function Set-LocalApplicationImages {
     $script:BUILD_LOCAL_IMAGES = $true
     $script:PROTOKOLL_PULL_POLICY = "missing"
-    $script:FRONTEND_IMAGE = "ki-protokollierung-frontend:local"
-    $script:BACKEND_CPU_IMAGE = "ki-protokollierung-backend:local"
-    $script:BACKEND_GPU_IMAGE = "ki-protokollierung-backend:gpu-local"
+    $script:FRONTEND_IMAGE = "gremienpilot-frontend:kolibri"
+    $script:BACKEND_CPU_IMAGE = "gremienpilot-backend:kolibri-cpu"
+    $script:BACKEND_GPU_IMAGE = "gremienpilot-backend:kolibri-gpu"
     $env:FRONTEND_IMAGE = $script:FRONTEND_IMAGE
     $env:BACKEND_IMAGE = $script:BACKEND_CPU_IMAGE
     $env:BACKEND_GPU_IMAGE = $script:BACKEND_GPU_IMAGE
@@ -222,7 +218,7 @@ function Remove-ExistingContainersForRebuild {
 
 function Confirm-ModelCacheHandling {
     $volumeNames = @(
-        (Get-ProjectVolumeName "ollama_data"),
+        (Get-ProjectVolumeName "kolibri_data"),
         (Get-ProjectVolumeName "backend_hf_cache"),
         (Get-ProjectVolumeName "backend_torch_cache")
     )
@@ -387,11 +383,11 @@ function Test-ImageExists {
 }
 
 #######################################
-# Check if Ollama model is downloaded
+# Check if Kolibri model is downloaded
 #######################################
-function Test-OllamaModelExists {
+function Test-KolibriModelExists {
     # Ask for the effective Compose model; unrelated cached weights are not proof.
-    docker compose exec -T ollama sh -c 'ollama show "$OLLAMA_MODEL" >/dev/null 2>&1' 2>&1 | Out-Null
+    docker compose exec -T kolibri sh -c 'test -f /models/Sakura-Kolibri-1-IQ2_XS-20.94GiB.gguf' 2>&1 | Out-Null
     return ($LASTEXITCODE -eq 0)
 }
 
@@ -415,12 +411,12 @@ function Test-DiskSpace {
         $script:MissingItems += "Frontend-Image (~1GB)"
     }
 
-    if (-not (Test-ImageExists $OLLAMA_IMAGE)) {
+    if (-not (Test-ImageExists $KOLIBRI_IMAGE)) {
         $requiredGB += 2
-        $script:MissingItems += "Ollama-Image (~2GB)"
+        $script:MissingItems += "Kolibri-Image (~2GB)"
     }
 
-    if (-not (Test-OllamaModelExists)) {
+    if (-not (Test-KolibriModelExists)) {
         $modelDiskGB = if ($env:PROTOKOLL_MODEL_DISK_GB) { $env:PROTOKOLL_MODEL_DISK_GB } else { "40" }
         if ($modelDiskGB -notmatch '^[1-9][0-9]*$') {
             Write-Err "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
@@ -476,8 +472,8 @@ function Test-RAM {
     }
     $totalRAMGB = [math]::Floor($computerSystem.TotalPhysicalMemory / 1GB)
 
-    if ($totalRAMGB -lt 8) {
-        Write-Warn "Wenig Arbeitsspeicher erkannt (${totalRAMGB}GB). Empfohlen: 8GB+"
+    if ($totalRAMGB -lt 30) {
+        Write-Warn "Wenig Arbeitsspeicher erkannt (${totalRAMGB}GB). Empfohlen: 32GB+"
         Write-Host "  Die Anwendung koennte langsam laufen."
     } else {
         Write-Success "Arbeitsspeicher OK (${totalRAMGB}GB verfuegbar)"
@@ -547,7 +543,7 @@ function Test-Ports {
     $conflictPorts = @()
 
     # Check each port (but ignore if our own containers are using them)
-    foreach ($port in @($PORT_FRONTEND, $PORT_BACKEND, $PORT_OLLAMA)) {
+    foreach ($port in @($PORT_FRONTEND, $PORT_BACKEND, $PORT_KOLIBRI)) {
         if (Test-PortInUse $port) {
             # Check if it's our own Docker container
             $isOurContainer = $false
@@ -565,7 +561,7 @@ function Test-Ports {
     }
 
     if ($conflicts.Count -eq 0) {
-        Write-Success "Alle Ports verfuegbar ($PORT_FRONTEND, $PORT_BACKEND, $PORT_OLLAMA)"
+        Write-Success "Alle Ports verfuegbar ($PORT_FRONTEND, $PORT_BACKEND, $PORT_KOLIBRI)"
         return $true
     }
 
@@ -787,7 +783,8 @@ function Wait-ForServices {
     while ($timer.Elapsed.TotalSeconds -lt $MaxWaitSeconds) {
         try {
             $response = Invoke-WebRequest -Uri "http://localhost:$PORT_BACKEND/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($response.StatusCode -eq 200) {
+            $modelResponse = Invoke-WebRequest -Uri "http://localhost:$PORT_KOLIBRI/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+            if ($response.StatusCode -eq 200 -and $modelResponse.StatusCode -eq 200) {
                 $ready = $true
                 break
             }
@@ -810,7 +807,7 @@ function Wait-ForServices {
         Write-Host ""
         Write-Warn "Wartezeit erreicht; die Anwendung ist noch nicht bereit."
         Write-Host "Die Warteanzeige beendet weder Container noch Downloads. Ein Timeout allein bedeutet keinen Startfehler."
-        Write-Host "Fortschritt: docker compose logs -f --tail=5 ollama backend"
+        Write-Host "Fortschritt: docker compose logs -f --tail=5 kolibri backend"
         Write-Host "Spaeter erneut pruefen: .\setup.ps1 start"
         Write-Host ""
         Show-FailureDiagnostics
@@ -825,10 +822,10 @@ function Wait-ForServices {
 }
 
 function Show-StartupProgress {
-    foreach ($service in @("backend", "ollama")) {
+    foreach ($service in @("backend", "kolibri")) {
         $lines = @(docker compose logs --no-color --tail=10 $service 2>&1)
         if ($LASTEXITCODE -ne 0) { continue }
-        # Ollama uses terminal escape sequences even in captured logs.
+        # Kolibri uses terminal escape sequences even in captured logs.
         $clean = @($lines | ForEach-Object {
             $_.ToString() -replace '\x1B\[[0-?]*[ -/]*[@-~]', ''
         } | Where-Object { $_ -match '\S' })
@@ -867,7 +864,7 @@ function Show-FailureDiagnostics {
     Write-Host ""
     Write-Host "3. Docker-Ressourcen"
     Write-Host "   -> Docker Desktop -> Einstellungen -> Resources"
-    Write-Host "   -> Empfohlen: Mindestens 8GB RAM, 4 CPUs"
+    Write-Host "   -> Empfohlen: 32GB RAM, 8 CPUs fuer Kolibri"
     Write-Host ""
     Write-Host "Naechste Schritte:"
     Write-Host "  1. .\setup.ps1 logs      # Detaillierte Logs anzeigen"
@@ -958,10 +955,19 @@ function Invoke-Build {
             Read-Host "Druecken Sie Enter zum Beenden"
             exit 1
         }
-        Write-Info "Pruefe Runtime-Image fuer Ollama..."
-        docker compose pull ollama 2>&1 | Out-Null
+        Write-Info "Baue Runtime-Image fuer Kolibri..."
+        $kolibriArgs = @()
+        $caCert = Join-Path $ScriptDir ".certs\custom-ca.crt"
+        if (Test-Path -LiteralPath $caCert -PathType Leaf) {
+            $kolibriArgs += @("--secret", "id=custom_ca,src=$caCert")
+        }
+        if (Test-Truthy $PROTOKOLL_BUILD_NO_CACHE) { $kolibriArgs += "--no-cache" }
+        $composeConfig = docker compose config --format json | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or -not $composeConfig.services.kolibri.image) { exit 1 }
+        docker build @kolibriArgs -t $composeConfig.services.kolibri.image ./scripts/kolibri 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Konnte Ollama-Image nicht aktualisieren. Docker versucht es beim Start erneut."
+            Write-Err "Kolibri-Image konnte nicht gebaut werden. Build-Ausgabe pruefen."
+            exit 1
         }
     } else {
         Invoke-PullImages
@@ -1097,10 +1103,10 @@ function Show-Status {
     }
 
     try {
-        $response = Invoke-WebRequest -Uri "http://localhost:$PORT_OLLAMA/api/tags" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-        Write-Host "Ollama: Erreichbar" -ForegroundColor Green
+        $response = Invoke-WebRequest -Uri "http://localhost:$PORT_KOLIBRI/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        Write-Host "Kolibri: Erreichbar" -ForegroundColor Green
     } catch {
-        Write-Host "Ollama: Nicht erreichbar" -ForegroundColor Red
+        Write-Host "Kolibri: Nicht erreichbar" -ForegroundColor Red
     }
 
     Write-Host ""

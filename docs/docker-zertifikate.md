@@ -1,7 +1,7 @@
 # Docker-Downloads hinter HTTPS-Prüfung
 
 Fehler wie `invalid peer certificate: UnknownIssuer` beim Build oder
-`x509: certificate signed by unknown authority` bei Ollama können auftreten,
+`SSL certificate problem` beim Kolibri-Download können auftreten,
 wenn Antivirus-Software (z. B. Norton Web/Mail Shield) oder ein Firmenproxy
 HTTPS-Verbindungen prüft. Windows vertraut dessen Stammzertifikat bereits;
 Linux-Container haben einen eigenen Zertifikatsspeicher.
@@ -27,11 +27,10 @@ New-Item -ItemType Directory -Force .certs | Out-Null
 .\setup.ps1 build
 ```
 
-`setup.ps1` übergibt das Zertifikat als BuildKit-Secret an Backend und Frontend.
+Die Setup-Skripte übergeben das Zertifikat als BuildKit-Secret an Backend, Frontend und Kolibri.
 Das Backend ergänzt damit seinen CA-Speicher für Paket- und spätere
 Modell-Downloads; npm nutzt es zusätzlich während der Paketinstallation.
-Ollama erhält die Datei über einen schreibgeschützten Verzeichnismount und
-aktualisiert seinen CA-Speicher vor dem Start. Die HTTPS-Prüfung bleibt aktiv.
+Kolibris Image ergänzt damit seinen CA-Speicher beim Bau. Die HTTPS-Prüfung bleibt aktiv.
 
 Manuelle Docker-Builds (auch mit `Dockerfile.gpu-blackwell`) benötigen zusätzlich
 `--secret id=custom_ca,src=.certs/custom-ca.crt`. Nach Austausch oder Entfernung

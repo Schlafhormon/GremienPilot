@@ -15,7 +15,7 @@ def test_resolve_llm_base_url_uses_local_default_outside_docker(monkeypatch):
 
     base_url, source = summarize.resolve_llm_base_url()
 
-    assert base_url == "http://localhost:11434/v1"
+    assert base_url == "http://localhost:8080/v1"
     assert source == "local_development_default"
 
 def test_resolve_llm_base_url_uses_internal_default_in_docker(monkeypatch):

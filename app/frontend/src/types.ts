@@ -453,7 +453,7 @@ export interface PdfAgendaExtractionResult {
   metadata: PdfAgendaMetadata;
   processing_complete?: boolean;
   review_required?: boolean;
-  document?: { sha256: string; page_count: number; url?: string; job_id?: string };
+  document?: { sha256: string; page_count: number; url?: string; job_id?: string; source_mode?: 'text+ocr' };
   items?: { id: string; number: string | null; title: string; kind: 'agenda' | 'heading';
     original_kind?: 'agenda' | 'heading'; exclusion_reason?: string;
     section: string | null; parent_id: string | null; sources: { page: number; quote: string | null }[] }[];

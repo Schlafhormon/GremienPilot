@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kolibri
+spec:
+  serviceName: kolibri
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kolibri
+  template:
+    metadata:
+      labels:
+        app: kolibri
+    spec:
+      containers:
+        - name: kolibri
+          # Build scripts/kolibri and publish this image to your cluster registry.
+          image: gremienpilot-kolibri:hob-b11434
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LLM_CONTEXT_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: tops-backend-config
+                  key: LLM_CONTEXT_TOKENS
+            - name: KOLIBRI_GPU_LAYERS
+              value: "0"
+            - name: LLM_CPU_THREADS
+              value: "8"
+          resources:
+            requests:
+              memory: 28Gi
+              cpu: "8"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: models
+              mountPath: /models
+  volumeClaimTemplates:
+    - metadata:
+        name: models
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 64Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kolibri
+spec:
+  selector:
+    app: kolibri
+  ports:
+    - port: 8080
+      targetPort: 8080

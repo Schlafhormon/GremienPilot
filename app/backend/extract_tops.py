@@ -550,6 +550,9 @@ def extract_fast_pdf(path, document, model, system_prompt):
     config = get_llm_config(model)
     prompt = build_extraction_system_prompt(system_prompt)
     prefix = 'pdf:fast:v1:' + document['sha256']
+    if config.is_kolibri:
+        document['source_mode'] = 'text+ocr'
+        prefix = 'pdf:fast:text-ocr-v1:' + document['sha256']
     pages = []
     with pdfplumber.open(path) as pdf:
         count = len(pdf.pages)
@@ -607,7 +610,7 @@ def extract_fast_pdf(path, document, model, system_prompt):
         source=p['source'], text_characters=len(p['text'])) for p in pages])
     result.processing_complete = True
     result.review_status = 'skipped'
-    result.contract_version = 'fast-extraction-v1'
+    result.contract_version = 'fast-text-ocr-v1' if config.is_kolibri else 'fast-extraction-v1'
     durable.progress({'phase': 'pdf_unreviewed', 'total_pages': len(pages)})
     return result
 
@@ -674,7 +677,8 @@ def extract_agenda_data_from_pdf(pdf_path, model: Optional[str] = None, system_p
             visible = [p['page'] for p in originals]
             # Reuse only checks of exactly the same projection, original images and contract.
             key = review_prefix + ':audit:' + _digest([number, projection,
-                [(p['image_sha256'], p.get('ocr_sha256')) for p in originals], audit_prompt])
+                ([(p['image_sha256'], p['ocr_sha256']) for p in originals] if config.is_kolibri
+                 else [p['image_sha256'] for p in originals]), audit_prompt])
             validate = lambda value: validate_audit(value, projection, visible, number)
             try:
                 audit = durable.checkpoint(key, lambda: _call(key, config, audit_prompt,

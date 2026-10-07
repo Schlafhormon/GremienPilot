@@ -49,12 +49,9 @@ else
 fi
 
 BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
-OLLAMA_IMAGE="${OLLAMA_IMAGE:-ollama/ollama:${OLLAMA_IMAGE_TAG:-0.34.4}}"
-OLLAMA_MODEL="${LLM_MODEL:-qwen3.5:9b}"
+KOLIBRI_IMAGE="${KOLIBRI_IMAGE:-gremienpilot-kolibri:hob-b11434}"
 
-# Compose must still honor OLLAMA_IMAGE from .env. A shell override remains
-# exported naturally; only an explicitly selected tag needs a new export.
-if [ -n "${OLLAMA_IMAGE_TAG:-}" ]; then export OLLAMA_IMAGE; fi
+# Compose also honors KOLIBRI_IMAGE in .env.
 export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 
 # Global state
@@ -63,7 +60,7 @@ MISSING_ITEMS=()
 # Ports used by the application
 PORT_FRONTEND=3000
 PORT_BACKEND=8010
-PORT_OLLAMA=11434
+PORT_KOLIBRI=8080
 
 # Print colored messages (German)
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -83,7 +80,7 @@ initialize_configuration() {
         return 1
     fi
     info ".env mit den Standardwerten fuer lange Sitzungen angelegt."
-    echo "Qwen3.5:9b wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
+    echo "Kolibri-1 IQ2_XS wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
     echo "Fuer Audio mit Sprechererkennung ggf. HF_TOKEN in .env setzen (Anleitung in README.md)."
 }
 
@@ -125,9 +122,9 @@ elif ! falsy "$PROTOKOLL_BUILD_LOCAL" && [ "$(printf '%s' "$PROTOKOLL_BUILD_LOCA
 fi
 
 if [ "$BUILD_LOCAL_IMAGES" = true ]; then
-    FRONTEND_IMAGE="ki-protokollierung-frontend:local"
-    BACKEND_CPU_IMAGE="ki-protokollierung-backend:local"
-    BACKEND_GPU_IMAGE="ki-protokollierung-backend:gpu-local"
+    FRONTEND_IMAGE="gremienpilot-frontend:kolibri"
+    BACKEND_CPU_IMAGE="gremienpilot-backend:kolibri-cpu"
+    BACKEND_GPU_IMAGE="gremienpilot-backend:kolibri-gpu"
     BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
     export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 fi
@@ -178,9 +175,9 @@ show_help() {
 set_local_application_images() {
     BUILD_LOCAL_IMAGES=true
     PROTOKOLL_PULL_POLICY="missing"
-    FRONTEND_IMAGE="ki-protokollierung-frontend:local"
-    BACKEND_CPU_IMAGE="ki-protokollierung-backend:local"
-    BACKEND_GPU_IMAGE="ki-protokollierung-backend:gpu-local"
+    FRONTEND_IMAGE="gremienpilot-frontend:kolibri"
+    BACKEND_CPU_IMAGE="gremienpilot-backend:kolibri-cpu"
+    BACKEND_GPU_IMAGE="gremienpilot-backend:kolibri-gpu"
     BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
     export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 }
@@ -220,7 +217,7 @@ remove_existing_containers_for_rebuild() {
 
 confirm_model_cache_handling() {
     local volume_names=(
-        "$(project_volume_name ollama_data)"
+        "$(project_volume_name kolibri_data)"
         "$(project_volume_name backend_hf_cache)"
         "$(project_volume_name backend_torch_cache)"
     )
@@ -273,6 +270,9 @@ build_local_images() {
     info "Baue lokale Docker-Images aus dem geklonten Repository..."
 
     local build_args=()
+    if [ -f "$SCRIPT_DIR/.certs/custom-ca.crt" ]; then
+        build_args+=(--secret "id=custom_ca,src=$SCRIPT_DIR/.certs/custom-ca.crt")
+    fi
     if truthy "$PROTOKOLL_BUILD_NO_CACHE"; then
         build_args+=(--no-cache)
     fi
@@ -340,11 +340,11 @@ image_exists() {
 }
 
 ########################################
-# Check if Ollama model is downloaded
+# Check if Kolibri model is downloaded
 ########################################
-ollama_model_exists() {
+kolibri_model_exists() {
     # Ask for the effective Compose model; unrelated cached weights are not proof.
-    docker compose exec -T ollama sh -c 'ollama show "$OLLAMA_MODEL" >/dev/null 2>&1' >/dev/null 2>&1
+    docker compose exec -T kolibri sh -c 'test -f /models/Sakura-Kolibri-1-IQ2_XS-20.94GiB.gguf' >/dev/null 2>&1
 }
 
 ########################################
@@ -367,12 +367,12 @@ check_disk_space() {
         MISSING_ITEMS+=("Frontend-Image (~1GB)")
     fi
 
-    if ! image_exists "$OLLAMA_IMAGE"; then
+    if ! image_exists "$KOLIBRI_IMAGE"; then
         required_gb=$((required_gb + 2))
-        MISSING_ITEMS+=("Ollama-Image (~2GB)")
+        MISSING_ITEMS+=("Kolibri-Image (~2GB)")
     fi
 
-    if ! ollama_model_exists; then
+    if ! kolibri_model_exists; then
         local model_disk_gb="${PROTOKOLL_MODEL_DISK_GB:-40}"
         if ! [[ "$model_disk_gb" =~ ^[1-9][0-9]*$ ]]; then
             error "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
@@ -463,8 +463,8 @@ check_ram() {
         total_ram_gb=$(free -g | awk '/^Mem:/{print $2}')
     fi
 
-    if [ "$total_ram_gb" -lt 8 ]; then
-        warn "Wenig Arbeitsspeicher erkannt (${total_ram_gb}GB). Empfohlen: 8GB+"
+    if [ "$total_ram_gb" -lt 30 ]; then
+        warn "Wenig Arbeitsspeicher erkannt (${total_ram_gb}GB). Empfohlen: 32GB+"
         echo "  Die Anwendung koennte langsam laufen."
     else
         success "Arbeitsspeicher OK (${total_ram_gb}GB verfuegbar)"
@@ -537,7 +537,7 @@ check_ports() {
     local conflict_ports=()
 
     # Check each port (but ignore if our own containers are using them)
-    for port in $PORT_FRONTEND $PORT_BACKEND $PORT_OLLAMA; do
+    for port in $PORT_FRONTEND $PORT_BACKEND $PORT_KOLIBRI; do
         if port_in_use "$port"; then
             # Check if it's our own Docker container
             local is_our_container=false
@@ -555,7 +555,7 @@ check_ports() {
     done
 
     if [ ${#conflicts[@]} -eq 0 ]; then
-        success "Alle Ports verfuegbar (${PORT_FRONTEND}, ${PORT_BACKEND}, ${PORT_OLLAMA})"
+        success "Alle Ports verfuegbar (${PORT_FRONTEND}, ${PORT_BACKEND}, ${PORT_KOLIBRI})"
         return 0
     fi
 
@@ -770,11 +770,12 @@ wait_for_services() {
     echo "Das System laedt KI-Modelle. Dies kann einige Minuten dauern."
     echo ""
 
-    local max_wait=600  # 10 minutes
+    local max_wait=3600  # Downloads continue if the progress display times out.
     local wait_count=0
 
     while [ $wait_count -lt $max_wait ]; do
-        if curl -s http://localhost:${PORT_BACKEND}/health > /dev/null 2>&1; then
+        if curl -fsS --max-time 2 "http://localhost:${PORT_BACKEND}/health" > /dev/null 2>&1 &&
+           curl -fsS --max-time 2 "http://localhost:${PORT_KOLIBRI}/health" > /dev/null 2>&1; then
             break
         fi
 
@@ -789,7 +790,7 @@ wait_for_services() {
 
     if [ $wait_count -ge $max_wait ]; then
         echo ""
-        error "Dienste konnten nicht gestartet werden!"
+        warn "Wartezeit erreicht; Downloads und Container laufen weiter. Fortschritt: docker compose logs -f kolibri backend"
         echo ""
         show_failure_diagnostics
         return 1
@@ -826,7 +827,7 @@ show_failure_diagnostics() {
     echo ""
     echo "3. Docker-Ressourcen"
     echo "   -> Docker Desktop -> Einstellungen -> Resources"
-    echo "   -> Empfohlen: Mindestens 8GB RAM, 4 CPUs"
+    echo "   -> Empfohlen: 32GB RAM, 8 CPUs fuer Kolibri"
     echo ""
     echo "Naechste Schritte:"
     echo "  1. ./setup.sh logs     # Detaillierte Logs anzeigen"
@@ -916,8 +917,15 @@ do_build() {
 
     if [ "$BUILD_LOCAL_IMAGES" = true ]; then
         build_local_images || exit 1
-        info "Pruefe Runtime-Image fuer Ollama..."
-        docker compose pull ollama 2>/dev/null || warn "Konnte Ollama-Image nicht aktualisieren. Docker versucht es beim Start erneut."
+        info "Baue Runtime-Image fuer Kolibri..."
+        local kolibri_args=()
+        if [ -f "$SCRIPT_DIR/.certs/custom-ca.crt" ]; then
+            kolibri_args+=(--secret "id=custom_ca,src=$SCRIPT_DIR/.certs/custom-ca.crt")
+        fi
+        if truthy "$PROTOKOLL_BUILD_NO_CACHE"; then kolibri_args+=(--no-cache); fi
+        local kolibri_image
+        kolibri_image=$(docker compose config --images kolibri) || exit 1
+        docker build "${kolibri_args[@]}" -t "$kolibri_image" ./scripts/kolibri || exit 1
     else
         pull_images
     fi
@@ -1021,7 +1029,7 @@ do_status() {
     echo ""
 
     # Check health
-    if curl -s "http://localhost:${PORT_BACKEND}/health" > /dev/null 2>&1; then
+    if curl -fsS --max-time 2 "http://localhost:${PORT_BACKEND}/health" > /dev/null 2>&1; then
         echo -e "${GREEN}Backend: Erreichbar${NC}"
     else
         echo -e "${RED}Backend: Nicht erreichbar${NC}"
@@ -1033,10 +1041,10 @@ do_status() {
         echo -e "${RED}Frontend: Nicht erreichbar${NC}"
     fi
 
-    if curl -s "http://localhost:${PORT_OLLAMA}/api/tags" > /dev/null 2>&1; then
-        echo -e "${GREEN}Ollama: Erreichbar${NC}"
+    if curl -s "http://localhost:${PORT_KOLIBRI}/health" > /dev/null 2>&1; then
+        echo -e "${GREEN}Kolibri: Erreichbar${NC}"
     else
-        echo -e "${RED}Ollama: Nicht erreichbar${NC}"
+        echo -e "${RED}Kolibri: Nicht erreichbar${NC}"
     fi
 
     echo ""

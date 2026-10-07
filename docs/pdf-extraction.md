@@ -1,5 +1,11 @@
 # Modellgestützte PDF-Auswertung
 
+**Kolibri-1:** Der Textmodus ersetzt die unten beschriebenen Bildaufrufe durch
+Textlayer plus lokale Tesseract-OCR (`deu+eng`). Extraktion, Seitenprüfung und
+Zusammenhangsprüfung bleiben erhalten; es gibt keine visuelle Modellprüfung.
+Original-PDF und gerenderte Seiten bleiben als Belege gespeichert. Leere Text-/OCR-Quellen
+erfordern in Slow eine manuelle Prüfung (`text-ocr-evidence-v1`); OCR-Fehler sind möglich.
+
 Die folgenden Prüfabläufe beschreiben **Slow**, den Standardmodus. **Fast** nutzt
 einen verkürzten Ablauf ohne unabhängige Inhaltsprüfung; Unterschiede und
 Ergebnisstatus stehen unter [Verarbeitungsmodi](processing-modes.md).

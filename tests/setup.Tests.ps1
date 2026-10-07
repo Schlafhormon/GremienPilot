@@ -80,6 +80,7 @@ if ($messages -match 'Dienste konnten nicht gestartet werden|setup.ps1 cleanup')
 }
 
 $PORT_BACKEND = 8010
+$PORT_KOLIBRI = 8080
 $PORT_FRONTEND = 3000
 $script:BrowserOpened = $false
 function Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
@@ -90,16 +91,27 @@ if ($result.Count -ne 1 -or $result[0] -isnot [bool] -or -not $result[0] -or -no
     throw "Ready service did not return success"
 }
 
+$script:BrowserOpened = $false
+function Invoke-WebRequest {
+    param($Uri)
+    if ($Uri -match ':8080/') { throw 'Model still downloading' }
+    [pscustomobject]@{ StatusCode = 200 }
+}
+$result = @(Wait-ForServices -MaxWaitSeconds 1)
+if ($result.Count -ne 1 -or $result[0] -or $script:BrowserOpened) {
+    throw "Backend health alone must not report Kolibri ready"
+}
+
 function docker {
     $global:LASTEXITCODE = 0
     if ($args -contains 'config') {
-        '{"volumes":{"ollama_data":{"name":"custom-project_ollama_data"}}}'
+        '{"volumes":{"kolibri_data":{"name":"custom-project_kolibri_data"}}}'
     } else {
-        "ollama | pulling model: 38%$([char]27)[K"
-        "ollama | [GIN] HEAD /"
+        "kolibri | pulling model: 38%$([char]27)[K"
+        "kolibri | [GIN] HEAD /"
     }
 }
-if ((Get-ProjectVolumeName "ollama_data") -ne 'custom-project_ollama_data') {
+if ((Get-ProjectVolumeName "kolibri_data") -ne 'custom-project_kolibri_data') {
     throw "Resolved Compose volume name was ignored"
 }
 $captured = @(Show-StartupProgress 6>&1)

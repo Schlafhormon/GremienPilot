@@ -11,9 +11,10 @@ def test_shared_context_default_reaches_both_modes_and_deployments(monkeypatch, 
     from llm_config import get_llm_config
     from processing_mode import processing_scope
     monkeypatch.delenv('LLM_CONTEXT_TOKENS', raising=False)
+    monkeypatch.setenv('LLM_MODEL', 'Aleph-Alpha/Kolibri-1')
     with processing_scope(mode):
-        assert get_llm_config().context_tokens == 131072
-    name, default = 'LLM_CONTEXT_TOKENS', '131072'
+        assert get_llm_config().context_tokens == 32768
+    name, default = 'LLM_CONTEXT_TOKENS', '32768'
     for path in ['.env.example', 'app/backend/.env.example']:
         assert f'{name}={default}' in (ROOT / path).read_text()
     assert f'{name}=${{{name}:-{default}}}' in (ROOT / 'docker-compose.yml').read_text()
@@ -41,13 +42,13 @@ def test_central_settings_reach_compose_examples_and_kubernetes():
 
 
 def test_installation_defaults_match_without_overwriting_external_provider_model():
-    default = 'qwen3.5:9b'
-    for relative in ['setup.sh', 'setup.ps1', 'scripts/ollama-entrypoint.sh',
+    default = 'Aleph-Alpha/Kolibri-1'
+    for relative in ['scripts/kolibri/entrypoint.sh',
                      '.env.example', 'app/backend/.env.example', 'docker-compose.yml',
-                     'app/backend/llm_config.py']:
+                     'app/backend/llm_assets.py']:
         assert default in (ROOT / relative).read_text()
-    assert 'LLM_PROVIDER: "ollama"' in (ROOT / 'k8s/backend/configmap.yaml').read_text()
-    assert 'OLLAMA_LOAD_TIMEOUT=${OLLAMA_LOAD_TIMEOUT:-30m}' in (ROOT / 'docker-compose.yml').read_text()
+    assert 'LLM_PROVIDER: "llama-cpp"' in (ROOT / 'k8s/backend/configmap.yaml').read_text()
+    assert '--sleep-idle-seconds 15' in (ROOT / 'scripts/kolibri/entrypoint.sh').read_text()
 
 
 def test_mandatory_summary_policy_is_consistent_and_not_disablable_by_legacy_flags():
@@ -63,10 +64,10 @@ def test_mandatory_summary_policy_is_consistent_and_not_disablable_by_legacy_fla
 
 
 def test_kubernetes_default_endpoint_has_a_matching_internal_service():
-    assert 'ollama/deployment.yaml' in (ROOT / 'k8s/kustomization.yaml').read_text()
-    text = (ROOT / 'k8s/ollama/deployment.yaml').read_text()
-    assert 'kind: Service' in text and 'name: ollama' in text
-    assert 'key: LLM_MODEL' in text
+    assert 'kolibri/deployment.yaml' in (ROOT / 'k8s/kustomization.yaml').read_text()
+    text = (ROOT / 'k8s/kolibri/deployment.yaml').read_text()
+    assert 'kind: Service' in text and 'name: kolibri' in text
+    assert 'key: LLM_CONTEXT_TOKENS' in text
 
 
 def test_fast_agenda_budget_reaches_every_deployment_and_job_snapshot(monkeypatch):
@@ -96,17 +97,17 @@ def test_docker_sqlite_lives_on_linux_volume_not_windows_bind_mount():
 
 
 @pytest.mark.parametrize('mode', ['fast', 'slow'])
-def test_fresh_install_uses_qwen_profile_without_manual_tuning(monkeypatch, mode):
+def test_fresh_install_uses_kolibri_profile_without_manual_tuning(monkeypatch, mode):
     from llm_config import get_llm_config
     for key in ['LLM_MODEL','LLM_CONTEXT_TOKENS','LLM_THINKING_TOKENS','LLM_IMAGE_TOKENS',
                 'LLM_TEMPERATURE','LLM_TOP_P','LLM_TOP_K']:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv('LLM_PROVIDER','ollama')
+    monkeypatch.setenv('LLM_PROVIDER','llama-cpp')
     config=get_llm_config(processing_mode=mode)
-    assert config.model=='qwen3.5:9b' and config.context_tokens==131072
+    assert config.model=='Aleph-Alpha/Kolibri-1' and config.context_tokens==32768
     assert config.thinking_tokens==(0 if mode=='fast' else 4096)
-    assert config.image_tokens==17408
-    assert (config.temperature,config.top_p,config.top_k)==(1.0,0.95,20)
+    assert config.image_tokens==0
+    assert (config.temperature,config.top_p,config.top_k)==(1.0,0.97,128)
     # Unknown models never inherit a tokenizer, vision reserve or sampling profile.
     other=get_llm_config('custom-vision',processing_mode=mode)
     assert other.image_tokens==0 and not other.tokenizer_path

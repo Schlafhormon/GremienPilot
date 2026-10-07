@@ -14,6 +14,9 @@ export default function PdfSources({ result }: { result?: PdfAgendaExtractionRes
       </li>)}</ul>
     </div>}
     <p className="my-2">Diese Originalauswertung bleibt auch nach manueller Bearbeitung zugänglich.</p>
+    {result.document.source_mode === 'text+ocr' && <p className="my-2 text-gray-600">
+      Auswertung über Text und OCR. Bei Erkennungsfehlern bitte die Originaleinladung prüfen.
+    </p>}
     <a className="text-blue-700 underline" href={url} target="_blank" rel="noreferrer">Originaleinladung öffnen</a>
     <p className="break-all text-xs text-gray-500">Dokument-ID: {result.document.sha256}</p>
     <ul className="my-2 space-y-2">{result.items?.map(item => <li key={item.id}>
