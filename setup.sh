@@ -75,6 +75,24 @@ error() { echo -e "${RED}[FEHLER]${NC} $1"; }
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
+configured_port() {
+    local name="$1" fallback="$2" value="${!1}" line
+    if [ -z "$value" ] && [ -f "$SCRIPT_DIR/.env" ]; then
+        value=$(awk -v key="$name" '$0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub(/^[^=]*=/, ""); sub(/#.*/, ""); gsub(/[[:space:]\r\047\042]/, ""); found=$0
+        } END { print found }' "$SCRIPT_DIR/.env")
+    fi
+    if [ -z "$value" ]; then printf '%s\n' "$fallback"; return; fi
+    case "$value" in *[!0-9]*) echo "Ungueltiger Port: $name" >&2; return 1;; esac
+    if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+        echo "Ungueltiger Port: $name" >&2; return 1
+    fi
+    printf '%s\n' "$value"
+}
+PORT_FRONTEND=$(configured_port FRONTEND_PORT 3000) || exit 1
+PORT_BACKEND=$(configured_port BACKEND_PORT 8010) || exit 1
+PORT_LLM=$(configured_port LLAMA_PORT 8080) || exit 1
+
 initialize_configuration() {
     # Never overwrite existing settings or secrets.
     if [ -e "$SCRIPT_DIR/.env" ]; then return 0; fi

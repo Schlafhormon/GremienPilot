@@ -9,7 +9,7 @@ services:
   frontend:
     image: ${FRONTEND_IMAGE:-ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:latest}
     ports:
-      - "3000:80"
+      - "${FRONTEND_PORT:-3000}:80"
     depends_on:
       - backend
     restart: unless-stopped
@@ -17,7 +17,7 @@ services:
   backend:
     image: ${BACKEND_IMAGE:-ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:cpu-latest}
     ports:
-      - "8010:8010"
+      - "${BACKEND_PORT:-8010}:8010"
     environment:
       - WHISPER_MODEL=${WHISPER_MODEL:-large-v2}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
@@ -138,7 +138,7 @@ services:
   llama:
     image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b11429}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${LLAMA_PORT:-8080}:8080"
     volumes:
       - ./data/gemma4:/models:ro
       - ./scripts/llama-entrypoint.sh:/llama-entrypoint.sh:ro

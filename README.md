@@ -227,6 +227,8 @@ Nach erfolgreichem Start ist die Anwendung erreichbar unter:
 http://localhost:3000
 ```
 
+Parallele Installationen können `FRONTEND_PORT`, `BACKEND_PORT` und `LLAMA_PORT` in `.env` anpassen.
+
 Für spätere Starts ohne Neubau verwenden Sie:
 
 ```powershell

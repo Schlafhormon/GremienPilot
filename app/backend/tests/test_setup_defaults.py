@@ -30,6 +30,14 @@ def test_bash_creates_defaults_once_and_preserves_existing_settings(tmp_path):
     assert (tmp_path/'.env').read_text()=='LLM_MODEL=custom-model\n'
 
 
+def test_bash_port_settings_follow_compose_precedence(tmp_path):
+    (tmp_path/'.env').write_text("TEST_GEMMA_PORT='3001' # local port\n")
+    code = function('configured_port') + '\nconfigured_port TEST_GEMMA_PORT 3000'
+    assert shell(code, tmp_path).stdout.strip() == '3001'
+    code = "export TEST_GEMMA_PORT=3002\n" + code
+    assert shell(code, tmp_path).stdout.strip() == '3002'
+
+
 @pytest.mark.parametrize('scenario',['fresh','existing','invalid'])
 def test_bash_start_installs_only_when_no_containers_exist(tmp_path,scenario):
     code='''info(){ :; }; error(){ :; }; check_docker(){ return 0; }

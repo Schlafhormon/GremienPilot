@@ -11,7 +11,7 @@ if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 # Load only the functions under test, without executing the setup entrypoint.
 foreach ($name in @("Test-Truthy", "Invoke-BuildLocalImages", "Remove-ExistingContainersForRebuild",
                     "Get-ProjectVolumeName", "Wait-ForServices", "Show-StartupProgress", "Show-FailureDiagnostics",
-                    "Initialize-Configuration", "Invoke-Start")) {
+                    "Initialize-Configuration", "Invoke-Start", "Get-ConfiguredPort")) {
     $definition = $ast.Find({ param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
@@ -119,7 +119,12 @@ try {
     [IO.File]::WriteAllText($testEnv, 'LLM_MODEL=custom-model')
     if (-not (Initialize-Configuration)) { throw 'Existing configuration failed' }
     if ([IO.File]::ReadAllText($testEnv) -ne 'LLM_MODEL=custom-model') { throw 'Existing settings overwritten' }
+    [IO.File]::WriteAllText($testEnv, "TEST_GEMMA_PORT='3001' # local port")
+    if ((Get-ConfiguredPort 'TEST_GEMMA_PORT' 3000) -ne 3001) { throw 'Local port ignored' }
+    $env:TEST_GEMMA_PORT = '3002'
+    if ((Get-ConfiguredPort 'TEST_GEMMA_PORT' 3000) -ne 3002) { throw 'Shell port ignored' }
 } finally {
+    Remove-Item Env:TEST_GEMMA_PORT -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $testEnv,$testTemplate -Force -ErrorAction SilentlyContinue
     [IO.Directory]::Delete($testDirectory)
     $ScriptDir = $repoRoot

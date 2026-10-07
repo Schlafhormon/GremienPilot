@@ -74,6 +74,28 @@ function Write-Err { Write-Host "[FEHLER] " -ForegroundColor Red -NoNewline; Wri
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
+function Get-ConfiguredPort {
+    param([string]$Name, [int]$Default)
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    $path = Join-Path $ScriptDir '.env'
+    if (-not $value -and (Test-Path -LiteralPath $path)) {
+        foreach ($line in Get-Content -LiteralPath $path) {
+            if ($line -match ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(.*)$')) {
+                $value = ($Matches[1] -split '#', 2)[0].Trim().Trim('"').Trim("'")
+            }
+        }
+    }
+    if (-not $value) { return $Default }
+    $number = 0
+    if (-not [int]::TryParse($value, [ref]$number) -or $number -lt 1 -or $number -gt 65535) {
+        throw "Ungueltiger Port: $Name"
+    }
+    return $number
+}
+$PORT_FRONTEND = Get-ConfiguredPort 'FRONTEND_PORT' 3000
+$PORT_BACKEND = Get-ConfiguredPort 'BACKEND_PORT' 8010
+$PORT_LLM = Get-ConfiguredPort 'LLAMA_PORT' 8080
+
 function Test-Truthy {
     param([string]$Value)
     return $Value -match "^(1|true|yes|ja|on)$"
