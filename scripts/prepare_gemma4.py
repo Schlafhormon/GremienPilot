@@ -29,11 +29,14 @@ FILES = {
 
 
 def sha256(path):
+    checksum = hashlib.sha256()
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        while block := stream.read(4 * 1024 * 1024):
+            checksum.update(block)
+    return checksum.hexdigest()
 
 
-def download(url, target, size, checksum=None, git_oid=None):
+def download(url, target, size, checksum=None, git_oid=None, *, chunk_size=32 * 1024 * 1024, workers=8):
     def valid(path):
         if not path.is_file() or path.stat().st_size != size:
             return False
@@ -46,9 +49,18 @@ def download(url, target, size, checksum=None, git_oid=None):
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(target.suffix + '.partial')
-    if size > 64 * 1024 * 1024:
+    def publish():
+        # Windows scanners can briefly retain a handle after checksum reads.
+        for attempt in range(5):
+            try:
+                partial.replace(target)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
+    if size > chunk_size:
         # Bounded range requests also work behind buffering corporate proxies.
-        chunk_size = 32 * 1024 * 1024
         def part(index):
             start = index * chunk_size
             end = min(size, start + chunk_size) - 1
@@ -72,7 +84,7 @@ def download(url, target, size, checksum=None, git_oid=None):
                     time.sleep(2 ** attempt)
         count = (size + chunk_size - 1) // chunk_size
         print(f'Downloading {target.name} in {count} resumable ranges', flush=True)
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             paths = []
             for path in pool.map(part, range(count)):
                 paths.append(path)
@@ -84,14 +96,14 @@ def download(url, target, size, checksum=None, git_oid=None):
                     shutil.copyfileobj(source, stream, 4 * 1024 * 1024)
         if not valid(partial):
             raise ValueError(f'Checksum mismatch: {target.name}')
-        partial.replace(target)
+        publish()
         for path in paths:
             path.unlink()
         print(f'Verified {target.name}', flush=True)
         return
     offset = partial.stat().st_size if partial.exists() else 0
     if offset == size and valid(partial):
-        partial.replace(target)
+        publish()
         return
     request = urllib.request.Request(url, headers={'Range': f'bytes={offset}-'} if offset else {})
     print(f'Downloading {target.name} ({size / 1e9:.2f} GB, resume {offset})', flush=True)
@@ -104,7 +116,7 @@ def download(url, target, size, checksum=None, git_oid=None):
                 stream.write(block)
     if not valid(partial):
         raise ValueError(f'Checksum/size mismatch: {target.name}; remove the .partial file and retry')
-    partial.replace(target)
+    publish()
     print(f'Verified {target.name}', flush=True)
 
 
