@@ -132,7 +132,7 @@ def prepare(destination, llama, download_only=False):
             target = destination / group / name
             download(f'https://huggingface.co/{repo}/resolve/{revision}/{name}', target,
                      entry['size'], entry.get('lfs', {}).get('oid'), entry['oid'])
-            manifest['files'][str(target.relative_to(destination)).replace('\\', '/')] = sha256(target)
+            manifest['files'][str(target.relative_to(destination)).replace('\\', '/')] = entry.get('lfs', {}).get('oid') or sha256(target)
     if not download_only:
         commit = subprocess.check_output(['git', '-C', str(llama), 'rev-parse', 'HEAD'], text=True).strip()
         expected = subprocess.check_output(['git', '-C', str(llama), 'rev-parse', f'{LLAMA_TAG}^{{commit}}'], text=True).strip()
