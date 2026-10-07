@@ -1520,6 +1520,10 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
             lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"]
             == "completed"
         )
+        # Legacy completion is published just before the durable worker commits
+        # its terminal state. Wait for that separate contract before asserting it.
+        assert wait_until(lambda: client.get(f"/api/pipeline/{pipeline_id}/result").json()
+                          ["pipeline"]["execution"]["state"] == "review_required")
         result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
 
     assert result["pipeline"]["status"] == "completed"

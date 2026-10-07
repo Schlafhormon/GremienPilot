@@ -1,4 +1,4 @@
-"""Exclusive GPU use by local Ollama and on-demand transcription models.
+"""Exclusive GPU use by the local LLM and on-demand transcription models.
 
 The application runs one backend process. Its worker threads share this gate;
 other applications using the GPU are outside this coordinator's control.

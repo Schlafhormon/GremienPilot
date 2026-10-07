@@ -11,11 +11,11 @@ import durable_jobs as durable
 from processing_mode import policy
 from source_contract import reviewed
 from source_contract import SourceCatalog
-from summary_grounding import Workflow, SummaryValidationError, digest, obj, arr, TEXT, EVIDENCE, SCOPES, SECTIONS
-from llm_transport import complete, fits, cache_key, cache_read, cache_write, ContextBudgetError
+from summary_grounding import Workflow, SummaryValidationError, digest, obj, arr, TEXT, EVIDENCE, SCOPES, SECTIONS, positive
+from llm_transport import complete, fits, cache_key, cache_read, cache_write, ContextBudgetError, structured_output_budget
 
 PROMPT = Path(__file__).with_name('prompt_gemma.txt').read_text(encoding='utf-8-sig').strip()
-VERSION = 'gemma4-protokoll-v1'
+VERSION = 'gemma4-protokoll-v2'
 ANNOTATIONS = obj({'paragraphs': arr(obj({'id': TEXT, 'section': {'enum': list(SECTIONS)},
     'scope': {'enum': list(SCOPES)}, 'evidence': EVIDENCE})), 'considered_source_ids': arr(TEXT)})
 
@@ -76,7 +76,9 @@ class GemmaWorkflow(Workflow):
                          context, usage)
         self.title = title
         self.prose_config = config.for_protocol()
-        self.policy.update(protocol_version=VERSION, adapter=self.prose_config.public_snapshot(),
+        self.output = config.output_budget(positive('SUMMARY_OUTPUT_TOKENS', 4096))
+        self.reserve = structured_output_budget(config, self.output)
+        self.policy.update(output=self.output, protocol_version=VERSION, adapter=self.prose_config.public_snapshot(),
                            prompt_sha256=digest(PROMPT), protocol_code=digest(Path(__file__).read_text(encoding='utf-8')))
 
     def source_text(self, rows):
@@ -157,10 +159,18 @@ class GemmaWorkflow(Workflow):
         if not policy().fast:
             # Two independent full-source reviews retain
             # omissions/questions. The LoRA wording is never rewritten by the base.
-            for rows, _ in primary:
-                issues.extend(self.review(claims, rows, 'final_review'))
-            for rows, _ in primary:
-                issues.extend(self.review(claims, rows, 'consolidated_review'))
+            for phase in ('final_review', 'consolidated_review'):
+                offset = 0
+                for rows, group in primary:
+                    # Each draft is checked against its complete input. Keeping
+                    # unrelated chunks out avoids overflowing a small context
+                    # with the accumulated minutes of a very long TOP.
+                    for issue in self.review(group, rows, phase):
+                        issue = deepcopy(issue)
+                        issue['claim_ids'] = [f'C:{offset + int(identity[2:])}'
+                                              for identity in issue['claim_ids']]
+                        issues.append(issue)
+                    offset += len(group)
             for index, claim in enumerate(claims):
                 relevant = [q for q in issues if not q['claim_ids'] or f'C:{index}' in q['claim_ids']]
                 claim['grounding'] = reviewed(claim['grounding'], supported=not relevant,

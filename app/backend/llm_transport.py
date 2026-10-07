@@ -444,6 +444,8 @@ async def _generate(client, config, kwargs, progress):
                         finish = choice['finish_reason']
                 if data.get('usage'):
                     snapshot['usage'] = data['usage']
+                    snapshot.update(prompt_tokens=data['usage'].get('prompt_tokens'),
+                                    generated_tokens=data['usage'].get('completion_tokens'))
                     if data['usage'].get('total_tokens', 0) > config.context_tokens:
                         raise ContextBudgetError('Provider context usage exceeds configured budget')
             if finish != 'stop':

@@ -485,6 +485,9 @@ def parse_structured_summary(content: str) -> StructuredSummary:
 
 def render_structured_summary(structured: StructuredSummary) -> str:
     """Render structured minutes into editable text for existing users."""
+    if structured.verification.get('summary_style') == 'gemma4-lora':
+        from gemma_summary import render_protocol
+        return render_protocol(structured)
 
     sections = [
         ("Diskussion", structured.discussion),
@@ -700,6 +703,7 @@ def summarize_segment(
             items.append(text)
         text = render(partial)
         partial.verification = dict(processing_complete=False,source_contract='graded-sources-v1',
+            summary_style=config.summary_style,
             source_sha256=digest(lines),summary_sha256=digest(text),sources=list(workflow.partial_rows.values()))
         error.partial_result = SummarizationResult(summary=text,structured=partial,duration_seconds=time.monotonic()-start,
             llm_usage={**usage,'processing_complete':False,'grounding_incomplete':True,'review_required':True})

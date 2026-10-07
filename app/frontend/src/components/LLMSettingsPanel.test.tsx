@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import LLMSettingsPanel, { DEFAULT_LLM_SETTINGS } from './LLMSettingsPanel';
+import LLMSettingsPanel, { DEFAULT_LLM_SETTINGS, GEMMA_SYSTEM_PROMPT } from './LLMSettingsPanel';
 
 function jsonResponse(data: unknown) {
   return {
@@ -44,6 +44,16 @@ describe('LLMSettingsPanel', () => {
     expect(screen.getByLabelText('System-Prompt')).toBeInTheDocument();
     expect(await screen.findByText('Profilverwaltung')).toBeInTheDocument();
     expect(screen.getByText('Herr Rudolf')).toBeInTheDocument();
+  });
+
+  it('shows the fixed Gemma prompt even when an old custom prompt is saved', () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([])));
+    render(<LLMSettingsPanel isOpen onClose={vi.fn()}
+      settings={{...DEFAULT_LLM_SETTINGS, systemPrompt: 'Alter Prompt'}} onSettingsChange={vi.fn()} />);
+    const prompt = screen.getByLabelText('System-Prompt');
+    expect(prompt).toHaveValue(GEMMA_SYSTEM_PROMPT);
+    expect(prompt).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', {name: 'Standard'})).toBeDisabled();
   });
 });
 
