@@ -81,6 +81,7 @@ if ($messages -match 'Dienste konnten nicht gestartet werden|setup.ps1 cleanup')
 
 $PORT_BACKEND = 8010
 $PORT_FRONTEND = 3000
+$PORT_LLM = 8080
 $script:BrowserOpened = $false
 function Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
 function Show-SuccessMessage { Write-Host "Ready" }
@@ -89,6 +90,19 @@ $result = @(Wait-ForServices -MaxWaitSeconds 1)
 if ($result.Count -ne 1 -or $result[0] -isnot [bool] -or -not $result[0] -or -not $script:BrowserOpened) {
     throw "Ready service did not return success"
 }
+
+$script:ModelProbes = 0
+function Invoke-WebRequest {
+    param($Uri)
+    $code = 200
+    if ($Uri -match ':8080/') {
+        $script:ModelProbes++
+        if ($script:ModelProbes -eq 1) { $code = 503 }
+    }
+    [pscustomobject]@{StatusCode=$code}
+}
+$result = @(Wait-ForServices -MaxWaitSeconds 3)
+if (-not $result[-1] -or $script:ModelProbes -lt 2) { throw 'Backend health bypassed model readiness' }
 
 function docker {
     $global:LASTEXITCODE = 0

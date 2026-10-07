@@ -807,7 +807,8 @@ function Wait-ForServices {
     while ($timer.Elapsed.TotalSeconds -lt $MaxWaitSeconds) {
         try {
             $response = Invoke-WebRequest -Uri "http://localhost:$PORT_BACKEND/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($response.StatusCode -eq 200) {
+            $modelResponse = Invoke-WebRequest -Uri "http://localhost:$PORT_LLM/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+            if ($response.StatusCode -eq 200 -and $modelResponse.StatusCode -eq 200) {
                 $ready = $true
                 break
             }

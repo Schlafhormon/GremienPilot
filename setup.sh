@@ -791,7 +791,8 @@ wait_for_services() {
     local wait_count=0
 
     while [ $wait_count -lt $max_wait ]; do
-        if curl -s http://localhost:${PORT_BACKEND}/health > /dev/null 2>&1; then
+        if curl -fs --max-time 2 http://localhost:${PORT_BACKEND}/health > /dev/null 2>&1 &&
+           curl -fs --max-time 2 http://localhost:${PORT_LLM}/health > /dev/null 2>&1; then
             break
         fi
 
