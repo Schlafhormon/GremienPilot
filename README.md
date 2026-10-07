@@ -466,6 +466,8 @@ Wechsel: Vor Whisper wartet das Backend auf Kolibris bestätigten Ruhezustand
 (15 Sekunden ohne Modellanfrage); danach werden Whisper und Zusatzmodelle freigegeben.
 Der nächste LLM-Aufruf lädt Kolibri automatisch nach. Das erfordert einen
 Backend-Prozess und einen ausschließlich hier genutzten lokalen Modellserver.
+GPU-Aufgaben anderer GremienPilot-Instanzen auf demselben PC nacheinander ausführen;
+die Speicherkoordination gilt nur innerhalb einer Instanz.
 Das Nachladen benötigt zusätzliche Zeit. Die Speicher- und
 Timeout-Einstellungen stehen unter [Konfiguration](#konfiguration).
 
