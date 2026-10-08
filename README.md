@@ -362,7 +362,7 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `LLM_OUTPUT_TOKENS` / `LLM_OUTPUT_PARAMETER` | Ausgabe überschreiben / externe API: `max_tokens` oder `max_completion_tokens` | leer / `max_tokens` |
 | `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K`, `LLM_SEED` | Sampling; `top_k` für llama.cpp/Ollama | leer |
 | `LLM_CONNECT_TIMEOUT_SECONDS`, `LLM_READ_TIMEOUT_SECONDS`, `LLM_TOTAL_TIMEOUT_SECONDS` | Verbindung / Inaktivität / Gesamtlimit; Gesamtwert `0` erlaubt lange Streams | `10` / Legacy-Alias / `0` |
-| `LLM_GPU_LAYERS` / `LLM_KEEP_ALIVE` | GPU-Layer (`0`: CPU; llama.cpp beim Start) / optionale Ollama-Modellhaltezeit | `16` / Ollama-Wert |
+| `LLM_GPU_LAYERS` / `LLM_KEEP_ALIVE` | GPU-Layer (`0`: CPU; llama.cpp beim Start) / optionale Ollama-Modellhaltezeit | `12` / Ollama-Wert |
 | `LLM_IMAGE_TOKENS` | Reserve je Bild; leer modellabhängig, explizit `0` verweigert Bilder | Gemma/llama.cpp `1120` |
 | `LLM_TOKENIZER_PATH` / `LLM_TOKENIZER_MODEL` | Leer: mitgelieferter Gemma-Tokenizer; explizite Pfade müssen zum Modell passen | automatisch für Gemma 4/llama.cpp |
 | `LLM_MODEL_REVISION` | Unveränderliche Modellrevision für Cache; Ollama nutzt Digest | SHA-256 der Q4_K_M-Datei |

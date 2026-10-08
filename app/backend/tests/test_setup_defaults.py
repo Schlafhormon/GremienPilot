@@ -49,7 +49,7 @@ def test_gemma_start_preserves_library_directory_and_checks_assets(tmp_path, val
     server = runtime / 'llama-server'
     server.write_text('''#!/bin/sh
 test "$PWD" = "$(dirname "$0")" || exit 42
-if [ "$1" = --version ]; then echo VERSION; else echo SERVER_STARTED; fi
+if [ "$1" = --version ]; then echo VERSION; else echo SERVER_STARTED; printf '%s\\n' "$@"; fi
 ''')
     server.chmod(0o755)
     (models / 'weights.gguf').write_bytes(b'model')
@@ -62,6 +62,13 @@ if [ "$1" = --version ]; then echo VERSION; else echo SERVER_STARTED; fi
     assert ('SERVER_STARTED' in result.stdout) == valid_checksum
     assert (result.returncode == 0) == valid_checksum, result.stderr
     assert 'VERSION' in result.stdout
+    if valid_checksum:
+        arguments = result.stdout.split('SERVER_STARTED\n', 1)[1].splitlines()
+        def value(flag):
+            return int(arguments[arguments.index(flag) + 1])
+        # Gemma's non-causal image attention must fit in a single microbatch;
+        # otherwise llama.cpp silently lowers the configured image resolution.
+        assert value('--image-max-tokens') <= value('--ubatch-size') <= value('--batch-size')
 
 
 @pytest.mark.parametrize('scenario',['fresh','existing','invalid'])

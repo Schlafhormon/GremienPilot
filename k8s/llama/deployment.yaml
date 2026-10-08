@@ -56,9 +56,9 @@ spec:
             - --sleep-idle-seconds
             - "30"
             - --batch-size
-            - "256"
+            - "1120"
             - --ubatch-size
-            - "128"
+            - "1120"
           ports:
             - containerPort: 8080
           readinessProbe:

@@ -144,7 +144,7 @@ services:
       - ./scripts/llama-entrypoint.sh:/llama-entrypoint.sh:ro
     environment:
       - LLM_CONTEXT_TOKENS=${LLM_CONTEXT_TOKENS:-16384}
-      - LLM_GPU_LAYERS=${LLM_GPU_LAYERS:-16}
+      - LLM_GPU_LAYERS=${LLM_GPU_LAYERS:-12}
       - LLM_CPU_THREADS=${LLM_CPU_THREADS:-12}
     entrypoint: ["/bin/sh", "-c", "sed 's/\\r$//' /llama-entrypoint.sh > /tmp/entrypoint.sh && /bin/sh /tmp/entrypoint.sh"]
     healthcheck:

@@ -45,8 +45,9 @@ einen passenden Server und verwenden nicht automatisch den Adapter.
 
 ## Speicher und Transport
 
-Das lokale Profil nutzt 16.384 Kontexttokens, 16 GPU-Layer, 12 CPU-Threads,
-Q8_0 für beide KV-Caches, einen Slot und einen CPU-Bildprojektor. Mehr GPU-Layer
+Das lokale Profil nutzt 16.384 Kontexttokens, 12 GPU-Layer, 12 CPU-Threads,
+Q8_0 für beide KV-Caches, einen Slot und einen CPU-Bildprojektor. Batch und Microbatch
+umfassen je 1.120 Tokens, damit Gemma die Bildauflösung nicht begrenzt. Mehr GPU-Layer
 oder Kontext erst nach Speichermessung einstellen. `LLM_CONTEXT_TOKENS`,
 `LLM_GPU_LAYERS` und `LLM_CPU_THREADS` wirken bei llama.cpp beim Containerstart;
 Änderungen erfordern dessen Neuerstellung. Antworten und Eingabe müssen gemeinsam
