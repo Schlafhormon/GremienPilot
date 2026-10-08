@@ -71,6 +71,7 @@ function pipelineResult(
     pipeline,
     session: {
       session_id: 'session-1',
+      revision: 1,
       job_id: 'job-1',
       current_step: 3,
       tops: ['Haushalt'],
@@ -238,6 +239,7 @@ describe('App pipeline flow', () => {
     });
     vi.mocked(saveSession).mockResolvedValue({
       session_id: 'session-1',
+      revision: 1,
       tops: ['Haushalt'],
       transcript: [],
       assignments: [],
@@ -679,6 +681,40 @@ describe('App pipeline flow', () => {
       expect(pollPipeline).toHaveBeenCalledWith('pipeline-1', expect.any(Function));
     });
     expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+  });
+
+  it.each(['completed', 'failed'] as const)('does not autosave a blank draft while restoring a %s pipeline', async status => {
+    const user = userEvent.setup();
+    localStorage.setItem('active-pipeline-id', 'pipeline-1');
+    localStorage.setItem('active-session-id', 'session-1');
+    const result = pipelineResult({ revision: 6 });
+    let finish!: () => void;
+    vi.mocked(getPipelineStatus).mockResolvedValue({ ...completedPipeline, status });
+    if (status === 'completed') {
+      vi.mocked(getPipelineResult).mockImplementationOnce(() => new Promise(resolve => {
+        finish = () => resolve(result);
+      }));
+    } else {
+      vi.mocked(loadSession).mockImplementationOnce(() => new Promise(resolve => {
+        finish = () => resolve(result.session);
+      }));
+    }
+
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /letzte sitzung fortsetzen/i }));
+    await waitFor(() => expect(finish).toBeDefined());
+    // The result can take longer than the 500 ms autosave debounce to load.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 700)); });
+    expect(saveSession).not.toHaveBeenCalled();
+    expect(localStorage.getItem('active-session-draft')).toBeNull();
+
+    await act(async () => { finish(); });
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 700)); });
+    for (const [payload] of vi.mocked(saveSession).mock.calls) {
+      expect(payload).toMatchObject({ revision: 6, tops: ['Haushalt'], assignments: [0],
+        summaries: { 0: 'Der Haushalt wurde serverseitig zusammengefasst.' } });
+    }
   });
 
   it('clears a failed restored pipeline id and loads the saved session', async () => {

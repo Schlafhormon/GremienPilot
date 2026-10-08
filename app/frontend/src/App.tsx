@@ -883,7 +883,10 @@ export default function App() {
 
     if (
       !sessionId ||
+      sessionRevision === null ||
       route.view === "history" ||
+      isRestoringSession ||
+      isLoadingRouteSession ||
       isProcessing ||
       isGeneratingSummary ||
       (summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status)) ||
@@ -970,12 +973,15 @@ export default function App() {
   }, [
     audioUrl,
     buildSessionPayload,
+    isRestoringSession,
+    isLoadingRouteSession,
     isProcessing,
     isGeneratingSummary,
     summaryJob,
     pipelineId,
     route.view,
     sessionId,
+    sessionRevision,
     topIds,
   ]);
 
@@ -1131,11 +1137,8 @@ export default function App() {
       if (restoreCandidate.pipelineId) {
         const status = await getPipelineStatus(restoreCandidate.pipelineId);
         setRestoreCandidate(null);
-        if (status.session_id) {
-          setSessionId(status.session_id);
-          activeSessionIdRef.current = status.session_id;
-          localStorage.setItem(ACTIVE_SESSION_KEY, status.session_id);
-        }
+        // Apply the session ID together with its loaded editing state. Setting
+        // it before the result arrives would attach the empty form to this ID.
         setPipelineJob(status);
         if (status.status === "completed") {
           setPipelineId(status.pipeline_id);
