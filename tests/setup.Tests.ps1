@@ -121,6 +121,19 @@ $messages = $captured | Out-String
 if ($messages -notmatch '38%' -or $messages.Contains([string][char]27)) {
     throw "Download progress is missing or still contains terminal escape sequences"
 }
+function docker {
+    $global:LASTEXITCODE = 0
+    if ($args[-1] -eq 'llama') {
+        'llama | [Gemma] Pruefe Modelldateien'
+        'llama | weights/gemma-4-31B-it-Q4_K_M.gguf: OK'
+    } else {
+        'backend | INFO: "GET /health HTTP/1.1" 200 OK'
+    }
+}
+$messages = @(Show-StartupProgress 6>&1) | Out-String
+if ($messages -notmatch '\.gguf: OK' -or $messages -match 'GET /health') {
+    throw 'Model verification progress was hidden by health requests'
+}
 $testDirectory = Join-Path ([IO.Path]::GetTempPath()) ('gp-setup-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $testDirectory | Out-Null
 $ScriptDir = $testDirectory

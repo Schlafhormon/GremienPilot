@@ -18,7 +18,7 @@ spec:
           image: ghcr.io/ggml-org/llama.cpp:server-b11429
           command: ["/bin/sh", "-c"]
           args:
-            - 'cd /models && sha256sum -c checksums.sha256 && exec /app/llama-server "$@"'
+            - 'cd /app && /app/llama-server --version && (cd /models && sha256sum -c checksums.sha256) && exec /app/llama-server "$@"'
             - '--'
             - --model
             - /models/weights/gemma-4-31B-it-Q4_K_M.gguf

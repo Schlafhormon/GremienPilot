@@ -796,8 +796,8 @@ function Wait-ForServices {
     param([int]$MaxWaitSeconds = 3600)
     Write-Host ""
     Write-Info "Warte auf Dienste..."
-    Write-Host "Beim ersten Start werden mehrere GB KI-Modelle geladen. Das kann deutlich laenger als zehn Minuten dauern."
-    Write-Host "Die Downloads laufen auch nach Ende dieser Warteanzeige weiter."
+    Write-Host "Gemma prueft zuerst ca. 20 GB Modelldateien und laedt danach das Modell. Auf einer Festplatte dauert dies mehrere Minuten."
+    Write-Host "Beim ersten Start koennen weitere KI-Modelle heruntergeladen werden. Container und Downloads laufen nach Ende der Warteanzeige weiter."
     Write-Host ""
 
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -852,9 +852,9 @@ function Show-StartupProgress {
         # llama.cpp uses terminal escape sequences even in captured logs.
         $clean = @($lines | ForEach-Object {
             $_.ToString() -replace '\x1B\[[0-?]*[ -/]*[@-~]', ''
-        } | Where-Object { $_ -match '\S' })
+        } | Where-Object { $_ -match '\S' -and $_ -notmatch '"(GET|HEAD) /health HTTP/' })
         $progress = @($clean | Where-Object {
-            $_ -match 'pulling|Downloading|Loading|loaded successfully|ready|Error|ERROR|failed'
+            $_ -match '\[Gemma\]|\.gguf:|pulling|Downloading|Loading|loaded successfully|ready|Error|ERROR|failed'
         })
         if ($progress.Count -gt 0) {
             Write-Host "  $($progress[-1])"

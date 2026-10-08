@@ -38,6 +38,32 @@ def test_bash_port_settings_follow_compose_precedence(tmp_path):
     assert shell(code, tmp_path).stdout.strip() == '3002'
 
 
+@pytest.mark.parametrize('valid_checksum', [True, False])
+def test_gemma_start_preserves_library_directory_and_checks_assets(tmp_path, valid_checksum):
+    import hashlib
+    runtime = tmp_path / 'app'
+    models = tmp_path / 'models'
+    runtime.mkdir()
+    models.mkdir()
+    # Like the pinned image, the server requires its own working directory.
+    server = runtime / 'llama-server'
+    server.write_text('''#!/bin/sh
+test "$PWD" = "$(dirname "$0")" || exit 42
+if [ "$1" = --version ]; then echo VERSION; else echo SERVER_STARTED; fi
+''')
+    server.chmod(0o755)
+    (models / 'weights.gguf').write_bytes(b'model')
+    digest = hashlib.sha256(b'model' if valid_checksum else b'corrupt').hexdigest()
+    (models / 'checksums.sha256').write_text(f'{digest}  weights.gguf\n')
+    script = (ROOT / 'scripts/llama-entrypoint.sh').read_text()
+    script = script.replace('/app', str(runtime)).replace('/models', str(models))
+    result = subprocess.run(['sh', '-c', script], cwd=tmp_path, text=True,
+                            capture_output=True, timeout=10)
+    assert ('SERVER_STARTED' in result.stdout) == valid_checksum
+    assert (result.returncode == 0) == valid_checksum, result.stderr
+    assert 'VERSION' in result.stdout
+
+
 @pytest.mark.parametrize('scenario',['fresh','existing','invalid'])
 def test_bash_start_installs_only_when_no_containers_exist(tmp_path,scenario):
     code='''info(){ :; }; error(){ :; }; check_docker(){ return 0; }

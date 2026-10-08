@@ -1,11 +1,16 @@
 #!/bin/sh
 set -eu
-cd /models
-if [ ! -s checksums.sha256 ]; then
+# The pinned image resolves some shared libraries relative to /app.
+# Keep model verification in a subshell so it cannot change the server's cwd.
+cd /app
+/app/llama-server --version
+if [ ! -s /models/checksums.sha256 ]; then
     echo 'Gemma assets missing. Run: python scripts/prepare_gemma4.py --bootstrap' >&2
     exit 1
 fi
-sha256sum -c checksums.sha256
+echo '[Gemma] Pruefe Modelldateien (ca. 20 GB); auf einer Festplatte dauert dies mehrere Minuten.'
+(cd /models && sha256sum -c checksums.sha256)
+echo '[Gemma] Pruefung abgeschlossen. Lade Modell und LoRA-Adapter...'
 exec /app/llama-server \
     --model /models/weights/gemma-4-31B-it-Q4_K_M.gguf \
     --mmproj /models/weights/mmproj-F16.gguf --no-mmproj-offload \
