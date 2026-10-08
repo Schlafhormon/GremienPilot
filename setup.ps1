@@ -807,7 +807,7 @@ function Wait-ForServices {
     while ($timer.Elapsed.TotalSeconds -lt $MaxWaitSeconds) {
         try {
             $response = Invoke-WebRequest -Uri "http://localhost:$PORT_BACKEND/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-            $modelResponse = Invoke-WebRequest -Uri "http://localhost:$PORT_LLM/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+            $modelResponse = Invoke-WebRequest -Uri "http://127.0.0.1:$PORT_LLM/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
             if ($response.StatusCode -eq 200 -and $modelResponse.StatusCode -eq 200) {
                 $ready = $true
                 break
@@ -1124,7 +1124,7 @@ function Show-Status {
     }
 
     try {
-        $response = Invoke-WebRequest -Uri "http://localhost:$PORT_LLM/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$PORT_LLM/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
         Write-Host "llama.cpp: Erreichbar" -ForegroundColor Green
     } catch {
         Write-Host "llama.cpp: Nicht erreichbar" -ForegroundColor Red

@@ -792,7 +792,7 @@ wait_for_services() {
 
     while [ $wait_count -lt $max_wait ]; do
         if curl -fs --max-time 2 http://localhost:${PORT_BACKEND}/health > /dev/null 2>&1 &&
-           curl -fs --max-time 2 http://localhost:${PORT_LLM}/health > /dev/null 2>&1; then
+           curl -fs --max-time 2 http://127.0.0.1:${PORT_LLM}/health > /dev/null 2>&1; then
             break
         fi
 
@@ -1056,7 +1056,7 @@ do_status() {
         echo -e "${RED}Frontend: Nicht erreichbar${NC}"
     fi
 
-    if curl -s "http://localhost:${PORT_LLM}/health" > /dev/null 2>&1; then
+    if curl -fs --max-time 2 "http://127.0.0.1:${PORT_LLM}/health" > /dev/null 2>&1; then
         echo -e "${GREEN}llama.cpp: Erreichbar${NC}"
     else
         echo -e "${RED}llama.cpp: Nicht erreichbar${NC}"

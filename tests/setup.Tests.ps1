@@ -96,6 +96,7 @@ function Invoke-WebRequest {
     param($Uri)
     $code = 200
     if ($Uri -match ':8080/') {
+        if ($Uri -ne 'http://127.0.0.1:8080/health') { throw 'Model probe must match the IPv4-only Compose binding' }
         $script:ModelProbes++
         if ($script:ModelProbes -eq 1) { $code = 503 }
     }
