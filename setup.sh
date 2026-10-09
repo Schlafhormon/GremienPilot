@@ -49,12 +49,12 @@ else
 fi
 
 BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
-OLLAMA_IMAGE="${OLLAMA_IMAGE:-ollama/ollama:${OLLAMA_IMAGE_TAG:-0.34.4}}"
-OLLAMA_MODEL="${LLM_MODEL:-qwen3.5:9b}"
+LLAMA_IMAGE="${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-${LLAMA_IMAGE_TAG:-b11429}}"
+LLAMA_MODEL="${LLM_MODEL:-gemma-4-31b}"
 
-# Compose must still honor OLLAMA_IMAGE from .env. A shell override remains
+# Compose must still honor LLAMA_IMAGE from .env. A shell override remains
 # exported naturally; only an explicitly selected tag needs a new export.
-if [ -n "${OLLAMA_IMAGE_TAG:-}" ]; then export OLLAMA_IMAGE; fi
+if [ -n "${LLAMA_IMAGE_TAG:-}" ]; then export LLAMA_IMAGE; fi
 export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 
 # Global state
@@ -63,7 +63,7 @@ MISSING_ITEMS=()
 # Ports used by the application
 PORT_FRONTEND=3000
 PORT_BACKEND=8010
-PORT_OLLAMA=11434
+PORT_LLM=8080
 
 # Print colored messages (German)
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -75,6 +75,24 @@ error() { echo -e "${RED}[FEHLER]${NC} $1"; }
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
+configured_port() {
+    local name="$1" fallback="$2" value="${!1}" line
+    if [ -z "$value" ] && [ -f "$SCRIPT_DIR/.env" ]; then
+        value=$(awk -v key="$name" '$0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub(/^[^=]*=/, ""); sub(/#.*/, ""); gsub(/[[:space:]\r\047\042]/, ""); found=$0
+        } END { print found }' "$SCRIPT_DIR/.env")
+    fi
+    if [ -z "$value" ]; then printf '%s\n' "$fallback"; return; fi
+    case "$value" in *[!0-9]*) echo "Ungueltiger Port: $name" >&2; return 1;; esac
+    if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+        echo "Ungueltiger Port: $name" >&2; return 1
+    fi
+    printf '%s\n' "$value"
+}
+PORT_FRONTEND=$(configured_port FRONTEND_PORT 3000) || exit 1
+PORT_BACKEND=$(configured_port BACKEND_PORT 8010) || exit 1
+PORT_LLM=$(configured_port LLAMA_PORT 8080) || exit 1
+
 initialize_configuration() {
     # Never overwrite existing settings or secrets.
     if [ -e "$SCRIPT_DIR/.env" ]; then return 0; fi
@@ -83,7 +101,7 @@ initialize_configuration() {
         return 1
     fi
     info ".env mit den Standardwerten fuer lange Sitzungen angelegt."
-    echo "Qwen3.5:9b wird automatisch geladen; Kontext und Tokenbudgets sind voreingestellt."
+    echo "Gemma 4 31B Q4_K_M und Protokoll-LoRA werden lokal vorbereitet."
     echo "Fuer Audio mit Sprechererkennung ggf. HF_TOKEN in .env setzen (Anleitung in README.md)."
 }
 
@@ -125,9 +143,9 @@ elif ! falsy "$PROTOKOLL_BUILD_LOCAL" && [ "$(printf '%s' "$PROTOKOLL_BUILD_LOCA
 fi
 
 if [ "$BUILD_LOCAL_IMAGES" = true ]; then
-    FRONTEND_IMAGE="ki-protokollierung-frontend:local"
-    BACKEND_CPU_IMAGE="ki-protokollierung-backend:local"
-    BACKEND_GPU_IMAGE="ki-protokollierung-backend:gpu-local"
+    FRONTEND_IMAGE="gremienpilot-frontend:gemma4-lora"
+    BACKEND_CPU_IMAGE="gremienpilot-backend:gemma4-lora"
+    BACKEND_GPU_IMAGE="gremienpilot-backend:gpu-gemma4-lora"
     BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
     export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 fi
@@ -178,9 +196,9 @@ show_help() {
 set_local_application_images() {
     BUILD_LOCAL_IMAGES=true
     PROTOKOLL_PULL_POLICY="missing"
-    FRONTEND_IMAGE="ki-protokollierung-frontend:local"
-    BACKEND_CPU_IMAGE="ki-protokollierung-backend:local"
-    BACKEND_GPU_IMAGE="ki-protokollierung-backend:gpu-local"
+    FRONTEND_IMAGE="gremienpilot-frontend:gemma4-lora"
+    BACKEND_CPU_IMAGE="gremienpilot-backend:gemma4-lora"
+    BACKEND_GPU_IMAGE="gremienpilot-backend:gpu-gemma4-lora"
     BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
     export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
 }
@@ -219,8 +237,9 @@ remove_existing_containers_for_rebuild() {
 }
 
 confirm_model_cache_handling() {
+    # Gemma uses the data/gemma4 bind mount, not an Ollama model volume.
+    # Session data (backend_state) is not a disposable model cache.
     local volume_names=(
-        "$(project_volume_name ollama_data)"
         "$(project_volume_name backend_hf_cache)"
         "$(project_volume_name backend_torch_cache)"
     )
@@ -340,11 +359,10 @@ image_exists() {
 }
 
 ########################################
-# Check if Ollama model is downloaded
+# Check if llama.cpp model is downloaded
 ########################################
-ollama_model_exists() {
-    # Ask for the effective Compose model; unrelated cached weights are not proof.
-    docker compose exec -T ollama sh -c 'ollama show "$OLLAMA_MODEL" >/dev/null 2>&1' >/dev/null 2>&1
+gemma_model_exists() {
+    [ -s "$SCRIPT_DIR/data/gemma4/checksums.sha256" ]
 }
 
 ########################################
@@ -367,12 +385,12 @@ check_disk_space() {
         MISSING_ITEMS+=("Frontend-Image (~1GB)")
     fi
 
-    if ! image_exists "$OLLAMA_IMAGE"; then
+    if ! image_exists "$LLAMA_IMAGE"; then
         required_gb=$((required_gb + 2))
-        MISSING_ITEMS+=("Ollama-Image (~2GB)")
+        MISSING_ITEMS+=("llama.cpp-Image (~2GB)")
     fi
 
-    if ! ollama_model_exists; then
+    if ! gemma_model_exists; then
         local model_disk_gb="${PROTOKOLL_MODEL_DISK_GB:-40}"
         if ! [[ "$model_disk_gb" =~ ^[1-9][0-9]*$ ]]; then
             error "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
@@ -463,8 +481,8 @@ check_ram() {
         total_ram_gb=$(free -g | awk '/^Mem:/{print $2}')
     fi
 
-    if [ "$total_ram_gb" -lt 8 ]; then
-        warn "Wenig Arbeitsspeicher erkannt (${total_ram_gb}GB). Empfohlen: 8GB+"
+    if [ "$total_ram_gb" -lt 32 ]; then
+        warn "Wenig Arbeitsspeicher erkannt (${total_ram_gb}GB). Fuer Gemma Q4_K_M: 32GB+, besser mehr Reserve"
         echo "  Die Anwendung koennte langsam laufen."
     else
         success "Arbeitsspeicher OK (${total_ram_gb}GB verfuegbar)"
@@ -537,7 +555,7 @@ check_ports() {
     local conflict_ports=()
 
     # Check each port (but ignore if our own containers are using them)
-    for port in $PORT_FRONTEND $PORT_BACKEND $PORT_OLLAMA; do
+    for port in $PORT_FRONTEND $PORT_BACKEND $PORT_LLM; do
         if port_in_use "$port"; then
             # Check if it's our own Docker container
             local is_our_container=false
@@ -555,7 +573,7 @@ check_ports() {
     done
 
     if [ ${#conflicts[@]} -eq 0 ]; then
-        success "Alle Ports verfuegbar (${PORT_FRONTEND}, ${PORT_BACKEND}, ${PORT_OLLAMA})"
+        success "Alle Ports verfuegbar (${PORT_FRONTEND}, ${PORT_BACKEND}, ${PORT_LLM})"
         return 0
     fi
 
@@ -767,29 +785,35 @@ check_gpu() {
 wait_for_services() {
     echo ""
     info "Warte auf Dienste..."
-    echo "Das System laedt KI-Modelle. Dies kann einige Minuten dauern."
+    echo "Das System prueft und laedt Gemma Q4_K_M. Auf CPU/HDD kann dies lange dauern."
     echo ""
 
-    local max_wait=600  # 10 minutes
-    local wait_count=0
+    local max_wait="${SETUP_WAIT_SECONDS:-14400}"
+    case "$max_wait" in ''|*[!0-9]*) error "SETUP_WAIT_SECONDS muss eine nichtnegative Ganzzahl sein."; return 1;; esac
+    local wait_started=$SECONDS
+    local wait_count=0 next_progress=0
 
-    while [ $wait_count -lt $max_wait ]; do
-        if curl -s http://localhost:${PORT_BACKEND}/health > /dev/null 2>&1; then
+    while [ "$max_wait" -eq 0 ] || [ $wait_count -lt "$max_wait" ]; do
+        if curl -fs --max-time 2 http://localhost:${PORT_BACKEND}/health > /dev/null 2>&1 &&
+           curl -fs --max-time 2 http://127.0.0.1:${PORT_LLM}/health > /dev/null 2>&1; then
             break
         fi
 
         # Show progress every 15 seconds
-        if [ $((wait_count % 15)) -eq 0 ]; then
+        if [ "$wait_count" -ge "$next_progress" ]; then
             echo "  Laedt noch... (${wait_count}s vergangen)"
+            next_progress=$((wait_count + 15))
         fi
 
         sleep 1
-        wait_count=$((wait_count + 1))
+        wait_count=$((SECONDS - wait_started))
     done
 
-    if [ $wait_count -ge $max_wait ]; then
+    if [ "$max_wait" -ne 0 ] && [ $wait_count -ge "$max_wait" ]; then
         echo ""
-        error "Dienste konnten nicht gestartet werden!"
+        warn "Wartezeit erreicht; die Anwendung ist noch nicht bereit."
+        echo "Container und Downloads laufen weiter; die Warteanzeige stoppt keine Dienste."
+        echo "Fortschritt: docker compose logs -f --tail=5 llama backend"
         echo ""
         show_failure_diagnostics
         return 1
@@ -826,7 +850,7 @@ show_failure_diagnostics() {
     echo ""
     echo "3. Docker-Ressourcen"
     echo "   -> Docker Desktop -> Einstellungen -> Resources"
-    echo "   -> Empfohlen: Mindestens 8GB RAM, 4 CPUs"
+    echo "   -> Empfohlen: 32GB RAM oder mehr fuer Gemma Q4_K_M, Docker-Speicherlimit beachten"
     echo ""
     echo "Naechste Schritte:"
     echo "  1. ./setup.sh logs     # Detaillierte Logs anzeigen"
@@ -900,10 +924,16 @@ do_build() {
     check_ram
     check_ports || exit 1
     check_gpu
+    info "Gemma Q4_K_M: CPU 0 / GPU 12 Layer (ohne Override); lange CPU-Zeitlimits aktiv. Bestehende .env-Werte bleiben erhalten."
     confirm_model_cache_handling || exit 1
 
     # Create uploads directory
     mkdir -p uploads
+
+    if ! gemma_model_exists; then
+        info "Lade Gemma-Gewichte und konvertiere den Protokoll-Adapter..."
+        python3 scripts/prepare_gemma4.py --bootstrap || return 1
+    fi
 
     # Start the application
     echo ""
@@ -916,8 +946,8 @@ do_build() {
 
     if [ "$BUILD_LOCAL_IMAGES" = true ]; then
         build_local_images || exit 1
-        info "Pruefe Runtime-Image fuer Ollama..."
-        docker compose pull ollama 2>/dev/null || warn "Konnte Ollama-Image nicht aktualisieren. Docker versucht es beim Start erneut."
+        info "Pruefe Runtime-Image fuer llama.cpp..."
+        docker compose pull llama 2>/dev/null || warn "Konnte llama.cpp-Image nicht aktualisieren. Docker versucht es beim Start erneut."
     else
         pull_images
     fi
@@ -1033,10 +1063,10 @@ do_status() {
         echo -e "${RED}Frontend: Nicht erreichbar${NC}"
     fi
 
-    if curl -s "http://localhost:${PORT_OLLAMA}/api/tags" > /dev/null 2>&1; then
-        echo -e "${GREEN}Ollama: Erreichbar${NC}"
+    if curl -fs --max-time 2 "http://127.0.0.1:${PORT_LLM}/health" > /dev/null 2>&1; then
+        echo -e "${GREEN}llama.cpp: Erreichbar${NC}"
     else
-        echo -e "${RED}Ollama: Nicht erreichbar${NC}"
+        echo -e "${RED}llama.cpp: Nicht erreichbar${NC}"
     fi
 
     echo ""

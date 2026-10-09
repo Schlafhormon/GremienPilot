@@ -534,7 +534,10 @@ export default function App() {
       const saved = localStorage.getItem(LLM_SETTINGS_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        return { model: typeof parsed.model === 'string' ? parsed.model.trim() : '',
+        return { ...DEFAULT_LLM_SETTINGS,
+          summaryStyle: parsed.summaryStyle === 'gemma4-custom' ? 'gemma4-custom' : 'gemma4-lora',
+          customSummaryPrompt: typeof parsed.customSummaryPrompt === 'string' ? parsed.customSummaryPrompt : DEFAULT_LLM_SETTINGS.customSummaryPrompt,
+          model: typeof parsed.model === 'string' ? parsed.model.trim() : '',
           systemPrompt: typeof parsed.systemPrompt === 'string' ? parsed.systemPrompt : DEFAULT_LLM_SETTINGS.systemPrompt };
       }
     } catch (e) {
@@ -561,6 +564,8 @@ export default function App() {
   const buildSessionPayload = useCallback(
     (overrides: Partial<SessionSavePayload> = {}): SessionSavePayload => ({
       pdf_source_job_id: overrides.pdf_source_job_id === undefined ? pdfSourceJobId : overrides.pdf_source_job_id,
+      summary_style: overrides.summary_style ?? llmSettings.summaryStyle,
+      custom_summary_prompt: overrides.custom_summary_prompt ?? llmSettings.customSummaryPrompt,
       processing_mode: overrides.processing_mode ?? processingMode,
       enforce_top_order: overrides.enforce_top_order ?? enforceTopOrder,
       session_id: overrides.session_id ?? sessionId,
@@ -581,6 +586,8 @@ export default function App() {
     }),
     [
       pdfSourceJobId,
+      llmSettings.summaryStyle,
+      llmSettings.customSummaryPrompt,
       processingMode,
       enforceTopOrder,
       agendaProposals,
@@ -608,8 +615,12 @@ export default function App() {
     currentPayloadRef.current = serializeSessionPayload(latestPayloadRef.current);
   }, [buildSessionPayload]);
 
-  const applySession = useCallback((session: SessionResponse | SessionDraft) => {
+  const applySession = useCallback((session: SessionResponse | SessionDraft, preserveSummaryPreferences = false) => {
     summaryBaselineRef.current = session;
+    if (!preserveSummaryPreferences) setLlmSettings(settings => ({ ...settings,
+      summaryStyle: session.summary_style ?? DEFAULT_LLM_SETTINGS.summaryStyle,
+      customSummaryPrompt: session.custom_summary_prompt ?? DEFAULT_LLM_SETTINGS.customSummaryPrompt,
+    }));
     setProcessingMode(session.processing_mode ?? "slow");
     setEnforceTopOrder(session.enforce_top_order ?? false);
     const nextSessionId = session.session_id ?? null;
@@ -690,7 +701,7 @@ export default function App() {
   const applyPipelineResult = useCallback((result: PipelineResultResponse) => {
     if (result.pipeline.retained_result_available) {
       // Keep the edited session intact; computed assignments belong to the copy.
-      applySession(result.session);
+      applySession(result.session, activeSessionIdRef.current === result.session.session_id);
       setPipelineJob(result.pipeline);
       setPipelineId(null);
       setIsProcessing(false);
@@ -733,7 +744,7 @@ export default function App() {
       !hasTechnicalProcessingFailure(sessionWithSuggestedSpeakers, agendaDetectionResult) && hasFreshSessionSummaries(sessionWithSuggestedSpeakers);
     const shouldReviewBeforeProtocol = !fastComplete && (needsReview || needsSpeakerReview);
 
-    applySession(sessionWithSuggestedSpeakers);
+    applySession(sessionWithSuggestedSpeakers, activeSessionIdRef.current === result.session.session_id);
 
     setPipelineJob(completedPipeline);
     setPipelineId(null);
@@ -1088,6 +1099,10 @@ export default function App() {
       sessionRevisionRef.current = refreshed.revision ?? sessionRevisionRef.current;
       setSessionRevision(sessionRevisionRef.current);
       setProcessingMode(merged.processing_mode ?? "slow");
+      setLlmSettings(settings => ({ ...settings,
+        summaryStyle: merged.summary_style ?? DEFAULT_LLM_SETTINGS.summaryStyle,
+        customSummaryPrompt: merged.custom_summary_prompt ?? DEFAULT_LLM_SETTINGS.customSummaryPrompt,
+      }));
       setEnforceTopOrder(merged.enforce_top_order ?? false);
       setTops(merged.tops);
       setTopIds(merged.top_ids ?? []);
@@ -1293,6 +1308,8 @@ export default function App() {
         autoDetectTopsFromPdf: shouldAutoDetectTopsFromPdf,
         model: llmSettings.model,
         summarySystemPrompt: llmSettings.systemPrompt,
+        summaryStyle: llmSettings.summaryStyle,
+        customSummaryPrompt: llmSettings.customSummaryPrompt,
         rememberSpeakers,
         skipAgendaDetection,
       });
@@ -1435,6 +1452,8 @@ export default function App() {
       const started = await startSummaryJob(sessionId, {
         revision,
         topIds: selectedIds,
+        summaryStyle: llmSettings.summaryStyle,
+        customSummaryPrompt: llmSettings.customSummaryPrompt,
         model: llmSettings.model,
         systemPrompt: tops.filter((top) => top.trim()).length === 0
           ? GENERIC_SUMMARY_PROMPT
@@ -1942,7 +1961,18 @@ export default function App() {
             const states = { ...effectiveSummaryStates };
             Object.keys(next).map(Number).forEach(index => {
               if (next[index] === summaries[index]) return;
-              delete reviews[index]; // Generated evidence no longer describes manual text.
+              if (reviews[index]?.structured?.verification?.source_contract === 'gemma-prose-review-v1') {
+                const previous = reviews[index]!;
+                reviews[index] = { ...previous, source_links: [],
+                  structured: { ...previous.structured!, protocol_text: next[index],
+                    verification: { ...previous.structured!.verification, review_complete: false, review_status: 'stale' } },
+                  llm_usage: { ...previous.llm_usage, review_complete: false, review_status: 'stale', review_required: true },
+                  review_warnings: [...previous.review_warnings.filter(w => w.kind !== 'verification_required'), {
+                    kind: 'verification_required', severity: 'warning', line_indices: [], excerpt: '',
+                    message: 'Text bearbeitet; Prüfhinweise beziehen sich auf die frühere Fassung.' }] };
+              } else {
+                delete reviews[index]; // Generated evidence no longer describes manual text.
+              }
               if (states[index]) states[index] = { ...states[index]!, status: 'ready', origin: 'manual' };
             });
             setSummaries(next);

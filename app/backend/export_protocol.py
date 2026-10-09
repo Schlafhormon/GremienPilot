@@ -11,14 +11,16 @@ from typing import Iterable, Literal
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Pt
+from docx.oxml import OxmlElement
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    KeepTogether,
     ListFlowable,
     ListItem,
     PageTemplate,
@@ -28,6 +30,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 from xml.sax.saxutils import escape
+from protocol_layout import parse_protocol, render_text
 
 
 ExportFormat = Literal["txt", "docx", "pdf"]
@@ -65,6 +68,8 @@ class ProtocolTop:
     uncertainties: list[str] = field(default_factory=list)
     review_questions: list[str] = field(default_factory=list)
     combined_action_heading: bool = False
+    protocol_text: str | None = None
+    review_status: str = ''
 
 
 @dataclass
@@ -119,6 +124,8 @@ def parse_summary_sections(summary: str | None) -> dict[str, list[str]]:
         return sections
 
     label_to_key = {
+        "aus der beratung": "discussion",
+        "beschlüsse und festlegungen": "decisions",
         "diskussion": "discussion",
         "beschluss": "decisions",
         "beschluesse": "decisions",
@@ -180,7 +187,11 @@ def build_protocol_document(
     for index, title in enumerate(agenda):
         editable_summary = summaries.get(index)
         structured = (summary_reviews.get(index) or {}).get("structured")
-        if editable_summary and editable_summary.strip():
+        prose = bool(structured and structured.get('verification', {}).get('source_contract') == 'gemma-prose-review-v1')
+        protocol_text = (editable_summary if editable_summary is not None else structured.get('protocol_text', '')) if prose else None
+        if prose:
+            sections = {key: [] for key in STRUCTURED_KEYS}
+        elif editable_summary and editable_summary.strip():
             sections = parse_summary_sections(editable_summary)
         elif structured:
             sections = {
@@ -193,6 +204,42 @@ def build_protocol_document(
         if structured and structured.get('verification', {}).get('processing_mode') == 'fast':
             if 'Fast – ohne automatische Inhaltsprüfung' not in metadata.title:
                 metadata.title = (metadata.title or 'Sitzungsprotokoll') + ' – Fast – ohne automatische Inhaltsprüfung'
+
+        review_status = ''
+        warnings = (summary_reviews.get(index) or {}).get('review_warnings', [])
+        review_questions = [str(w['message']) for w in warnings if w.get('message')]
+        if prose:
+            from source_contract import digest
+            verification = structured['verification']
+            source_changed = False
+            if transcript:
+                source_indices = (summary_reviews.get(index) or {}).get('llm_usage', {}).get('original_line_indices')
+                if source_indices is None:
+                    source_indices = [i for i in range(len(transcript)) if i < len(assignments) and assignments[i] == index]
+                if not all(type(i) is int and 0 <= i < len(transcript) for i in source_indices):
+                    source_changed = True
+                else:
+                    source_changed = verification.get('source_sha256') != digest([
+                        f'{speaker_names.get(transcript[i].speaker, transcript[i].speaker)}: {transcript[i].text}'
+                        for i in source_indices])
+            if verification.get('summary_sha256') != digest(protocol_text):
+                review_status = 'Bearbeiteter Entwurf; Inhaltsprüfung gilt für die frühere Fassung.'
+            elif source_changed or verification.get('review_status') == 'stale':
+                review_status = 'Entwurf; Inhaltsprüfung gilt für die frühere Text- oder Transkriptfassung.'
+            elif verification.get('generation_complete') is False:
+                review_status = 'Entwurf; Protokollerzeugung und Inhaltsprüfung unvollständig.'
+            elif verification.get('review_status') == 'skipped':
+                review_status = 'Ungeprüfter Entwurf – Fast ohne automatische Inhaltsprüfung.'
+            elif not verification.get('review_complete'):
+                review_status = 'Entwurf; Inhaltsprüfung fehlgeschlagen oder unvollständig.'
+            else:
+                review_status = 'Verarbeitung und zwei unabhängige Inhaltsprüfungen abgeschlossen; keine Garantie für Fehlerfreiheit.'
+            if 'Entwurf' in review_status and 'Prüfentwurf' not in metadata.title:
+                metadata.title = (metadata.title or 'Sitzungsprotokoll') + ' – Prüfentwurf'
+            review_questions = list(dict.fromkeys([
+                *[w['message'] + ('\n' + w['excerpt'] if w.get('excerpt') else '') for w in warnings if w.get('message')],
+                *[q['question'] + ('\n' + ' … '.join(q['excerpts']) if q.get('excerpts') else '')
+                  for q in structured.get('review_questions', []) if q.get('question')]]))
 
         if structured and structured.get('verification', {}).get('source_contract') == 'graded-sources-v1':
             from source_contract import marked_text, digest
@@ -217,10 +264,11 @@ def build_protocol_document(
                 action_items=sections["action_items"],
                 open_points=sections["open_points"],
                 uncertainties=sections["uncertainties"],
-                review_questions=[str(w['message']) for w in
-                    (summary_reviews.get(index) or {}).get('review_warnings', []) if w.get('message')],
+                review_questions=review_questions,
                 combined_action_heading=bool(re.search(
                     r'^\s*Ma(?:ß|ss)nahmen/offene Punkte:', editable_summary or '', re.I | re.M)),
+                protocol_text=protocol_text,
+                review_status=review_status,
             )
         )
 
@@ -264,6 +312,11 @@ def render_txt(document: ProtocolDocument) -> str:
     for top in document.tops:
         lines.append(top.title)
         lines.append("-" * 60)
+        if top.protocol_text is not None:
+            lines.extend([top.review_status, '', render_text(top.protocol_text), ''])
+            if top.review_questions:
+                _append_text_section(lines, 'Prüfhinweise', top.review_questions)
+            continue
         _append_text_section(lines, "Diskussion", top.discussion)
         _append_text_section(lines, "Beschluss", top.decisions)
         _append_text_section(lines, "Abstimmung", top.votes)
@@ -311,6 +364,12 @@ def render_docx(document: ProtocolDocument) -> bytes:
 
     for top in document.tops:
         doc.add_heading(top.title, level=1)
+        if top.protocol_text is not None:
+            doc.add_paragraph(top.review_status)
+            _add_docx_protocol(doc, top.protocol_text)
+            if top.review_questions:
+                _add_docx_section(doc, 'Prüfhinweise', top.review_questions)
+            continue
         _add_docx_section(doc, "Diskussion", top.discussion)
         _add_docx_section(doc, "Beschluss", top.decisions)
         _add_docx_section(doc, "Abstimmung", top.votes)
@@ -371,6 +430,12 @@ def render_pdf(document: ProtocolDocument) -> bytes:
 
     for top in document.tops:
         story.append(Paragraph(_pdf_text(top.title), styles["TopTitle"]))
+        if top.protocol_text is not None:
+            story.append(Paragraph(_pdf_text(top.review_status), styles['Small']))
+            _append_pdf_protocol(story, styles, top.protocol_text, doc.width)
+            if top.review_questions:
+                _append_pdf_section(story, styles, 'Prüfhinweise', top.review_questions, keep_heading=True)
+            continue
         _append_pdf_section(story, styles, "Diskussion", top.discussion)
         _append_pdf_section(story, styles, "Beschluss", top.decisions)
         _append_pdf_section(story, styles, "Abstimmung", top.votes)
@@ -386,6 +451,88 @@ def render_pdf(document: ProtocolDocument) -> bytes:
 
 def _strip_bullet(text: str) -> str:
     return re.sub(r"^[-*•]\s*", "", text).strip()
+
+
+def _docx_runs(paragraph, runs, *, bold=False):
+    for item in runs:
+        run = paragraph.add_run(item.text)
+        run.bold = True if bold or item.bold else None
+        run.italic = True if item.italic else None
+        run.font.strike = True if item.strike else None
+        if item.code:
+            run.font.name = 'Courier New'
+
+
+def _add_docx_protocol(doc, text):
+    for block in parse_protocol(text):
+        if block.kind == 'table':
+            table = doc.add_table(rows=len(block.rows), cols=len(block.rows[0]))
+            table.style = 'Table Grid'
+            header = OxmlElement('w:tblHeader')
+            table.rows[0]._tr.get_or_add_trPr().append(header)
+            for row_index, cells in enumerate(block.rows):
+                for cell_index, runs in enumerate(cells):
+                    paragraph = table.cell(row_index, cell_index).paragraphs[0]
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if cell_index else WD_ALIGN_PARAGRAPH.LEFT
+                    _docx_runs(paragraph, runs, bold=row_index == 0)
+            doc.add_paragraph()
+        elif block.kind == 'rule':
+            doc.add_paragraph('—' * 20)
+        else:
+            paragraph = (doc.add_heading(level=min(4, max(2, block.level)))
+                         if block.kind == 'heading' else doc.add_paragraph())
+            if block.prefix:
+                paragraph.add_run(block.prefix)
+            if block.indent or block.quote:
+                paragraph.paragraph_format.left_indent = Cm(0.5 * max(1, block.indent))
+            _docx_runs(paragraph, block.runs)
+
+
+def _pdf_runs(runs, *, bold=False):
+    parts = []
+    for item in runs:
+        value = _pdf_text(item.text)
+        if item.code:
+            value = '<font name="Courier">' + value + '</font>'
+        if item.italic:
+            value = '<i>' + value + '</i>'
+        if item.strike:
+            value = '<strike>' + value + '</strike>'
+        if bold or item.bold:
+            value = '<b>' + value + '</b>'
+        parts.append(value)
+    return ''.join(parts)
+
+
+def _append_pdf_protocol(story, styles, text, width):
+    for block in parse_protocol(text):
+        if block.kind == 'table':
+            rows = [[Paragraph(_pdf_runs(runs, bold=row_index == 0),
+                               ParagraphStyle('ProtocolCell', parent=styles['BodyText'], alignment=TA_CENTER if col_index else TA_LEFT))
+                     for col_index, runs in enumerate(row)]
+                    for row_index, row in enumerate(block.rows)]
+            table = Table(rows, colWidths=[width / len(rows[0])] * len(rows[0]),
+                          repeatRows=1, splitByRow=1, splitInRow=1)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F3F4F6')),
+                ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#D1D5DB')),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ]))
+            story.extend([table, Spacer(1, 10)])
+        elif block.kind == 'rule':
+            story.append(Paragraph('—' * 20, styles['BodyText']))
+        else:
+            style = (ParagraphStyle('ProtocolHeading', parent=styles['SectionTitle'], keepWithNext=True)
+                     if block.kind == 'heading' else styles['BodyText'])
+            if block.indent or block.quote:
+                style = ParagraphStyle('ProtocolIndent', parent=style, leftIndent=12 * max(1, block.indent))
+            story.append(Paragraph(_pdf_text(block.prefix) + _pdf_runs(block.runs), style))
+            if block.kind != 'heading':
+                story.append(Spacer(1, 8))
 
 
 def _metadata_rows(metadata: ProtocolMetadata) -> list[tuple[str, str]]:
@@ -475,9 +622,14 @@ def _add_docx_appendix(doc: Document, document: ProtocolDocument) -> None:
         doc.add_paragraph("Automatisch erzeugter Entwurf; fachlich und rechtlich zu prüfen.")
 
 
-def _append_pdf_section(story: list, styles, label: str, items: list[str]) -> None:
-    story.append(Paragraph(_pdf_text(label), styles["SectionTitle"]))
-    story.append(_pdf_list(items or ["Keine Angabe."], styles["BodyText"]))
+def _append_pdf_section(story: list, styles, label: str, items: list[str], *, keep_heading=False) -> None:
+    heading = Paragraph(_pdf_text(label), styles['SectionTitle'])
+    if keep_heading and items:
+        story.append(KeepTogether([heading, _pdf_list(items[:1], styles['BodyText'])]))
+        if len(items) > 1:
+            story.append(_pdf_list(items[1:], styles['BodyText']))
+    else:
+        story.extend([heading, _pdf_list(items or ['Keine Angabe.'], styles['BodyText'])])
 
 
 def _transcript_groups(document: ProtocolDocument) -> list[tuple[str, list[TranscriptLine]]]:

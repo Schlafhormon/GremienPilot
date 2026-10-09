@@ -24,6 +24,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from copy import deepcopy
 from typing import Any, Optional
 from urllib.parse import urlparse
 from processing_mode import policy, FAST_NOTICE
@@ -32,7 +33,7 @@ from llm_transport import complete, fits, structured_output_budget, ContextBudge
 # Compatibility exports for integrations importing configuration from summarize.
 from llm_config import (LLMConfig, get_llm_config as _get_llm_config,
                         resolve_llm_base_url, is_docker_runtime)
-LLM_MODEL = os.environ.get("LLM_MODEL", "").strip() or "qwen3.5:9b"
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip() or "gemma-4-31b"
 LLM_BASE_URL, LLM_BASE_URL_SOURCE = resolve_llm_base_url()
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS") or "120")
@@ -80,6 +81,8 @@ class StructuredSummary:
     review_questions: list[dict] = field(default_factory=list)
     verification: dict = field(default_factory=dict)
     rejected_candidates: list[dict] = field(default_factory=list)
+    # Gemma prose is stored verbatim, independently of legacy categorized items.
+    protocol_text: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -315,7 +318,10 @@ def _model_matches_configured(available_model: str, configured_model: str) -> bo
 
 
 def _llm_hint(config: LLMConfig, *, model_missing: bool = False) -> str:
-    if config.uses_internal_ollama:
+    if config.provider == 'llama-cpp':
+        pull_hint = (' Prüfen Sie docker compose logs llama und die lokal vorbereiteten Gemma-Gewichte '
+                     '(python scripts/prepare_gemma4.py --bootstrap).')
+    elif config.uses_internal_ollama:
         pull_hint = (
             f" Starten Sie Ollama mit Docker Compose und laden Sie das Modell: "
             f"docker compose exec ollama ollama pull {config.model}."
@@ -482,6 +488,9 @@ def parse_structured_summary(content: str) -> StructuredSummary:
 
 def render_structured_summary(structured: StructuredSummary) -> str:
     """Render structured minutes into editable text for existing users."""
+    if structured.verification.get('summary_style') in {'gemma4-lora', 'gemma4-custom'}:
+        from gemma_summary import render_protocol
+        return render_protocol(structured)
 
     sections = [
         ("Diskussion", structured.discussion),
@@ -559,6 +568,29 @@ def build_summary_review(
     from summary_grounding import digest
     review = SummaryReview()
     verification = structured.verification if structured else {}
+    if verification.get('source_contract') == 'gemma-prose-review-v1':
+        seen = set()
+        for issue in structured.review_questions:
+            identity = digest([issue['kind'], issue['question'], issue.get('excerpts', [])])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            review.warnings.append(SummaryReviewWarning(kind=issue['kind'], message=issue['question'],
+                excerpt=' … '.join(issue.get('excerpts', []))))
+        valid = (verification.get('source_sha256') == digest([_line_text(line) for line in lines])
+                 and verification.get('summary_sha256') == digest(summary))
+        if not valid:
+            review.warnings.append(SummaryReviewWarning(kind='verification_required',
+                message='Text oder Originaltranskript geändert; Prüfhinweise beziehen sich auf die frühere Fassung.'))
+        elif verification.get('review_status') == 'skipped':
+            review.warnings.append(SummaryReviewWarning(kind='review_skipped',
+                message='Ungeprüfter Entwurf. ' + FAST_NOTICE, severity='info'))
+        elif not verification.get('review_complete'):
+            review.warnings.append(SummaryReviewWarning(kind='technical_incomplete', severity='error',
+                message=('Teilentwurf erhalten; Protokollerzeugung und Inhaltsprüfung sind unvollständig.'
+                         if verification.get('generation_complete') is False else
+                         'Entwurf erhalten; die Inhaltsprüfung ist fehlgeschlagen oder unvollständig.')))
+        return review
     valid = bool(verification.get('source_sha256') == digest([_line_text(line) for line in lines])
                  and verification.get('summary_sha256') == digest(summary))
     if not valid:
@@ -658,14 +690,17 @@ def summarize_segment(
     meeting_context: Optional[str] = None,
     source_lines: list[str] | None = None,
     processing_mode: str | None = None,
+    summary_style: str | None = None,
+    custom_summary_prompt: str | None = None,
 ) -> SummarizationResult:
-    """Generate structured minutes; Slow independently verifies and reconciles them.
+    """Generate minutes using the selected profile and an immutable request config.
 
-    Fast retains source references with explicit unreviewed provenance. It never
-    inherits a Slow certificate; technical failures remain failures in both modes.
+    Gemma retains prose verbatim; Slow reviews each part against its full input.
+    Other profiles retain their structured workflow. Fast never inherits a Slow
+    certificate; technical failures remain failures in both modes.
     """
     from summary_grounding import Workflow, digest
-    config = get_llm_config(model)
+    config = get_llm_config(model).with_summary_style(summary_style, custom_summary_prompt)
     client = _load_openai_client(config)
     check_llm_availability(client=client, model=config.model)
     lines = source_lines if source_lines is not None else transcript_text.splitlines()
@@ -675,9 +710,20 @@ def summarize_segment(
         raise StructuredOutputError("Quellzeilen stimmen nicht mit Transkript überein")
     start = time.monotonic()
     usage = {'configuration': config.public_snapshot()}
-    workflow = Workflow(client, config, build_structured_system_prompt(system_prompt)
-                        + "\nTOP: " + top_title, meeting_context, usage)
+    if config.is_gemma_prose:
+        from gemma_summary import GemmaWorkflow, render_protocol
+        workflow = GemmaWorkflow(client, config, top_title, meeting_context, usage)
+        render = render_protocol
+    else:
+        workflow = Workflow(client, config, build_structured_system_prompt(system_prompt)
+                            + "\nTOP: " + top_title, meeting_context, usage)
+        render = render_structured_summary
     def attach_partial(error):
+        if config.is_gemma_prose:
+            if workflow.protocol_parts:
+                error.partial_result = protocol_result(workflow.protocol_parts, workflow.issues,
+                    list(workflow.partial_rows.values()), len(workflow.protocol_parts), incomplete=True)
+            return error
         if not workflow.latest_claims:
             return error
         from source_contract import reviewed, marked_text
@@ -689,12 +735,29 @@ def summarize_segment(
             partial.evidence.append(dict(section=claim['section'],item_index=len(items),item_text=text,
                 original_text=claim['text'],scope=claim['scope'],sources=claim['evidence'],grounding=g))
             items.append(text)
-        text = render_structured_summary(partial)
+        text = render(partial)
         partial.verification = dict(processing_complete=False,source_contract='graded-sources-v1',
+            summary_style=config.summary_style,
             source_sha256=digest(lines),summary_sha256=digest(text),sources=list(workflow.partial_rows.values()))
         error.partial_result = SummarizationResult(summary=text,structured=partial,duration_seconds=time.monotonic()-start,
             llm_usage={**usage,'processing_complete':False,'grounding_incomplete':True,'review_required':True})
         return error
+    def protocol_result(parts, issues, rows, count, *, incomplete=False):
+        from gemma_summary import CONTRACT, VERSION
+        # Joining parts adds only a separator; no headings or paragraphs are removed.
+        summary = '\n\n'.join(part['text'] for part in parts)
+        state = dict(**policy().snapshot(), summary_style=config.summary_style,
+            processing_complete=not incomplete, generation_complete=workflow.generation_complete,
+            review_complete=not policy().fast and not incomplete,
+            review_status='incomplete' if incomplete else 'skipped' if policy().fast else 'completed',
+            review_required=policy().fast or incomplete or bool(issues), grounding_incomplete=incomplete)
+        usage.update(state)
+        structured = StructuredSummary(protocol_text=summary, review_questions=deepcopy(issues))
+        structured.verification = dict(state, source_contract=CONTRACT, prompt_version=VERSION,
+            source_sha256=digest(lines), summary_sha256=digest(summary),
+            checks=usage.get('required_checks', []), completed_checks=deepcopy(usage.get('completed_checks', [])))
+        return SummarizationResult(summary=summary, structured=structured,
+            duration_seconds=time.monotonic()-start, chunks_processed=count, llm_usage=deepcopy(usage))
     try:
         claims, issues, rows, count = workflow.run(lines)
     except LLMCancelledError:
@@ -702,11 +765,15 @@ def summarize_segment(
     except ContextBudgetError as exc:
         raise attach_partial(exc)
     except ValueError as exc:
-        raise attach_partial(StructuredOutputError("Automatische Quellenprüfung technisch unvollständig")) from exc
+        label = 'Inhaltsprüfung' if config.is_gemma_prose else 'Quellenprüfung'
+        raise attach_partial(StructuredOutputError("Automatische " + label + " technisch unvollständig")) from exc
     except Exception as exc:
         info = classify_llm_error(exc)
-        raise attach_partial(LLMCallError("Automatische Quellenprüfung fehlgeschlagen (" + info.category + ")",
+        label = 'Inhaltsprüfung' if config.is_gemma_prose else 'Quellenprüfung'
+        raise attach_partial(LLMCallError("Automatische " + label + " fehlgeschlagen (" + info.category + ")",
                            category=info.category, transient=info.transient)) from exc
+    if config.is_gemma_prose:
+        return protocol_result(claims, issues, rows, count)
     structured = StructuredSummary()
     from source_contract import marked_text
     for claim in claims:
@@ -725,7 +792,8 @@ def summarize_segment(
         processing_complete=True, source_sha256=digest(lines),
         sources=rows, checks=usage['required_checks'], prompt_version=usage['prompt_version'],
         source_contract='graded-sources-v1')
-    summary = render_structured_summary(structured)
+    structured.verification['summary_style'] = config.summary_style
+    summary = render(structured)
     if not summary:
         # No semantic filler. Absence is a model result, with evidence and completed checks.
         summary = "Keine protokollrelevanten Inhalte festgestellt."

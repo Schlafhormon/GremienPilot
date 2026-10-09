@@ -11,6 +11,17 @@ const baseline: SessionSavePayload = {
 };
 
 describe('summary job result merge', () => {
+  it('keeps local style edits when an older job result arrives', () => {
+    const before = { ...baseline, summary_style: 'gemma4-custom' as const, custom_summary_prompt: 'Auftragsstil' };
+    const local = { ...before, summary_style: 'gemma4-lora' as const, custom_summary_prompt: 'Neuer Stil' };
+    const remote = { ...before, summaries: { 0: 'Neues Ergebnis' } };
+    const merged = mergeSummarySession(local, before, remote);
+    expect(merged.summary_style).toBe('gemma4-lora');
+    expect(merged.custom_summary_prompt).toBe('Neuer Stil');
+    expect(merged.summaries[0]).toBe('Neues Ergebnis');
+    expect(mergeSummarySession(before, before, local).custom_summary_prompt).toBe('Neuer Stil');
+  });
+
   it('merges result bundles by stable TOP identity and preserves manual text across polls', () => {
     const local = { ...baseline, summaries: { ...baseline.summaries, 1: 'Manuell B' },
       speaker_names: { S: 'Manueller Name' } };

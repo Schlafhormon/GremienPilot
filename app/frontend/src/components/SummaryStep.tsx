@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, type ChangeEvent } from 'reac
 import { exportProtocol } from '../api';
 import type { ExportFormat, ExportMetadata, StructuredSummary, SummaryStepProps, TranscriptLine } from '../types';
 import AudioPlayer from './AudioPlayer';
+import ProtocolText from './ProtocolText';
 import { useAudioSync } from '../hooks/useAudioSync';
 
 function formatTime(seconds: number): string {
@@ -11,7 +12,7 @@ function formatTime(seconds: number): string {
 }
 
 const SUMMARY_SECTIONS: Array<{
-  key: keyof StructuredSummary;
+  key: 'discussion' | 'decisions' | 'votes' | 'action_items' | 'open_points' | 'uncertainties';
   label: string;
   important?: boolean;
 }> = [
@@ -265,6 +266,8 @@ export default function SummaryStep({
   const selectedSummaryState = summaryStates[selectedSummaryIndex];
   const selectedWarnings = selectedReview?.review_warnings ?? [];
   const structured = selectedReview?.structured ?? null;
+  const isGemmaProse = structured?.verification?.source_contract === 'gemma-prose-review-v1';
+  const reviewComplete = selectedReview?.llm_usage?.review_complete === true;
 
   const getSourceLink = (section: keyof StructuredSummary, itemIndex: number) => {
     return selectedReview?.source_links.find(
@@ -273,7 +276,7 @@ export default function SummaryStep({
   };
 
   const hasStructuredItems = Boolean(
-    structured &&
+    structured && !isGemmaProse &&
       SUMMARY_SECTIONS.some((section) => structured[section.key]?.length)
   );
   const summaryIssueState = getSummaryIssueState();
@@ -314,6 +317,8 @@ export default function SummaryStep({
                 {summaryJob.execution?.state === 'retry_wait' ? <div>Vorübergehend gestört; erneuter Versuch folgt</div> : summaryJob.status === 'pending' && <div>Wartet auf Verarbeitung</div>}
                 {summaryJob.execution?.state === 'review_required' && <div>Ergebnisse benötigen fachliche Prüfung</div>}
                 {summaryJob.execution?.progress?.phase === 'loading' && <div>Modell lädt oder verarbeitet die Eingabe</div>}
+                {(summaryJob.execution?.progress?.summary_phase ?? summaryJob.execution?.progress?.phase ?? summaryJob.llm_progress?.phase) === 'summary_protocol' && <div>LoRA-Protokolltext wird erzeugt</div>}
+                {['summary_final_review', 'summary_consolidated_review'].includes(summaryJob.execution?.progress?.summary_phase ?? summaryJob.execution?.progress?.phase ?? summaryJob.llm_progress?.phase ?? '') && <div>Unabhängige Inhaltsprüfung gegen das Originaltranskript läuft</div>}
                 {summaryJob.status === 'cancelling' && <div>Abbruch angefordert</div>}
                 {summaryJob.error && <div role="alert">{summaryJob.error}</div>}
                 {Object.entries(summaryJob.outcomes ?? {}).filter(([, outcome]) => outcome.status === 'failed').map(([id, outcome]) => (
@@ -541,10 +546,11 @@ export default function SummaryStep({
                 />
               ) : hasReviewContent ? (
                 <div className="space-y-3">
-                  {selectedReview?.llm_usage?.processing_mode === 'fast' && <p className="text-xs text-gray-600">Fast – ohne automatische Inhaltsprüfung. Ungenauere Ergebnisse möglich.</p>}
-                  {selectedReview?.llm_usage?.processing_mode !== 'fast' && selectedReview?.llm_usage?.processing_complete === true && (
-                    <p className="text-xs text-gray-600">Automatische Quellen- und Vollständigkeitsprüfung abgeschlossen. Offene Prüffragen bleiben gesondert sichtbar.</p>
+                  {selectedReview?.llm_usage?.processing_mode === 'fast' && <p className="text-xs text-gray-600">Ungeprüfter Entwurf. Fast – ohne automatische Inhaltsprüfung. Ungenauere Ergebnisse möglich.</p>}
+                  {selectedReview?.llm_usage?.processing_mode !== 'fast' && selectedReview?.llm_usage?.processing_complete === true && (!isGemmaProse || reviewComplete) && (
+                    <p className="text-xs text-gray-600">{isGemmaProse ? 'Verarbeitung und zwei unabhängige Inhaltsprüfungen abgeschlossen. Keine Garantie für Fehlerfreiheit.' : 'Automatische Quellen- und Vollständigkeitsprüfung abgeschlossen. Offene Prüffragen bleiben gesondert sichtbar.'}</p>
                   )}
+                  {isGemmaProse && selectedReview?.llm_usage?.processing_mode !== 'fast' && !reviewComplete && <p className="text-xs text-amber-800">Entwurf erhalten; Inhaltsprüfung unvollständig oder für diese Fassung nicht aktuell.</p>}
                   {selectedWarnings.length > 0 && (
                     <div className="rounded-md border border-yellow-200 bg-yellow-50 px-3 py-2 text-sm text-yellow-900">
                       <div className="font-medium">Prüfhinweise</div>
@@ -559,6 +565,7 @@ export default function SummaryStep({
                             title={warning.excerpt || warning.message}
                           >
                             {warning.message}
+                            {isGemmaProse && warning.excerpt && <span className="block text-xs whitespace-pre-wrap">{warning.excerpt}</span>}
                           </button>
                         ))}
 
@@ -628,6 +635,8 @@ export default function SummaryStep({
                         );
                       })}
                     </div>
+                  ) : summaries[selectedSummaryIndex] && isGemmaProse ? (
+                    <ProtocolText text={summaries[selectedSummaryIndex]!} />
                   ) : summaries[selectedSummaryIndex] ? (
                     <div className="prose max-w-none text-gray-700 whitespace-pre-wrap">
                       {summaries[selectedSummaryIndex]}

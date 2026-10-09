@@ -5,6 +5,8 @@ import re
 import subprocess
 import pytest
 
+pytestmark = pytest.mark.skipif(os.name == 'nt', reason='Run POSIX shell contracts in the Linux test container')
+
 ROOT=Path(__file__).resolve().parents[3]
 
 
@@ -26,6 +28,47 @@ def test_bash_creates_defaults_once_and_preserves_existing_settings(tmp_path):
     (tmp_path/'.env').write_text('LLM_MODEL=custom-model\n')
     assert shell(code,tmp_path).returncode==0
     assert (tmp_path/'.env').read_text()=='LLM_MODEL=custom-model\n'
+
+
+def test_bash_port_settings_follow_compose_precedence(tmp_path):
+    (tmp_path/'.env').write_text("TEST_GEMMA_PORT='3001' # local port\n")
+    code = function('configured_port') + '\nconfigured_port TEST_GEMMA_PORT 3000'
+    assert shell(code, tmp_path).stdout.strip() == '3001'
+    code = "export TEST_GEMMA_PORT=3002\n" + code
+    assert shell(code, tmp_path).stdout.strip() == '3002'
+
+
+@pytest.mark.parametrize('valid_checksum', [True, False])
+def test_gemma_start_preserves_library_directory_and_checks_assets(tmp_path, valid_checksum):
+    import hashlib
+    runtime = tmp_path / 'app'
+    models = tmp_path / 'models'
+    runtime.mkdir()
+    models.mkdir()
+    # Like the pinned image, the server requires its own working directory.
+    server = runtime / 'llama-server'
+    server.write_text('''#!/bin/sh
+test "$PWD" = "$(dirname "$0")" || exit 42
+if [ "$1" = --version ]; then echo VERSION; else echo SERVER_STARTED; printf '%s\\n' "$@"; fi
+''')
+    server.chmod(0o755)
+    (models / 'weights.gguf').write_bytes(b'model')
+    digest = hashlib.sha256(b'model' if valid_checksum else b'corrupt').hexdigest()
+    (models / 'checksums.sha256').write_text(f'{digest}  weights.gguf\n')
+    script = (ROOT / 'scripts/llama-entrypoint.sh').read_text()
+    script = script.replace('/app', str(runtime)).replace('/models', str(models))
+    result = subprocess.run(['sh', '-c', script], cwd=tmp_path, text=True,
+                            capture_output=True, timeout=10)
+    assert ('SERVER_STARTED' in result.stdout) == valid_checksum
+    assert (result.returncode == 0) == valid_checksum, result.stderr
+    assert 'VERSION' in result.stdout
+    if valid_checksum:
+        arguments = result.stdout.split('SERVER_STARTED\n', 1)[1].splitlines()
+        def value(flag):
+            return int(arguments[arguments.index(flag) + 1])
+        # Gemma's non-causal image attention must fit in a single microbatch;
+        # otherwise llama.cpp silently lowers the configured image resolution.
+        assert value('--image-max-tokens') <= value('--ubatch-size') <= value('--batch-size')
 
 
 @pytest.mark.parametrize('scenario',['fresh','existing','invalid'])

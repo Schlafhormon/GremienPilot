@@ -62,6 +62,7 @@ RUN uv pip install --system \
 # Copy project files
 COPY pyproject.toml uv.lock ./
 COPY *.py ./
+COPY prompt_gemma.txt ./
 
 # Install remaining dependencies. torch/torchaudio already satisfy the
 # constraints above, so uv will not reinstall them from the default index.
@@ -70,6 +71,10 @@ RUN uv pip install --system -e .
 # Create runtime directories after editable install so setuptools package
 # discovery does not treat them as Python packages.
 RUN mkdir -p uploads data
+
+# Public Gemma tokenizer, with the same revision as the other runtime images.
+COPY third_party ./third_party
+RUN python llm_assets.py
 
 # Install nvidia-cudnn-cu12 for WhisperX GPU support
 # This provides the cuDNN libraries needed for faster-whisper

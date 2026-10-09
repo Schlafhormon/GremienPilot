@@ -1,8 +1,11 @@
 import { useEffect, useRef } from 'react';
+import type { SummaryStyle } from '../types';
 import SpeakerProfileManager from './SpeakerProfileManager';
 
 export interface LLMSettings {
   model: string;
+  summaryStyle?: SummaryStyle;
+  customSummaryPrompt?: string;
   // Summary preference; retain this key for existing localStorage settings.
   systemPrompt: string;
 }
@@ -30,8 +33,38 @@ Strukturiere die Auswertung fachlich nach:
 - Maßnahmen und offene Punkte
 - Unsicherheiten`;
 
+export const GEMMA_SYSTEM_PROMPT = `Du bist Protokollführer/in eines Ausschusses. Wandle das wörtliche Transkript des folgenden Tagesordnungspunkts (TOP) in den entsprechenden Abschnitt eines formellen Ausschussprotokolls im amtlichen Stil um.
+
+Sprache und Stil:
+- Schreibe ausschließlich auf Deutsch in korrektem, sachlichem Verwaltungsdeutsch.
+- Gib Wortbeiträge in indirekter Rede (Konjunktiv I) und in der dritten Person wieder (z. B. „Er betont, dass …“, „Sie verweist darauf, dass …“).
+- Nenne Sprecher/innen mit Name und, wenn bekannt, Rolle/Fraktion, z. B. „Gustav Gans“, „Kristy Augustin (CDU)“, „Steffen Freiberg (Minister für Bildung, Jugend und Sport)“.
+
+Formatierung:
+- Beginne mit der Überschrift „## Zu TOP N:“ (N ist die Nummer aus der vorangestellten „TOP:“-Angabe).
+- Formuliere Beschlüsse als „Der [Gremium] beschließt einstimmig/mehrheitlich (Ja : Nein : Enthaltungen) …“ und gib Abstimmungsergebnisse stets als konkretes Tripel (Ja : Nein : Enthaltungen) bzw. als „einstimmig“/„mehrheitlich“ an — niemals als leeren Platzhalter.
+- Trenne, sofern vorhanden, Beschlüsse/Festlegungen von der Zusammenfassung der Beratung („Aus der Beratung“).
+
+Umgang mit dem Rohmaterial (Transkript):
+- Das Transkript ist eine automatische Verschriftlichung (ASR) mit Sprecher-Diarisierung; jede Zeile hat die Form „Name: Wortbeitrag“ und kann Erkennungsfehler enthalten, die NICHT ins Protokoll gehören.
+- Ignoriere offensichtliche Transkriptionsfehler und sinnlose Wiederholungen (z. B. mehrfach hintereinander „Vielen Dank.“); wiederhole sie nicht und werte sie nicht als Inhalt.
+
+Inhaltliche Treue:
+- Fasse ausschließlich zusammen, was tatsächlich gesagt wurde. Füge keine Inhalte, Wertungen oder Fakten hinzu, die nicht im Transkript stehen, und verändere oder verfälsche keine Aussagen (auch keine Namen oder Zahlen).
+- Im Zweifel knapper und näher am Wortlaut bleiben.`;
+
+export const DEFAULT_CUSTOM_SUMMARY_PROMPT = `Erstelle ein sachliches, gut lesbares Sitzungsprotokoll auf Deutsch.
+Beginne mit einer Überschrift zum Tagesordnungspunkt. Fasse die wesentlichen
+Argumente in kurzen Absätzen zusammen. Stelle tatsächlich gefasste Beschlüsse
+und Abstimmungsergebnisse in einem eigenen Abschnitt dar. Nenne Aufgaben,
+Verantwortliche und Fristen, soweit sie genannt wurden, sowie offene Fragen.
+Verwende bei Bedarf Markdown-Überschriften, Listen oder übersichtliche Tabellen.
+Halte den Text so knapp wie möglich und so ausführlich wie fachlich nötig.`;
+
 export const DEFAULT_LLM_SETTINGS: LLMSettings = {
   model: '',
+  summaryStyle: 'gemma4-lora',
+  customSummaryPrompt: DEFAULT_CUSTOM_SUMMARY_PROMPT,
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
 };
 
@@ -42,6 +75,9 @@ export default function LLMSettingsPanel({
   onSettingsChange,
 }: LLMSettingsPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const protocolStyle = !settings.model || settings.model === 'gemma-4-31b';
+  const customStyle = protocolStyle && settings.summaryStyle === 'gemma4-custom';
+  const fixedPrompt = protocolStyle && !customStyle;
 
   // Close on escape key
   useEffect(() => {
@@ -71,11 +107,12 @@ export default function LLMSettingsPanel({
   }, [isOpen, onClose]);
 
   const handlePromptChange = (systemPrompt: string) => {
-    onSettingsChange({ ...settings, systemPrompt });
+    onSettingsChange(customStyle ? { ...settings, customSummaryPrompt: systemPrompt } : { ...settings, systemPrompt });
   };
 
   const handleResetPrompt = () => {
-    onSettingsChange({ ...settings, systemPrompt: DEFAULT_SYSTEM_PROMPT });
+    onSettingsChange(customStyle ? { ...settings, customSummaryPrompt: DEFAULT_CUSTOM_SUMMARY_PROMPT }
+      : { ...settings, systemPrompt: DEFAULT_SYSTEM_PROMPT });
   };
 
   if (!isOpen) return null;
@@ -116,6 +153,17 @@ export default function LLMSettingsPanel({
             {settings.model && <button type="button" className="mt-2 text-sm text-blue-700"
               onClick={() => onSettingsChange({ ...settings, model: '' })}>Servermodell verwenden</button>}
           </div>
+          {protocolStyle && <div>
+            <label htmlFor="summary-style" className="block text-sm font-medium text-gray-700">Zusammenfassungsstil</label>
+            <select id="summary-style" value={settings.summaryStyle ?? 'gemma4-lora'}
+              onChange={(event) => onSettingsChange({ ...settings, summaryStyle: event.target.value as SummaryStyle })}
+              className="mt-2 w-full rounded border border-gray-300 p-2 text-sm">
+              <option value="gemma4-lora">Landtags-Stil mit LoRA</option>
+              <option value="gemma4-custom">Eigener Stil ohne LoRA</option>
+            </select>
+            <p className="mt-2 text-xs text-gray-500">Dasselbe Gemma-Modell; Adapterstärke {customStyle ? '0' : '1'}.
+              Änderungen gelten erst für neue Generierungen. Vorhandene Texte und Prüfstände bleiben erhalten.</p>
+          </div>}
           {/* System Prompt */}
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -124,6 +172,7 @@ export default function LLMSettingsPanel({
               </label>
               <button
                 onClick={handleResetPrompt}
+                disabled={fixedPrompt}
                 className="text-xs text-blue-600 hover:text-blue-700 flex items-center gap-1"
               >
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -133,7 +182,8 @@ export default function LLMSettingsPanel({
               </button>
             </div>
             <textarea
-              value={settings.systemPrompt}
+              value={fixedPrompt ? GEMMA_SYSTEM_PROMPT : customStyle ? settings.customSummaryPrompt ?? DEFAULT_CUSTOM_SUMMARY_PROMPT : settings.systemPrompt}
+              readOnly={fixedPrompt}
               onChange={(e) => handlePromptChange(e.target.value)}
               aria-label="System-Prompt"
               rows={16}
@@ -141,7 +191,11 @@ export default function LLMSettingsPanel({
               placeholder="System-Prompt eingeben..."
             />
             <p className="mt-2 text-xs text-gray-500">
-              Der System-Prompt definiert, wie die KI die Zusammenfassungen erstellt.
+              {customStyle
+                ? 'Eigene Vorgaben für Gliederung, Umfang, Sprachton und Beschlüsse. Keine erfundenen Aussagen oder Beschlüsse. Fast erstellt einen ungeprüften Entwurf; Slow prüft ihn zweimal unabhängig gegen das Originaltranskript, ohne ihn umzuschreiben.'
+                : protocolStyle
+                ? 'Gemma 4 erzeugt den Protokolltext mit dem HPI-Adapter, ohne Absatzquellen oder automatische Kategorien. Fast übernimmt ihn ungeprüft; Slow prüft ihn zweimal unabhängig gegen das Originaltranskript. PDF-Auswertung und TOP-Zuordnung verwenden weiterhin das Basismodell.'
+                : 'Der System-Prompt definiert, wie die KI die Zusammenfassungen erstellt.'}
             </p>
           </div>
 

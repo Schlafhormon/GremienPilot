@@ -310,6 +310,9 @@ def init_db(db_path: Path | None = None) -> None:
         session_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(sessions)").fetchall()
         }
+        for column in ('summary_style', 'custom_summary_prompt'):
+            if column not in session_columns:
+                db.execute(f'ALTER TABLE sessions ADD COLUMN {column} TEXT')
         if "export_metadata_json" not in session_columns:
             db.execute(
                 """
@@ -1476,7 +1479,7 @@ def save_session(
         db.execute("BEGIN IMMEDIATE")
         fence(db)
         existing = db.execute(
-            "SELECT created_at, revision, processing_mode, enforce_top_order, pdf_source_job_id FROM sessions WHERE session_id = ?",
+            "SELECT created_at, revision, processing_mode, enforce_top_order, pdf_source_job_id, summary_style, custom_summary_prompt FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         created_at = float(existing["created_at"]) if existing else now
@@ -1493,9 +1496,9 @@ def save_session(
             """
             INSERT INTO sessions (
                 session_id, job_id, current_step, skipped_assignment, export_metadata_json,
-                agenda_proposals_json, processing_mode, enforce_top_order, pdf_source_job_id, revision, created_at, updated_at
+                agenda_proposals_json, processing_mode, enforce_top_order, pdf_source_job_id, summary_style, custom_summary_prompt, revision, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 job_id = excluded.job_id,
                 current_step = excluded.current_step,
@@ -1505,6 +1508,8 @@ def save_session(
                 processing_mode = excluded.processing_mode,
                 enforce_top_order = excluded.enforce_top_order,
                 pdf_source_job_id = excluded.pdf_source_job_id,
+                summary_style = excluded.summary_style,
+                custom_summary_prompt = excluded.custom_summary_prompt,
                 revision = sessions.revision + ?,
                 updated_at = excluded.updated_at
             """,
@@ -1518,6 +1523,8 @@ def save_session(
                 state.get("processing_mode", existing["processing_mode"] if existing else "slow"),
                 int(state.get("enforce_top_order", existing["enforce_top_order"] if existing else False)),
                 state.get("pdf_source_job_id", existing["pdf_source_job_id"] if existing else None),
+                state.get("summary_style", existing["summary_style"] if existing else None),
+                state.get("custom_summary_prompt", existing["custom_summary_prompt"] if existing else None),
                 created_at,
                 now,
                 1 if bump_revision else 0,

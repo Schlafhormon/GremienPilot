@@ -54,6 +54,7 @@ export default function ProcessingStep({
     status ||
     PIPELINE_STAGES.find((step) => step.id === activeStage)?.label ||
     'Pipeline wird verarbeitet...';
+  const summaryPhase = pipeline?.execution?.progress?.summary_phase ?? pipeline?.execution?.progress?.phase;
 
   const statusClass =
     pipeline?.status === 'failed'
@@ -134,6 +135,8 @@ export default function ProcessingStep({
         {stageStatus && (
           <div className={`mt-6 p-4 rounded-lg ${statusClass}`}>
             <p className="text-sm">{stageStatus}</p>
+            {summaryPhase === 'summary_protocol' && <p className="text-sm">LoRA-Protokolltext wird erzeugt.</p>}
+            {['summary_final_review', 'summary_consolidated_review'].includes(summaryPhase ?? '') && <p className="text-sm">Unabhängige Inhaltsprüfung gegen das Originaltranskript läuft.</p>}
             {pipeline?.execution?.progress?.page && <p className="text-sm">
               PDF: Seite {pipeline.execution.progress.page}/{pipeline.execution.progress.total_pages} ·
               {(pipeline.execution.progress.pdf_phase ?? pipeline.execution.progress.phase) === 'pdf_review' ? ' Nachprüfung' : ' Auswertung'}

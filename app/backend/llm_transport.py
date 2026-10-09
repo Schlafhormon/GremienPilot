@@ -390,7 +390,37 @@ async def _generate(client, config, kwargs, progress):
         else:
             payload = {'model': config.model, 'messages': _openai_messages(messages), 'stream': True,
                        config.output_parameter: cap, 'temperature': snapshot['temperature']}
-            payload.update(config.reasoning_options)
+            if config.provider == 'llama-cpp':
+                # Per-request selection avoids a global mutable adapter toggle.
+                payload.update(lora=[{'id': config.lora_id, 'scale': config.lora_scale}],
+                    chat_template_kwargs={'enable_thinking': think not in (False, None)},
+                    reasoning_budget=config.thinking_tokens if think not in (False, None) else 0,
+                    stream_options={'include_usage': True},
+                    repeat_penalty=1.0, min_p=0.0, top_k=config.top_k if config.top_k is not None else 64,
+                    stop=['<turn|>', '<|end_of_turn|>'])
+                if config.lora_scale:
+                    if response_format and response_format.get('type') != 'text':
+                        raise ModelConfigurationError('Protocol LoRA must not be used for structured output')
+                    if any(_parts(messages)[1]):
+                        raise ModelConfigurationError('Protocol LoRA must not be used for images')
+                # Verify the fixed service contract before every request, including
+                # resumed jobs. This endpoint does not wake a sleeping server.
+                async with httpx.AsyncClient(timeout=config.http_timeout, headers=_headers(config)) as http:
+                    props = await _json(http, 'GET', _native_url(config) + '/props')
+                    actual = props.get('default_generation_settings', {}).get('n_ctx')
+                    if type(actual) is not int or actual < config.context_tokens:
+                        raise ModelConfigurationError('llama.cpp context is smaller than LLM_CONTEXT_TOKENS')
+                    if any(_parts(messages)[1]) and not props.get('modalities', {}).get('vision'):
+                        raise ModelConfigurationError('llama.cpp requires the Gemma vision projector for PDF images')
+                    snapshot['verified_context_tokens'] = actual
+                    if config.lora_scale:
+                        adapters = await _json(http, 'GET', _native_url(config) + '/lora-adapters')
+                        if not any(a.get('id') == config.lora_id and
+                                   Path(a.get('path', '')).name == 'gemma-4-31b-protokoll-f16.gguf'
+                                   for a in adapters):
+                            raise ModelConfigurationError('HPI protocol adapter is not loaded at LLM_LORA_ID')
+            else:
+                payload.update(config.reasoning_options)
             if response_format:
                 payload['response_format'] = response_format
             for key, value in [('top_p', config.top_p), ('seed', config.seed)]:
@@ -399,6 +429,8 @@ async def _generate(client, config, kwargs, progress):
             async for data in _openai_stream(client, config, payload):
                 if data.get('model'):
                     snapshot['provider_model'] = data['model']
+                    if config.provider == 'llama-cpp' and data['model'] != config.model:
+                        raise ModelConfigurationError('llama.cpp returned a different model alias')
                 if data.get('system_fingerprint'):
                     snapshot['system_fingerprint'] = data['system_fingerprint']
                 if 'error' in data:
@@ -412,11 +444,14 @@ async def _generate(client, config, kwargs, progress):
                         finish = choice['finish_reason']
                 if data.get('usage'):
                     snapshot['usage'] = data['usage']
+                    snapshot.update(prompt_tokens=data['usage'].get('prompt_tokens'),
+                                    generated_tokens=data['usage'].get('completion_tokens'))
                     if data['usage'].get('total_tokens', 0) > config.context_tokens:
                         raise ContextBudgetError('Provider context usage exceeds configured budget')
             if finish != 'stop':
                 raise IncompleteResponseError(f'LLM output incomplete ({finish})')
-            snapshot.update(digest=config.model_revision or None, verified_context_tokens=None)
+            snapshot.update(digest=config.model_revision or None)
+            snapshot.setdefault('verified_context_tokens', None)
         answer = ''.join(content)
         if not answer.strip():
             raise IncompleteResponseError('LLM returned no final content')

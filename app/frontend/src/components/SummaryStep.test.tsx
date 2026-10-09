@@ -403,3 +403,49 @@ it('blocks export for a technically incomplete pipeline with retained summaries'
   expect(screen.getByText(/Pipeline technisch unvollständig/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'DOCX' })).toBeDisabled();
 });
+
+const gemmaText = '## Zu TOP 1:\n\n**Aus der Beratung**\n\nUnveränderter Absatz.\n\nBeschlüsse und Festlegungen:\nKein Beschluss.\n';
+const gemmaStructure = { discussion: [], decisions: [], votes: [], action_items: [], open_points: [], uncertainties: [],
+  protocol_text: gemmaText, verification: { source_contract: 'gemma-prose-review-v1' } };
+
+it('formats Gemma prose and keeps content hints separate from categories and sources', async () => {
+  const user = userEvent.setup();
+  const setSummaries = vi.fn();
+  renderSummaryStep({ summaries: { 0: gemmaText }, setSummaries, summaryReviews: { 0: {
+    structured: gemmaStructure, source_links: [], llm_usage: { processing_mode: 'slow', processing_complete: true, review_complete: true },
+    review_warnings: [{ kind: 'contradiction', message: 'Bitte die Zahl 9 gegen 5 prüfen.', severity: 'warning', line_indices: [], excerpt: '9 Euro' }],
+  } } });
+  expect(screen.getByRole('heading', { name: 'Zu TOP 1:' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Aus der Beratung' })).toBeInTheDocument();
+  expect(screen.getByText('Unveränderter Absatz.')).toBeInTheDocument();
+  expect(screen.getByText('Bitte die Zahl 9 gegen 5 prüfen.')).toBeInTheDocument();
+  expect(screen.getByText('9 Euro')).toBeInTheDocument();
+  expect(screen.getByText(/zwei unabhängige Inhaltsprüfungen abgeschlossen/)).toBeInTheDocument();
+  expect(screen.getByText(/Keine Garantie für Fehlerfreiheit/)).toBeInTheDocument();
+  expect(screen.queryByText('Diskussion')).not.toBeInTheDocument();
+  expect(screen.queryByText('Quelle fehlt')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Exakt belegt/)).not.toBeInTheDocument();
+  const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+  await user.click(screen.getByTitle('In Zwischenablage kopieren'));
+  expect(copy).toHaveBeenCalledWith(gemmaText);
+  await user.click(screen.getByTitle('Bearbeiten'));
+  expect(screen.getByLabelText('Zusammenfassung bearbeiten')).toHaveValue(gemmaText);
+  await user.click(screen.getByRole('button', { name: 'Speichern' }));
+  expect(setSummaries).toHaveBeenCalledWith({ 0: gemmaText });
+});
+
+it.each(['incomplete', 'stale'])('never labels a %s Gemma review as complete', status => {
+  renderSummaryStep({ summaries: { 0: gemmaText }, summaryReviews: { 0: {
+    structured: gemmaStructure, source_links: [], review_warnings: [],
+    llm_usage: { processing_mode: 'slow', processing_complete: true, review_complete: false, review_status: status },
+  } } });
+  expect(screen.getByText(/Entwurf erhalten; Inhaltsprüfung unvollständig/)).toBeInTheDocument();
+  expect(screen.queryByText(/Inhaltsprüfungen abgeschlossen/)).not.toBeInTheDocument();
+});
+
+it('shows the current Gemma review phase while model transport is generating', () => {
+  renderSummaryStep({ summaryJob: { summary_job_id: 'job', session_id: 'session', status: 'processing',
+    progress: 50, current_top: 1, total_tops: 1, top_ids: ['a'], execution: { job_id: 'job', kind: 'summary', state: 'running',
+      progress: { phase: 'generating', summary_phase: 'summary_final_review' } } } });
+  expect(screen.getByText(/Unabhängige Inhaltsprüfung gegen das Originaltranskript läuft/)).toBeInTheDocument();
+});

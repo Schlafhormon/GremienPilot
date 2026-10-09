@@ -124,7 +124,8 @@ def version_snapshot(payload=None):
     from processing_mode import VERSION as processing_version
     files = ("processing_mode.py", "llm_config.py", "durable_jobs.py", "summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_order.py", "agenda_detection.py",
              "extract_tops.py", "llm_transport.py", "main.py", "agenda_context.py",
-             "agenda_labels.py", "assignment_suggestions.py", "persistence.py", "source_contract.py")
+             "agenda_labels.py", "assignment_suggestions.py", "persistence.py", "source_contract.py",
+             "gemma_summary.py", "prompt_gemma.txt")
     policy_keys = (
         "PDF_RENDER_DPI", "PDF_MAX_PAGE_PIXELS", "PDF_MAX_PAGES", "PDF_OUTPUT_TOKENS",
         "PDF_MODEL_ATTEMPTS", "PDF_REVIEW_ROUNDS",
@@ -143,9 +144,12 @@ def version_snapshot(payload=None):
         refs = json.loads(refs)
     request = payload.get('request') or refs.get('options') or refs
     mode = request.get('processing_mode', payload.get('processing_mode', 'slow'))
+    summary = get_llm_config(request.get('summary_model') or request.get('model'), processing_mode=mode).with_summary_style(
+        request.get('summary_style'), request.get('custom_summary_prompt'))
     models = {name: get_llm_config(request.get(name), processing_mode=mode).public_snapshot()
               for name in ('model', 'agenda_model', 'summary_model') if request.get(name)}
-    return {"processing": {"mode": request.get("processing_mode", payload.get("processing_mode", "slow")),
+    return {"summary": (summary.for_protocol() if summary.is_gemma_prose else summary).public_snapshot(),
+            "processing": {"mode": request.get("processing_mode", payload.get("processing_mode", "slow")),
                            "version": processing_version}, "transcription": {
         "code": hashlib.sha256(Path(__file__).with_name('transcribe.py').read_bytes()).hexdigest(),
         "policy": {key: os.environ.get(key) for key in ('WHISPER_MODEL', 'WHISPER_DEVICE',
@@ -282,6 +286,9 @@ def progress(value):
                 previous = json.loads(row[0]) if row and row[0] else {}
                 if previous.get('agenda_phase'):
                     value = {**{k: previous[k] for k in ('agenda_phase', 'processed_lines', 'total_lines', 'model_calls') if k in previous}, **value}
+                summary_phase = previous.get('summary_phase', previous.get('phase', ''))
+                if summary_phase.startswith('summary_'):
+                    value = {**value, 'summary_phase': summary_phase}
                 phase = previous.get('pdf_phase', previous.get('phase', ''))
                 if phase.startswith('pdf_') and phase != 'pdf_verified':
                     value = {**{k: previous[k] for k in ('page', 'total_pages', 'round') if k in previous},

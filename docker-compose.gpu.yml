@@ -12,6 +12,9 @@ services:
     environment:
       # Allow CPU transcription when the LLM needs the available VRAM.
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      - LLM_GPU_LAYERS=${LLM_GPU_LAYERS:-12}
+      - LLM_TIMEOUT_SECONDS=${LLM_TIMEOUT_SECONDS:-600}
+      - LLM_LOAD_TIMEOUT_SECONDS=${LLM_LOAD_TIMEOUT_SECONDS:-3600}
     deploy:
       resources:
         reservations:
@@ -20,7 +23,10 @@ services:
               count: 1
               capabilities: [gpu]
 
-  ollama:
+  llama:
+    image: ${LLAMA_GPU_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b11429}
+    environment:
+      - LLM_GPU_LAYERS=${LLM_GPU_LAYERS:-12}
     deploy:
       resources:
         reservations:
