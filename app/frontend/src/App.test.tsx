@@ -392,6 +392,36 @@ describe('App pipeline flow', () => {
     expect(startSummaryJob).not.toHaveBeenCalled();
   });
 
+  it('retains Gemma findings when editing and autosaving the reopened prose', async () => {
+    const user = userEvent.setup();
+    const text = '## Zu TOP 1:\n\nUnveränderter Entwurf.';
+    const finding = { kind: 'contradiction', message: 'Zahl 9 gegen 5 prüfen.', severity: 'warning', line_indices: [], excerpt: '9 Euro' };
+    const review = { structured: { discussion: [], decisions: [], votes: [], action_items: [], open_points: [], uncertainties: [],
+      protocol_text: text, verification: { source_contract: 'gemma-prose-review-v1', review_complete: true },
+      review_questions: [{ kind: 'contradiction', question: finding.message, excerpts: ['9 Euro'] }] },
+      source_links: [], review_warnings: [finding], llm_usage: { processing_mode: 'slow', processing_complete: true, review_complete: true } };
+    const original = pipelineResult({ revision: 1, summaries: { 0: text }, summary_reviews: { 0: review } }).session;
+    vi.mocked(loadSession).mockResolvedValue(original);
+    vi.mocked(saveSession).mockImplementation(async payload => ({ ...payload, session_id: 'session-1', revision: (payload.revision ?? 0) + 1 }));
+    window.history.replaceState(null, '', '/sessions/session-1');
+    render(<App />);
+    await screen.findByText(/Unveränderter Entwurf\./);
+    await user.click(screen.getByTitle('Bearbeiten'));
+    const edited = text + '\n\nManuelle Ergänzung.';
+    fireEvent.change(screen.getByLabelText('Zusammenfassung bearbeiten'), { target: { value: edited } });
+    await user.click(screen.getByRole('button', { name: 'Speichern' }));
+    expect(screen.getByText(finding.message)).toBeInTheDocument();
+    expect(screen.getByText(/Entwurf erhalten; Inhaltsprüfung unvollständig/)).toBeInTheDocument();
+    expect(screen.queryByText(/Inhaltsprüfungen abgeschlossen/)).not.toBeInTheDocument();
+    await waitFor(() => expect(saveSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      summaries: { 0: edited }, summary_reviews: { 0: expect.objectContaining({
+        structured: expect.objectContaining({ protocol_text: edited, review_questions: review.structured.review_questions,
+          verification: expect.objectContaining({ review_complete: false, review_status: 'stale' }) }),
+        review_warnings: expect.arrayContaining([finding]),
+      }) },
+    })));
+  });
+
   it('merges a delayed single-job result before stopping polling and exports and saves that result', async () => {
     const user = userEvent.setup();
     const original = pipelineResult({ revision: 1, summary_reviews: {

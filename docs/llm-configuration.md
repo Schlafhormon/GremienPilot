@@ -29,14 +29,15 @@ Der Hostport 8080 ist nur an Loopback gebunden. CPU-Betrieb verwendet das
   Person zusammengeführt. System- und Nutzervorgabe stehen gemeinsam im
   Nutzerturn, entsprechend dem Unsloth-Produktionsvertrag. Temperatur 0,3,
   top_p 0,9, kein Thinking und keine Wiederholungsstrafe; `<turn|>` beendet die Ausgabe.
-- **Quellen, PDF und TOP-Zuordnung:** derselbe Modellbestand mit Adapterstärke 0.
+- **Inhaltsprüfung, PDF und TOP-Zuordnung:** derselbe Modellbestand mit Adapterstärke 0.
   JSON-Schemata und bestehende Quellenverträge bleiben erhalten. PDF-Seiten
   verwenden den F16-Bildprojektor; maximal 1.120 Bildtokens je Seite.
-- **Fast:** Quellenzuordnung zum unveränderten Protokolltext, keine unabhängige
-  Inhaltsprüfung. **Slow:** zwei unabhängige Prüfungen je Abschnitt gegen dessen Originalquellen;
-  Widersprüche und offene Fragen werden im Text und in Quellenhinweisen markiert.
-  Das Basismodell schreibt die Adapterabsätze dabei nicht um. Lange TOPs werden
-  geteilt; ihre Absätze bleiben erhalten und können sich inhaltlich überschneiden.
+- **Fast:** ausschließlich LoRA-Protokolltext, als ungeprüfter Entwurf.
+  **Slow:** zwei unabhängige Prüfungen je Teiltext gegen dessen vollständiges
+  Originaltranskript; konkrete Hinweise separat. Beide Modi verzichten auf eine
+  Quellen- und Kategorienzuordnung der Absätze. Text und Überschriften bleiben
+  unverändert. Lange TOPs werden ohne stilles Abschneiden geteilt; bei nicht
+  durchführbarer Prüfung bleibt der Entwurf ausdrücklich unvollständig geprüft.
 
 Eigene Zusammenfassungsprompts werden bei `LLM_SUMMARY_STYLE=gemma4-lora` nicht
 angewandt; das Frontend zeigt den festen Prompt. `structured` aktiviert den

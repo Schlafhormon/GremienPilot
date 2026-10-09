@@ -85,8 +85,9 @@ fachliche Unsicherheiten und technische Ausfälle bleiben zur Prüfung sichtbar.
 ## Fast und Slow pro Sitzung
 
 Auf der Startseite wählt der Schalter **Fast / Slow** den Verarbeitungsmodus der
-Sitzung. **Slow** ist der Standard und behält die gründlichen Quellenprüfungen,
-unabhängigen Modellbewertungen und Korrekturdurchläufe bei. **Fast** verarbeitet
+Sitzung. **Slow** ist der Standard und behält die unabhängigen Modellprüfungen bei.
+Für Gemma-LoRA wird der unveränderte Protokollentwurf zweimal direkt gegen das
+Originaltranskript geprüft; Prüfhinweise stehen getrennt vom Text. **Fast** verarbeitet
 PDF, TOP-Zuordnung und Zusammenfassungen ohne zusätzliche inhaltliche Modellprüfung.
 Die Ergebnisse entstehen mit weniger Modellaufrufen und können ungenauer sein.
 
@@ -215,10 +216,14 @@ Die Standardwerte im Überblick:
 | Zuordnungsblöcke | bis zu 80 Zeilen, kompaktes Antwortformat |
 | Audio-Upload | bis zu 2 GiB |
 
-Der Adapter schreibt Protokollabsätze mit seinem festen Trainingsprompt. PDF,
-TOP-Zuordnung und Quellenprüfung verwenden dasselbe Basismodell ohne Adapter.
-Die Protokollabsätze bleiben bei der Quellenprüfung unverändert; Beanstandungen
-werden markiert. Auf 8-GB-GPUs arbeitet die CPU mit: 32 GB RAM sind vorgesehen,
+Der Adapter schreibt den Protokolltext mit seinem festen Trainingsprompt. Eine
+nachträgliche Absatzquellen- oder Kategorienzuordnung entfällt in beiden Modi.
+Fast übernimmt ausschließlich den ungeprüften LoRA-Entwurf. Slow prüft jeden Teil
+gegen seine vollständigen Originalbeiträge und erhält den Text unverändert;
+Hinweise werden separat gespeichert und exportiert. Eine abgeschlossene Prüfung
+garantiert keine Fehlerfreiheit; bei Prüffehlern bleibt der Entwurf erhalten.
+PDF und TOP-Zuordnung verwenden weiterhin das Basismodell ohne Adapter.
+Auf 8-GB-GPUs arbeitet die CPU mit: 32 GB RAM sind vorgesehen,
 die Verarbeitung kann deutlich länger dauern. [Konfiguration](docs/llm-configuration.md).
 
 Nach erfolgreichem Start ist die Anwendung erreichbar unter:

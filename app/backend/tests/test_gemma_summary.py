@@ -27,113 +27,232 @@ def test_displayed_prompt_matches_inference_prompt():
     assert re.search(r'export const GEMMA_SYSTEM_PROMPT = `([^`]+)`;', source)[1] == gemma.PROMPT
 
 
-def test_headings_removed_without_losing_inline_prose():
-    assert gemma.paragraphs('## Zu TOP 2:\n\n**Aus der Beratung**\n\nMüller erkläre, es sei teuer.\n\n'
-                            'Beschlüsse und Festlegungen:\nDer Ausschuss beschließt einstimmig.') == [
-        'Müller erkläre, es sei teuer.', 'Der Ausschuss beschließt einstimmig.']
-    assert gemma.paragraphs('## Zu TOP 1: Der Ausschuss vertagt.') == ['Der Ausschuss vertagt.']
+DRAFT = '## Zu TOP 2:\n\n**Aus der Beratung**\n\nMüller erkläre, die Kosten betrügen 9 Euro.\n\nBeschlüsse und Festlegungen:\nKein Beschluss.\n'
+ORIGINAL = ['Müller: Die Kosten betragen 5 Euro.', 'A: Es gibt  keinen Beschluss.']
+FINDING = dict(kind='contradiction', question='Im Entwurf stehen 9 Euro, im Original 5 Euro. Bitte prüfen.', excerpts=['9 Euro', '5 Euro'])
+
+
+def config(mode='slow', context=16384):
+    return LLMConfig(base_url='http://llama:8080/v1', model='gemma-4-31b', api_key='local',
+        provider='llama-cpp', summary_style='gemma4-lora', context_tokens=context,
+        processing_mode=mode, reasoning_effort='none')
+
+
+def response(text):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+
+
+def setup_model(monkeypatch, mode='slow', review=None, draft=DRAFT):
+    cfg = config(mode)
+    calls = []
+    monkeypatch.setattr(summarize, 'get_llm_config', lambda model=None: cfg)
+    monkeypatch.setattr(summarize, '_load_openai_client', lambda _: None)
+    monkeypatch.setattr(summarize, 'check_llm_availability', lambda **_: None)
+    def complete(client, settings, **kwargs):
+        calls.append((settings, kwargs))
+        if settings.lora_scale:
+            return response(draft if isinstance(draft, str) else draft(kwargs))
+        body = json.loads(kwargs['messages'][1]['content'])
+        return response(json.dumps(review(body) if review else dict(complete=True, issues=[FINDING])))
+    monkeypatch.setattr(gemma, 'complete', complete)
+    return calls
+
+
+def generate(mode='slow', lines=None):
+    lines = ORIGINAL if lines is None else lines
+    return summarize.summarize_segment('2. Kosten', '\n'.join(lines), source_lines=lines, processing_mode=mode)
 
 
 @pytest.mark.parametrize('mode', ['fast', 'slow'])
-def test_prose_is_immutable_and_only_adapter_call_uses_training_prompt(monkeypatch, mode):
-    cfg = LLMConfig(base_url='http://llama:8080/v1', model='gemma-4-31b', api_key='local',
-        provider='llama-cpp', summary_style='gemma4-lora', context_tokens=32768,
-        processing_mode=mode, reasoning_effort='none')
-    calls = []
-    text = 'Müller erkläre, die Kosten betrügen 5 Euro.'
-    def complete(client, config, **kwargs):
-        calls.append((config, kwargs))
-        if config.lora_scale:
-            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='## Zu TOP 2:\n\n' + text))])
-        body = json.loads(kwargs['messages'][1]['content'])
-        ids = [r['source_id'] for r in body['source']]
-        if body['phase'] == 'protocol_sources':
-            answer = {'paragraphs': [{'id': 'P:0', 'section': 'discussion', 'scope': 'current',
-                                     'evidence': [{'source_id': ids[0]}]}], 'considered_source_ids': ids}
-        else:
-            answer = {'checked_claim_ids': [c['claim_id'] for c in body['candidate']],
-                      'considered_source_ids': ids, 'issues': []}
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(answer)))])
-    monkeypatch.setattr(gemma, 'complete', complete)
-    monkeypatch.setattr(summary_grounding, 'complete', complete)
-    with processing_scope(mode):
-        workflow = gemma.GemmaWorkflow(None, cfg, '2. Kosten', '', {})
-        claims, issues, rows, count = workflow.run(['Müller: Die Kosten betragen 5 Euro.'])
-    assert [c['text'] for c in claims] == [text]
-    assert count == 1 and not issues
-    assert sum(c.lora_scale == 1 for c, _ in calls) == 1
-    assert [json.loads(k['messages'][1]['content'])['phase'] for c, k in calls if not c.lora_scale] == (
-        ['protocol_sources'] if mode == 'fast' else ['protocol_sources', 'final_review', 'consolidated_review'])
-    assert claims[0]['grounding']['content_status'] == ('unreviewed' if mode == 'fast' else 'supported')
-    assert calls[0][1]['messages'][0]['content'].startswith(gemma.PROMPT)
+def test_only_protocol_and_direct_reviews_preserve_entire_prose(monkeypatch, mode):
+    calls = setup_model(monkeypatch, mode)
+    result = generate(mode)
+    assert result.summary == result.structured.protocol_text == DRAFT
+    assert result.structured.discussion == result.structured.decisions == result.structured.evidence == []
+    assert result.llm_usage['required_checks'] == ['protocol'] + ([] if mode == 'fast' else ['final_review', 'consolidated_review'])
+    assert result.llm_usage['processing_complete'] is True
+    assert result.llm_usage['review_complete'] is (mode == 'slow')
+    assert len(calls) == (1 if mode == 'fast' else 3)
+    assert calls[0][0].lora_scale == 1
     assert 'response_format' not in calls[0][1]
+    assert calls[0][1]['messages'] == gemma.protocol_messages('2. Kosten', ORIGINAL)
+    for settings, request in calls[1:]:
+        assert settings.lora_scale == 0
+        body = json.loads(request['messages'][1]['content'])
+        assert body['draft'] == DRAFT
+        assert body['original_transcript'] == '\n'.join(ORIGINAL)
+        assert set(body) == {'phase', 'draft', 'original_transcript'}
+        assert 'source_id' not in json.dumps(request['response_format'])
+        assert 'section' not in json.dumps(request['response_format'])
+    review = summarize.build_summary_review(structured=result.structured, summary=result.summary, lines=[dict(speaker=line.split(': ', 1)[0], text=line.split(': ', 1)[1]) for line in ORIGINAL])
+    assert review.source_links == []
+    assert not any(w.kind in ('missing_source', 'open_evidence') for w in review.warnings)
+    if mode == 'fast':
+        assert result.structured.review_questions == []
+        assert [w.kind for w in review.warnings] == ['review_skipped']
+    else:
+        assert all(w.message == FINDING['question'] for w in review.warnings)
+        assert all(w.excerpt == '9 Euro … 5 Euro' for w in review.warnings)
+
+
+def test_slow_without_findings_is_checked_but_does_not_invent_confirmation(monkeypatch):
+    setup_model(monkeypatch, review=lambda _: dict(complete=True, issues=[]))
+    result = generate()
+    assert result.llm_usage['review_complete'] is True
+    assert result.structured.review_questions == []
+    assert summarize.build_summary_review(structured=result.structured, summary=result.summary, lines=[dict(speaker=line.split(': ', 1)[0], text=line.split(': ', 1)[1]) for line in ORIGINAL]).warnings == []
+
+
+@pytest.mark.parametrize('mode', ['fast', 'slow'])
+def test_long_top_retains_all_parts_and_all_original_characters(monkeypatch, mode):
+    lines = ['Müller: ' + ('Satz mit Zahl 5. ' * 1500), 'B: Ende.']
+    serial = []
+    def draft(request):
+        text = f'## Teil {len(serial)}\n\nUnveränderter Absatz.\n'
+        serial.append((text, request['messages'][0]['content']))
+        return text
+    calls = setup_model(monkeypatch, mode, draft=draft, review=lambda _: dict(complete=True, issues=[]))
+    result = generate(mode, lines)
+    assert len(serial) > 1
+    assert result.summary == '\n\n'.join(text for text, _ in serial)
+    assert result.chunks_processed == len(serial)
+    assert len(calls) == len(serial) * (1 if mode == 'fast' else 3)
+    reviews = [json.loads(k['messages'][1]['content']) for c, k in calls if not c.lora_scale]
+    if mode == 'slow':
+        for phase in ('final_review', 'consolidated_review'):
+            windows = [r for r in reviews if r['phase'] == phase]
+            assert [r['draft'] for r in windows] == [text for text, _ in serial]
+            assert sum(r['original_transcript'].count('Satz mit Zahl 5.') for r in windows) == 1500
+            assert windows[-1]['original_transcript'].endswith('B: Ende.')
+    # Internal identities account for every original byte; none are emitted as paragraph evidence.
+    with processing_scope(mode):
+        w = gemma.GemmaWorkflow(None, config(mode), '2. Kosten', '', {})
+        w.run(lines)
+    for index, line in enumerate(lines):
+        assert ''.join(r['text'] for r in w.rows if r['line_index'] == index) == line
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'incomplete', 'malformed', 'invented_excerpt'])
+def test_failed_second_review_retains_verbatim_draft_and_prior_findings(monkeypatch, failure):
+    def review(body):
+        if body['phase'] == 'final_review':
+            return dict(complete=True, issues=[FINDING])
+        if failure == 'timeout':
+            raise TimeoutError('private backend error')
+        if failure == 'incomplete':
+            return dict(complete=False, issues=[])
+        if failure == 'invented_excerpt':
+            return dict(complete=True, issues=[dict(FINDING, excerpts=['Erfundener Ausschnitt'])])
+        return dict(issues=[])
+    setup_model(monkeypatch, review=review)
+    with pytest.raises((summarize.LLMCallError, summarize.StructuredOutputError)) as caught:
+        generate()
+    partial = caught.value.partial_result
+    assert partial.summary == partial.structured.protocol_text == DRAFT
+    assert partial.llm_usage['generation_complete'] is True
+    assert partial.llm_usage['review_complete'] is False
+    assert partial.llm_usage['processing_complete'] is False
+    assert partial.llm_usage['review_status'] == 'incomplete'
+    assert len(partial.structured.review_questions) == 1
+    review = summarize.build_summary_review(structured=partial.structured, summary=partial.summary, lines=[dict(speaker=line.split(': ', 1)[0], text=line.split(': ', 1)[1]) for line in ORIGINAL])
+    assert review.source_links == []
+    assert [w.kind for w in review.warnings] == ['contradiction', 'technical_incomplete']
+
+
+def test_oversized_draft_is_retained_without_truncated_review(monkeypatch):
+    text = 'Überschrift\n\n' + 'Wort ' * 4000
+    calls = setup_model(monkeypatch, draft=text)
+    with pytest.raises(gemma.ContextBudgetError) as caught:
+        generate()
+    assert caught.value.partial_result.summary == text
+    assert len(calls) == 1
+    assert caught.value.partial_result.llm_usage['review_complete'] is False
 
 
 def test_partial_utterance_retains_speaker():
-    cfg = LLMConfig(base_url='http://llama:8080/v1', model='gemma-4-31b', api_key='local',
-                    provider='llama-cpp', summary_style='gemma4-lora')
-    w = gemma.GemmaWorkflow(None, cfg, 'TOP 1', '', {})
+    w = gemma.GemmaWorkflow(None, config(), 'TOP 1', '', {})
     w.lines = ['Müller: Ein langer Beitrag.']
     assert w.source_text([{'line_index': 0, 'start_char': 15, 'text': 'Beitrag.'}]) == ['Müller: Beitrag.']
 
 
-def test_default_output_leaves_room_for_annotation(monkeypatch):
-    monkeypatch.delenv('SUMMARY_OUTPUT_TOKENS', raising=False)
-    cfg = LLMConfig(base_url='http://llama:8080/v1', model='gemma-4-31b', api_key='local',
-                    provider='llama-cpp', summary_style='gemma4-lora', context_tokens=16384)
-    workflow = gemma.GemmaWorkflow(None, cfg, 'TOP 1', '', {})
-    assert workflow.output == 4096
-    assert workflow.reserve + workflow.output + 1024 < cfg.context_tokens
+def test_resume_reuses_draft_and_successful_review_only(monkeypatch):
+    import threading
+    import durable_jobs as jobs
+    calls = setup_model(monkeypatch)
+    job = jobs.submit('test', {})
+    current = jobs.claim('test-worker', 60)
+    token = jobs.CURRENT.set(jobs.Runtime(current, 'test-worker', threading.Event()))
+    try:
+        original_complete = gemma.complete
+        def fail_second(client, cfg, **kwargs):
+            if not cfg.lora_scale and json.loads(kwargs['messages'][1]['content'])['phase'] == 'consolidated_review':
+                raise TimeoutError()
+            return original_complete(client, cfg, **kwargs)
+        monkeypatch.setattr(gemma, 'complete', fail_second)
+        with pytest.raises(summarize.LLMCallError):
+            generate()
+        assert len(calls) == 2
+        monkeypatch.setattr(gemma, 'complete', original_complete)
+        result = generate()
+        assert result.summary == DRAFT and result.llm_usage['review_complete'] is True
+        assert len(calls) == 3
+        assert sum(c.lora_scale for c, _ in calls) == 1
+        assert len(result.structured.verification['completed_checks']) == 2
+    finally:
+        jobs.CURRENT.reset(token)
 
 
-def test_annotation_failure_keeps_adapter_draft(monkeypatch):
-    cfg = LLMConfig(base_url='http://llama:8080/v1', model='gemma-4-31b', api_key='local',
-                    provider='llama-cpp', summary_style='gemma4-lora', context_tokens=16384)
-    text = 'Müller erkläre, die Kosten betrügen 5 Euro.'
-    monkeypatch.setattr(gemma, 'complete', lambda *a, **k: SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=text))]))
-    workflow = gemma.GemmaWorkflow(None, cfg, 'TOP 1', '', {})
-    def fail(*args, **kwargs):
-        raise TimeoutError('Source annotation unavailable')
-    monkeypatch.setattr(workflow, 'call', fail)
-    with pytest.raises(TimeoutError):
-        workflow.run(['Müller: Die Kosten betragen 5 Euro.'])
-    assert workflow.latest_claims[0]['text'] == text
-    assert workflow.latest_claims[0]['grounding']['content_status'] != 'supported'
-    assert workflow.partial_rows
+def test_version_changes_cache_and_checkpoint_identity(monkeypatch):
+    calls = setup_model(monkeypatch, mode='fast')
+    keys, steps = [], []
+    monkeypatch.setattr(gemma, 'cache_read', lambda key: keys.append(key))
+    monkeypatch.setattr(gemma.durable, 'checkpoint', lambda step, operation: steps.append(step) or operation())
+    generate('fast')
+    monkeypatch.setattr(gemma, 'VERSION', 'gemma4-protokoll-v2')
+    generate('fast')
+    assert len(calls) == 2
+    assert keys[0] != keys[1] and steps[0] != steps[1]
 
 
-def test_chunk_reviews_keep_global_claim_ids(monkeypatch):
-    cfg = LLMConfig(base_url='http://llama:8080/v1', model='gemma-4-31b', api_key='local',
-                    provider='llama-cpp', summary_style='gemma4-lora', context_tokens=16384)
-    workflow = gemma.GemmaWorkflow(None, cfg, 'TOP 1', '', {})
-    rows = workflow.sources(['A: eins', 'B: zwei'])
-    def claim(text, row):
-        _, grounding = gemma.SourceCatalog([row], 'source_id').inspect([])
-        return dict(text=text, section='discussion', scope='current', evidence=[], grounding=grounding)
-    first, second = claim('Erster Absatz.', rows[0]), claim('Zweiter Absatz.', rows[1])
-    monkeypatch.setattr(workflow, 'generate', lambda _: [([rows[0]], [first]), ([rows[1]], [second])])
-    def review(claims, sources, phase):
-        assert len(claims) == len(sources) == 1
-        return ([dict(claim_ids=['C:0'], kind='contradiction', question='Zweiter Absatz unklar.', evidence=[])]
-                if sources[0] is rows[1] else [])
-    monkeypatch.setattr(workflow, 'review', review)
-    with processing_scope('slow'):
-        claims, issues, _, _ = workflow.run(['A: eins', 'B: zwei'])
-    assert all(issue['claim_ids'] == ['C:1'] for issue in issues)
-    assert claims[0]['grounding']['content_status'] != 'contradicted'
-    assert claims[1]['grounding']['content_status'] == 'contradicted'
-
-
-def test_protocol_export_understands_sections():
-    from export_protocol import parse_summary_sections
-    value = parse_summary_sections('Beschlüsse und Festlegungen:\nEinstimmig beschlossen.\n\n'
-                                   'Aus der Beratung:\nMüller erläutere den Plan.')
-    assert value['decisions'] == ['Einstimmig beschlossen.']
-    assert value['discussion'] == ['Müller erläutere den Plan.']
-
-
-def test_re_rendering_after_source_questions_preserves_protocol_style():
+def test_re_rendering_old_annotated_results_preserves_protocol_style():
     structured = summarize.StructuredSummary(discussion=['Müller erläutere den Plan.'],
         decisions=['Einstimmig beschlossen.'], verification={'summary_style': 'gemma4-lora'})
     assert summarize.render_structured_summary(structured) == gemma.render_protocol(structured)
+    assert 'Beschlüsse und Festlegungen:\nEinstimmig beschlossen.' in gemma.render_protocol(structured)
+
+
+def test_streaming_progress_preserves_actual_summary_phase():
+    import threading
+    import durable_jobs as jobs
+    job = jobs.submit('test', {})
+    current = jobs.claim('phase-worker', 60)
+    token = jobs.CURRENT.set(jobs.Runtime(current, 'phase-worker', threading.Event()))
+    try:
+        jobs.progress({'phase': 'summary_final_review'})
+        jobs.progress({'phase': 'generating', 'elapsed_seconds': 5})
+        assert jobs.load(job['job_id'])['progress']['summary_phase'] == 'summary_final_review'
+        jobs.progress({'phase': 'summary_protocol'})
+        jobs.progress({'phase': 'loading', 'elapsed_seconds': 1})
+        assert jobs.load(job['job_id'])['progress']['summary_phase'] == 'summary_protocol'
+    finally:
+        jobs.CURRENT.reset(token)
+
+
+def test_generation_failure_after_first_long_top_part_keeps_partial_draft(monkeypatch):
+    generated = []
+    def draft(_):
+        if generated:
+            raise TimeoutError()
+        generated.append(DRAFT)
+        return DRAFT
+    calls = setup_model(monkeypatch, draft=draft)
+    with pytest.raises(summarize.LLMCallError) as caught:
+        generate(lines=['A: ' + 'Langer Satz. ' * 2000])
+    partial = caught.value.partial_result
+    assert partial.summary == DRAFT
+    assert partial.llm_usage['generation_complete'] is False
+    assert partial.llm_usage['review_complete'] is False
+    assert all(c.lora_scale == 1 for c, _ in calls)
+    review = summarize.build_summary_review(structured=partial.structured, summary=partial.summary,
+        lines=[dict(speaker='A', text='Langer Satz. ' * 2000)])
+    assert any('Protokollerzeugung' in w.message for w in review.warnings)

@@ -19,7 +19,8 @@ Slow-PDF darf dagegen in Fast wiederverwendet werden.
 | --- | --- | --- |
 | PDF | Bilder und Text aller Seiten; Inventare, Zusammenführung, unabhängige Seiten- und Beziehungsprüfungen, gezielte Korrekturen | Textlayer bevorzugt; Seiten ohne Text als Bild; Seiten gemeinsam bis zum Kontextlimit auswerten, mehrere Inventare einmal zusammenführen; keine Audits oder Reparaturaufrufe |
 | TOP-Zuordnung | Zwei unabhängige Rekonstruktionen und Detailzuordnungen, Klärung von Abweichungen | Ein Durchlauf für Agenda, Verlauf, TOP-Status und kompakte Zuordnungsbereiche; keine unabhängige zweite Bewertung oder Klärung |
-| Zusammenfassung | Zwei Inventare, Entwurfsprüfung, Konsolidierung, zwei Abschlussprüfungen und begrenzte Korrekturen | Eine Generierung pro passendem Quellblock; bei mehreren Blöcken höchstens eine Konsolidierung, sofern sie ins Kontextbudget passt; sonst alle Blockergebnisse erhalten |
+| Gemma-LoRA-Zusammenfassung | LoRA-Text, zwei unabhängige Inhaltsprüfungen pro Teil gegen dessen vollständiges Originaltranskript; Hinweise separat, keine Neufassung | Nur LoRA-Generierungen; alle Teiltexte als ungeprüften Entwurf erhalten |
+| Andere Zusammenfassungsprofile | Zwei Inventare, Entwurfsprüfung, Konsolidierung, zwei Abschlussprüfungen und begrenzte Korrekturen | Eine Generierung pro passendem Quellblock; höchstens eine Konsolidierung, sofern sie ins Kontextbudget passt; sonst alle Blockergebnisse erhalten |
 
 Fast verwendet einen Versuch pro fachlichem Modellauftrag; ungültige Antworten
 werden nicht durch weitere fachliche Reparaturaufrufe korrigiert. Begrenzte
@@ -56,6 +57,12 @@ Modus und Policyversion gehören zu den Jobversionen und zu den Modellcache-Poli
 PDF-Checkpoints trennen `fast-extraction-v1` vom geprüften `page-evidence-v3`-Vertrag.
 Die Wiederaufnahme nutzt den ursprünglichen Modus. Geänderte Code-/Policyversionen
 bleiben wie bisher ein Grund, einen neuen Job zu starten.
+Gemma verwendet `gemma4-protokoll-v3-text-review` und den separaten Textvertrag
+`gemma-prose-review-v1`; alte annotierte Ergebnisse bleiben lesbar, werden jedoch
+nicht als neuer Cache-/Checkpoint-Lauf übernommen. Absatzquellen und automatische
+Kategorien entfallen. Fehlgeschlagene oder nicht ins Kontextbudget passende Prüfungen
+bleiben unvollständig; vorhandene Entwürfe und Hinweise werden erhalten, auch beim
+Bearbeiten und Export. Bearbeitungen entwerten den früheren Prüfstatus.
 
 ## Ergebnisstatus und Bearbeitung
 
