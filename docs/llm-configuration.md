@@ -1,6 +1,6 @@
 # Gemma 4 und Protokoll-LoRA
 
-Dieser Branch verwendet `google/gemma-4-31B-it` als Q4_K_M-GGUF von Unsloth
+Das Standard-Setup verwendet `google/gemma-4-31B-it` als Q4_K_M-GGUF von Unsloth
 und `aihpi/gemma-4-31b-protokoll` (Revision `153460cf9a7c566df4a809a2f454c7b854c2405c`).
 Der LoRA wird in F16-GGUF konvertiert und separat geladen. Q4_K_M ist eine
 Speicherentscheidung für 32 GB RAM / 8 GB VRAM; die Ausgabe kann von der
@@ -16,7 +16,7 @@ lädt feste Revisionen mit Prüfsummen, verwendet llama.cpp `b11429` und schreib
 `checksums.sha256`. Teil-Downloads sind fortsetzbar. Die Dateien bleiben lokal
 und werden nicht eingecheckt. Beim Start prüft llama.cpp diese Prüfsummen.
 Ein vorhandenes Modellmanifest überspringt die Vorbereitung im Setup.
-Für diesen Branch müssen die Anwendungimages lokal gebaut werden.
+Für das lokale Setup müssen die Anwendungimages lokal gebaut werden.
 
 Docker Compose startet den Alias `gemma-4-31b` unter `http://llama:8080/v1`.
 Der Hostport 8080 ist nur an Loopback gebunden. CPU-Betrieb verwendet das
@@ -72,7 +72,8 @@ gespeicherte Texte und Prüfhinweise bleiben lesbar. Ein echter Sitzungstest fol
 
 ## Speicher und Transport
 
-Das lokale Profil nutzt 16.384 Kontexttokens, 12 GPU-Layer, 12 CPU-Threads,
+Das lokale Profil nutzt 16.384 Kontexttokens, 0 GPU-Layer im CPU-Modus bzw.
+12 im GPU-Override und automatische llama.cpp-Threadwahl bei leerem `LLM_CPU_THREADS`,
 Q8_0 für beide KV-Caches, einen Slot und einen CPU-Bildprojektor. Batch und Microbatch
 umfassen je 1.120 Tokens, damit Gemma die Bildauflösung nicht begrenzt. Mehr GPU-Layer
 oder Kontext erst nach Speichermessung einstellen. `LLM_CONTEXT_TOKENS`,
@@ -92,6 +93,46 @@ erlaubt lange Streams; Abbruch bleibt möglich. Modell-, Adapter- und Promptrevi
 gehen in die Cache-/Jobidentität ein. Unvollständige Prüfungen erteilen kein Zertifikat.
 Explizite Ollama- und OpenAI-kompatible Konfigurationen bleiben im Transport
 unterstützt; sie verwenden keine llama.cpp-spezifischen Anfragefelder.
+
+### Konservative Startwerte für CPU-Server
+
+Q4_K_M bleibt vorerst fest voreingestellt. Es gibt noch keine automatische Wahl
+anderer Quantisierungen oder vermessene Hardwareprofile. Die vorhandene RAM-/GPU-Erkennung
+im Setup bleibt bestehen; GPU-Betrieb wird weiterhin bestätigt. Für Gemma sollten
+mindestens ungefähr 32 GB RAM mit ausreichender freier Reserve und passendem
+Docker-Speicherlimit eingeplant werden; die bisherige 8-GB-Empfehlung gilt nicht mehr.
+
+Ohne explizite `.env`- oder Shell-Overrides gelten bei `setup build`:
+
+| Einstellung | CPU | GPU-Override |
+| --- | --- | --- |
+| `LLM_GPU_LAYERS` | 0 | 12 |
+| `LLM_CPU_THREADS` | automatisch | automatisch |
+| `LLM_TIMEOUT_SECONDS` (Inaktivität nach Ausgabe) | 3600 s | 600 s |
+| `LLM_LOAD_TIMEOUT_SECONDS` (Laden/Prompt bis erste Ausgabe) | 14400 s | 3600 s |
+| `LLM_CONNECT_TIMEOUT_SECONDS` | 60 s | 60 s |
+| `LLM_TOTAL_TIMEOUT_SECONDS` | 0 (keine Gesamtlaufzeitgrenze) | 0 |
+| `LLAMA_HTTP_TIMEOUT_SECONDS` | 14400 s | 14400 s |
+
+`LLM_READ_TIMEOUT_SECONDS` überschreibt das Inaktivitätslimit, falls gesetzt.
+Die `.env.example` lässt die profilabhängigen Zeitlimits leer, damit Compose den
+passenden Wert einsetzt. Ohne Compose nutzt llama.cpp im Backend die konservativen
+CPU-Standardzeitlimits. Andere Provider behalten ihre bisherigen Backend-Fallbacks.
+Der Web-Proxy wartet bis zu 24 Stunden auf eine Antwort; langlebige Aufträge werden
+weiterhin über die persistente Warteschlange mit Statusabfragen verarbeitet.
+
+Beide Setup-Skripte warten standardmäßig bis zu vier Stunden auf Bereitschaft.
+Die Shell-Variable `SETUP_WAIT_SECONDS` überschreibt dies (`0` wartet unbegrenzt).
+Ein Ende der Warteanzeige beendet keine Container oder Downloads. Healthchecks
+gewähren vier Stunden Startzeit, melden aber sofort Bereitschaft, wenn sie vorliegt.
+Diese Werte sind konservative Annahmen, keine auf dem CPU-Server gemessenen Garantien.
+
+**Upgrade von Qwen/Ollama:** Vor `setup build` die vorhandene `.env` prüfen.
+Das Setup überschreibt sie bewusst nicht. Alte Modellnamen, Provider, Basis-URLs,
+Tokenizer, Revisionen, Kontextgrößen und Zeitlimits können die neuen Vorgaben sonst
+weiterhin übersteuern. Die dort bereits erprobten CPU-Werte zuerst sichern und dann
+gezielt auf Gemma/llama.cpp übertragen; Secrets, Ports und Datenpfade erhalten.
+Auch zusätzliche Reverse-Proxys können eigene kürzere Zeitlimits besitzen.
 
 Der mitgelieferte Tokenizer wird nur für den passenden Modellalias gewählt.
 Andere Modelle brauchen passende lokale Tokenizer oder verwenden die konservative

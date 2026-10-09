@@ -481,8 +481,8 @@ check_ram() {
         total_ram_gb=$(free -g | awk '/^Mem:/{print $2}')
     fi
 
-    if [ "$total_ram_gb" -lt 8 ]; then
-        warn "Wenig Arbeitsspeicher erkannt (${total_ram_gb}GB). Empfohlen: 8GB+"
+    if [ "$total_ram_gb" -lt 32 ]; then
+        warn "Wenig Arbeitsspeicher erkannt (${total_ram_gb}GB). Fuer Gemma Q4_K_M: 32GB+, besser mehr Reserve"
         echo "  Die Anwendung koennte langsam laufen."
     else
         success "Arbeitsspeicher OK (${total_ram_gb}GB verfuegbar)"
@@ -785,30 +785,35 @@ check_gpu() {
 wait_for_services() {
     echo ""
     info "Warte auf Dienste..."
-    echo "Das System laedt KI-Modelle. Dies kann einige Minuten dauern."
+    echo "Das System prueft und laedt Gemma Q4_K_M. Auf CPU/HDD kann dies lange dauern."
     echo ""
 
-    local max_wait=600  # 10 minutes
-    local wait_count=0
+    local max_wait="${SETUP_WAIT_SECONDS:-14400}"
+    case "$max_wait" in ''|*[!0-9]*) error "SETUP_WAIT_SECONDS muss eine nichtnegative Ganzzahl sein."; return 1;; esac
+    local wait_started=$SECONDS
+    local wait_count=0 next_progress=0
 
-    while [ $wait_count -lt $max_wait ]; do
+    while [ "$max_wait" -eq 0 ] || [ $wait_count -lt "$max_wait" ]; do
         if curl -fs --max-time 2 http://localhost:${PORT_BACKEND}/health > /dev/null 2>&1 &&
            curl -fs --max-time 2 http://127.0.0.1:${PORT_LLM}/health > /dev/null 2>&1; then
             break
         fi
 
         # Show progress every 15 seconds
-        if [ $((wait_count % 15)) -eq 0 ]; then
+        if [ "$wait_count" -ge "$next_progress" ]; then
             echo "  Laedt noch... (${wait_count}s vergangen)"
+            next_progress=$((wait_count + 15))
         fi
 
         sleep 1
-        wait_count=$((wait_count + 1))
+        wait_count=$((SECONDS - wait_started))
     done
 
-    if [ $wait_count -ge $max_wait ]; then
+    if [ "$max_wait" -ne 0 ] && [ $wait_count -ge "$max_wait" ]; then
         echo ""
-        error "Dienste konnten nicht gestartet werden!"
+        warn "Wartezeit erreicht; die Anwendung ist noch nicht bereit."
+        echo "Container und Downloads laufen weiter; die Warteanzeige stoppt keine Dienste."
+        echo "Fortschritt: docker compose logs -f --tail=5 llama backend"
         echo ""
         show_failure_diagnostics
         return 1
@@ -845,7 +850,7 @@ show_failure_diagnostics() {
     echo ""
     echo "3. Docker-Ressourcen"
     echo "   -> Docker Desktop -> Einstellungen -> Resources"
-    echo "   -> Empfohlen: Mindestens 8GB RAM, 4 CPUs"
+    echo "   -> Empfohlen: 32GB RAM oder mehr fuer Gemma Q4_K_M, Docker-Speicherlimit beachten"
     echo ""
     echo "Naechste Schritte:"
     echo "  1. ./setup.sh logs     # Detaillierte Logs anzeigen"
@@ -919,6 +924,7 @@ do_build() {
     check_ram
     check_ports || exit 1
     check_gpu
+    info "Gemma Q4_K_M: CPU 0 / GPU 12 Layer (ohne Override); lange CPU-Zeitlimits aktiv. Bestehende .env-Werte bleiben erhalten."
     confirm_model_cache_handling || exit 1
 
     # Create uploads directory

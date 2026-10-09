@@ -497,8 +497,8 @@ function Test-RAM {
     }
     $totalRAMGB = [math]::Floor($computerSystem.TotalPhysicalMemory / 1GB)
 
-    if ($totalRAMGB -lt 8) {
-        Write-Warn "Wenig Arbeitsspeicher erkannt (${totalRAMGB}GB). Empfohlen: 8GB+"
+    if ($totalRAMGB -lt 32) {
+        Write-Warn "Wenig Arbeitsspeicher erkannt (${totalRAMGB}GB). Fuer Gemma Q4_K_M: 32GB+, besser mehr Reserve"
         Write-Host "  Die Anwendung koennte langsam laufen."
     } else {
         Write-Success "Arbeitsspeicher OK (${totalRAMGB}GB verfuegbar)"
@@ -794,7 +794,9 @@ function Test-GPU {
 # Wait for services to be ready
 #######################################
 function Wait-ForServices {
-    param([int]$MaxWaitSeconds = 3600)
+    param([ValidateRange(0, 2147483647)][int]$MaxWaitSeconds = $(
+        if ($env:SETUP_WAIT_SECONDS) { [int]$env:SETUP_WAIT_SECONDS } else { 14400 }
+    ))
     Write-Host ""
     Write-Info "Warte auf Dienste..."
     Write-Host "Gemma prueft zuerst ca. 20 GB Modelldateien und laedt danach das Modell. Auf einer Festplatte dauert dies mehrere Minuten."
@@ -805,7 +807,7 @@ function Wait-ForServices {
     $nextProgress = 0
     $ready = $false
 
-    while ($timer.Elapsed.TotalSeconds -lt $MaxWaitSeconds) {
+    while ($MaxWaitSeconds -eq 0 -or $timer.Elapsed.TotalSeconds -lt $MaxWaitSeconds) {
         try {
             $response = Invoke-WebRequest -Uri "http://localhost:$PORT_BACKEND/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
             $modelResponse = Invoke-WebRequest -Uri "http://127.0.0.1:$PORT_LLM/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
@@ -889,7 +891,7 @@ function Show-FailureDiagnostics {
     Write-Host ""
     Write-Host "3. Docker-Ressourcen"
     Write-Host "   -> Docker Desktop -> Einstellungen -> Resources"
-    Write-Host "   -> Empfohlen: Mindestens 8GB RAM, 4 CPUs"
+    Write-Host "   -> Empfohlen: 32GB RAM oder mehr fuer Gemma Q4_K_M, Docker-Speicherlimit beachten"
     Write-Host ""
     Write-Host "Naechste Schritte:"
     Write-Host "  1. .\setup.ps1 logs      # Detaillierte Logs anzeigen"
@@ -957,6 +959,7 @@ function Invoke-Build {
     }
 
     Test-GPU
+    Write-Info "Gemma Q4_K_M: CPU 0 / GPU 12 Layer (ohne Override); lange CPU-Zeitlimits aktiv. Bestehende .env-Werte bleiben erhalten."
 
     if (-not (Confirm-ModelCacheHandling)) {
         Read-Host "Druecken Sie Enter zum Beenden"

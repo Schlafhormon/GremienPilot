@@ -63,7 +63,7 @@ services:
       - LLM_GPU_LAYERS=${LLM_GPU_LAYERS:-}
       - LLM_KEEP_ALIVE=${LLM_KEEP_ALIVE:-}
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
-      - LLM_CONNECT_TIMEOUT_SECONDS=${LLM_CONNECT_TIMEOUT_SECONDS:-10}
+      - LLM_CONNECT_TIMEOUT_SECONDS=${LLM_CONNECT_TIMEOUT_SECONDS:-60}
       - LLM_READ_TIMEOUT_SECONDS=${LLM_READ_TIMEOUT_SECONDS:-}
       - LLM_TOTAL_TIMEOUT_SECONDS=${LLM_TOTAL_TIMEOUT_SECONDS:-0}
       - LLM_IMAGE_TOKENS=${LLM_IMAGE_TOKENS:-}
@@ -91,7 +91,7 @@ services:
       - AGENDA_DETECTION_CHUNK_OVERLAP_LINES=${AGENDA_DETECTION_CHUNK_OVERLAP_LINES:-12}
       - AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE=${AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE:-4}
       - AGENDA_DETECTION_CONTEXT_WINDOW_AFTER=${AGENDA_DETECTION_CONTEXT_WINDOW_AFTER:-8}
-      - LLM_TIMEOUT_SECONDS=${LLM_TIMEOUT_SECONDS:-120}
+      - LLM_TIMEOUT_SECONDS=${LLM_TIMEOUT_SECONDS:-3600}
       - LLM_MAX_RETRIES=${LLM_MAX_RETRIES:-2}
       - LLM_RETRY_BACKOFF_SECONDS=${LLM_RETRY_BACKOFF_SECONDS:-0.5}
       - LLM_CHUNK_CHARS=${LLM_CHUNK_CHARS:-12000}
@@ -116,7 +116,7 @@ services:
       - PDF_OUTPUT_TOKENS=${PDF_OUTPUT_TOKENS:-8192}
       - PDF_MODEL_ATTEMPTS=${PDF_MODEL_ATTEMPTS:-3}
       - PDF_REVIEW_ROUNDS=${PDF_REVIEW_ROUNDS:-3}
-      - LLM_LOAD_TIMEOUT_SECONDS=${LLM_LOAD_TIMEOUT_SECONDS:-1800}
+      - LLM_LOAD_TIMEOUT_SECONDS=${LLM_LOAD_TIMEOUT_SECONDS:-14400}
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data
@@ -130,7 +130,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s # Reduced from 20 min - models are pre-loaded
+      start_period: 4h # First-time model downloads and slow CPU startup
     depends_on:
       - llama
     restart: unless-stopped
@@ -144,15 +144,16 @@ services:
       - ./scripts/llama-entrypoint.sh:/llama-entrypoint.sh:ro
     environment:
       - LLM_CONTEXT_TOKENS=${LLM_CONTEXT_TOKENS:-16384}
-      - LLM_GPU_LAYERS=${LLM_GPU_LAYERS:-12}
-      - LLM_CPU_THREADS=${LLM_CPU_THREADS:-12}
+      - LLM_GPU_LAYERS=${LLM_GPU_LAYERS:-0}
+      - LLM_CPU_THREADS=${LLM_CPU_THREADS:-}
+      - LLAMA_HTTP_TIMEOUT_SECONDS=${LLAMA_HTTP_TIMEOUT_SECONDS:-14400}
     entrypoint: ["/bin/sh", "-c", "sed 's/\\r$//' /llama-entrypoint.sh > /tmp/entrypoint.sh && /bin/sh /tmp/entrypoint.sh"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 60
-      start_period: 300s # Grace period for checksum verification and model loading
+      start_period: 4h # Checksum verification and slow CPU model loading
     restart: unless-stopped
 
 volumes:

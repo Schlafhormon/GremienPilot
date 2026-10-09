@@ -557,7 +557,7 @@ oder unter Windows:
 
 - CPU-Transkription ist deutlich langsamer als GPU-Transkription.
 - Der erste Lauf lädt Modelle und kann länger dauern.
-- Docker sollte ausreichend RAM erhalten, empfohlen sind mindestens 8 GB.
+- Für Gemma Q4_K_M mindestens ungefähr 32 GB RAM mit freier Reserve und passendem Docker-Speicherlimit einplanen. CPU-Startwerte und Qwen-Upgrades: [LLM-Konfiguration](docs/llm-configuration.md#konservative-startwerte-für-cpu-server).
 
 ### Logs ansehen
 
