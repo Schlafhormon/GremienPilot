@@ -222,6 +222,8 @@ Fast übernimmt ausschließlich den ungeprüften LoRA-Entwurf. Slow prüft jeden
 gegen seine vollständigen Originalbeiträge und erhält den Text unverändert;
 Hinweise werden separat gespeichert und exportiert. Eine abgeschlossene Prüfung
 garantiert keine Fehlerfreiheit; bei Prüffehlern bleibt der Entwurf erhalten.
+Vorhandene Markdown-Überschriften, Hervorhebungen und Tabellen werden in der
+Leseansicht sowie in DOCX/PDF formatiert; Kopieren und Bearbeiten erhalten den Originaltext.
 PDF und TOP-Zuordnung verwenden weiterhin das Basismodell ohne Adapter.
 Auf 8-GB-GPUs arbeitet die CPU mit: 32 GB RAM sind vorgesehen,
 die Verarbeitung kann deutlich länger dauern. [Konfiguration](docs/llm-configuration.md).

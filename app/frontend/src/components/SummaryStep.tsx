@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, type ChangeEvent } from 'reac
 import { exportProtocol } from '../api';
 import type { ExportFormat, ExportMetadata, StructuredSummary, SummaryStepProps, TranscriptLine } from '../types';
 import AudioPlayer from './AudioPlayer';
+import ProtocolText from './ProtocolText';
 import { useAudioSync } from '../hooks/useAudioSync';
 
 function formatTime(seconds: number): string {
@@ -634,6 +635,8 @@ export default function SummaryStep({
                         );
                       })}
                     </div>
+                  ) : summaries[selectedSummaryIndex] && isGemmaProse ? (
+                    <ProtocolText text={summaries[selectedSummaryIndex]!} />
                   ) : summaries[selectedSummaryIndex] ? (
                     <div className="prose max-w-none text-gray-700 whitespace-pre-wrap">
                       {summaries[selectedSummaryIndex]}

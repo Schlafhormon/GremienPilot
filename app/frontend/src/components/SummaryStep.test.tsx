@@ -408,12 +408,16 @@ const gemmaText = '## Zu TOP 1:\n\n**Aus der Beratung**\n\nUnveränderter Absatz
 const gemmaStructure = { discussion: [], decisions: [], votes: [], action_items: [], open_points: [], uncertainties: [],
   protocol_text: gemmaText, verification: { source_contract: 'gemma-prose-review-v1' } };
 
-it('displays Gemma prose verbatim and keeps content hints separate from categories and sources', () => {
-  const { container } = renderSummaryStep({ summaries: { 0: gemmaText }, summaryReviews: { 0: {
+it('formats Gemma prose and keeps content hints separate from categories and sources', async () => {
+  const user = userEvent.setup();
+  const setSummaries = vi.fn();
+  renderSummaryStep({ summaries: { 0: gemmaText }, setSummaries, summaryReviews: { 0: {
     structured: gemmaStructure, source_links: [], llm_usage: { processing_mode: 'slow', processing_complete: true, review_complete: true },
     review_warnings: [{ kind: 'contradiction', message: 'Bitte die Zahl 9 gegen 5 prüfen.', severity: 'warning', line_indices: [], excerpt: '9 Euro' }],
   } } });
-  expect(container.querySelector('.prose')?.textContent).toBe(gemmaText);
+  expect(screen.getByRole('heading', { name: 'Zu TOP 1:' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Aus der Beratung' })).toBeInTheDocument();
+  expect(screen.getByText('Unveränderter Absatz.')).toBeInTheDocument();
   expect(screen.getByText('Bitte die Zahl 9 gegen 5 prüfen.')).toBeInTheDocument();
   expect(screen.getByText('9 Euro')).toBeInTheDocument();
   expect(screen.getByText(/zwei unabhängige Inhaltsprüfungen abgeschlossen/)).toBeInTheDocument();
@@ -421,6 +425,13 @@ it('displays Gemma prose verbatim and keeps content hints separate from categori
   expect(screen.queryByText('Diskussion')).not.toBeInTheDocument();
   expect(screen.queryByText('Quelle fehlt')).not.toBeInTheDocument();
   expect(screen.queryByText(/Exakt belegt/)).not.toBeInTheDocument();
+  const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+  await user.click(screen.getByTitle('In Zwischenablage kopieren'));
+  expect(copy).toHaveBeenCalledWith(gemmaText);
+  await user.click(screen.getByTitle('Bearbeiten'));
+  expect(screen.getByLabelText('Zusammenfassung bearbeiten')).toHaveValue(gemmaText);
+  await user.click(screen.getByRole('button', { name: 'Speichern' }));
+  expect(setSummaries).toHaveBeenCalledWith({ 0: gemmaText });
 });
 
 it.each(['incomplete', 'stale'])('never labels a %s Gemma review as complete', status => {

@@ -15,6 +15,7 @@ import main
 import persistence
 import summarize
 from export_protocol import ProtocolMetadata, build_protocol_document, render_protocol
+from protocol_layout import render_text
 from test_gemma_summary import DRAFT, ORIGINAL, FINDING, generate, setup_model
 
 
@@ -73,18 +74,20 @@ def test_export_keeps_headings_paragraphs_and_separate_hints(monkeypatch, mode, 
     artifact = render_protocol(document, export_format)
     if export_format == 'txt':
         text = artifact.decode('utf-8')
-        assert DRAFT in text
+        assert render_text(DRAFT) in text
     elif export_format == 'docx':
         paragraphs = [p.text for p in Document(BytesIO(artifact)).paragraphs]
         text = '\n\n'.join(paragraphs)
-        assert DRAFT in text
+        assert render_text(DRAFT) in text
     else:
         with pdfplumber.open(BytesIO(artifact)) as pdf:
             text = '\n'.join(page.extract_text() for page in pdf.pages)
         for line in DRAFT.splitlines():
             if line:
-                assert line in text
-    assert '## Zu TOP 2:' in text and '**Aus der Beratung**' in text
+                assert line.replace('## ', '').replace('**', '') in text
+    assert 'Zu TOP 2:' in text and 'Aus der Beratung' in text
+    assert '## Zu TOP 2:' not in text and '**Aus der Beratung**' not in text
+    assert document.tops[0].protocol_text == result.summary == DRAFT
     assert 'Quelle fehlt' not in text and '[UNBESTÄTIGT' not in text
     assert 'Diskussion:' not in text and 'Keine Angabe.' not in text
     if mode == 'slow':
@@ -165,7 +168,7 @@ def test_partial_pipeline_draft_can_be_exported_with_incomplete_label(monkeypatc
     with TestClient(main.app) as client:
         response = client.post('/api/export', json=payload)
     assert response.status_code == 200
-    assert DRAFT in response.text
+    assert render_text(DRAFT) in response.text
     assert 'Inhaltsprüfung fehlgeschlagen oder unvollständig' in response.text
     assert 'Prüfentwurf' in response.text
 

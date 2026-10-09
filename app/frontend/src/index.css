@@ -29,6 +29,95 @@ body {
   min-width: 0;
 }
 
+/* Display Gemma's own Markdown layout without changing its stored wording. */
+.protocol-prose {
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.protocol-prose > * + * {
+  margin-top: 1rem;
+}
+
+.protocol-prose :is(h1, h2) {
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--color-gray-200);
+  color: var(--color-gray-900);
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.protocol-prose :is(h3, h4, h5, h6) {
+  margin-top: 1.5rem;
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--color-blue-500);
+  color: var(--color-gray-900);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.protocol-prose p {
+  white-space: pre-line;
+}
+
+.protocol-prose :is(ul, ol) {
+  padding-left: 1.5rem;
+}
+
+.protocol-prose ul { list-style-type: disc; }
+.protocol-prose ol { list-style-type: decimal; }
+.protocol-prose li + li { margin-top: 0.35rem; }
+.protocol-prose strong { font-weight: 600; }
+.protocol-prose a { color: var(--color-blue-700); text-decoration: underline; }
+
+.protocol-prose blockquote {
+  border-left: 3px solid var(--color-gray-300);
+  padding-left: 0.75rem;
+  color: var(--color-gray-600);
+}
+
+.protocol-prose pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 0.75rem;
+  border-radius: 0.375rem;
+  background: var(--color-gray-50);
+  white-space: pre;
+}
+
+.protocol-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--color-gray-200);
+  border-radius: 0.5rem;
+}
+
+.protocol-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.protocol-prose :is(th, td) {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-gray-200);
+  text-align: left;
+  vertical-align: top;
+  min-width: 5rem;
+}
+
+.protocol-prose th {
+  background: var(--color-gray-100);
+  color: var(--color-gray-900);
+  font-weight: 600;
+}
+
+.protocol-prose tbody tr:nth-child(even) { background: var(--color-gray-50); }
+.protocol-prose tbody tr:last-child td { border-bottom: 0; }
+.protocol-prose :is(th, td):not(:first-child) { text-align: center; }
+
 @media (min-width: 64rem) {
   .review-workspace {
     grid-template-columns: 17rem minmax(0, 1fr);
