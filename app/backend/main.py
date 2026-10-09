@@ -19,7 +19,7 @@ from dataclasses import asdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Literal
 
 from fastapi import (
     FastAPI,
@@ -663,6 +663,8 @@ class SummaryJobResponse(BaseModel):
 
 
 class SessionSaveRequest(BaseModel):
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = None
+    custom_summary_prompt: Optional[str] = None
     enforce_top_order: StrictBool = False
     pdf_source_job_id: Optional[str] = None
     processing_mode: ProcessingMode = "slow"
@@ -684,6 +686,8 @@ class SessionSaveRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = None
+    custom_summary_prompt: Optional[str] = None
     enforce_top_order: StrictBool = False
     pdf_source_job_id: Optional[str] = None
     has_pdf_source: bool = False
@@ -854,6 +858,8 @@ class SpeakerObservationManualRequest(BaseModel):
 
 
 class SummarizeRequest(BaseModel):
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = None
+    custom_summary_prompt: Optional[str] = None
     processing_mode: ProcessingMode = "slow"
     top_title: str
     lines: List[TranscriptLine]
@@ -915,6 +921,8 @@ class SummarizeResponse(BaseModel):
 
 
 class SummaryJobCreateRequest(BaseModel):
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = None
+    custom_summary_prompt: Optional[str] = None
     revision: Optional[int] = None
     top_ids: List[str] = Field(default_factory=list, min_length=1)
     model: Optional[str] = None
@@ -1193,6 +1201,8 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
             summary_states.setdefault(top_index, fallback_state)
 
     return SessionResponse(
+        summary_style=session.get("summary_style"),
+        custom_summary_prompt=session.get("custom_summary_prompt"),
         pdf_source_job_id=session.get('pdf_source_job_id'),
         has_pdf_source=bool(session_pdf_document(session, latest_pipeline)),
         latest_pdf_job=durable.public(work) if (work := durable.latest_for_session(session['session_id'], 'pdf')) else None,
@@ -1904,6 +1914,10 @@ def parse_pipeline_options(raw_options: str | None) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Optionen müssen ein JSON-Objekt sein")
     if parsed.get("agenda_use_llm") is not None and type(parsed["agenda_use_llm"]) is not bool:
         raise HTTPException(status_code=400, detail="agenda_use_llm muss boolesch oder null sein")
+    if parsed.get('summary_style') not in (None, 'gemma4-lora', 'gemma4-custom'):
+        raise HTTPException(status_code=400, detail="Ungültiger Zusammenfassungsstil")
+    if parsed.get('custom_summary_prompt') is not None and not isinstance(parsed['custom_summary_prompt'], str):
+        raise HTTPException(status_code=400, detail="Eigener Stilprompt muss Text sein")
     return parsed
 
 
@@ -2619,6 +2633,8 @@ def _run_summary_job(summary_job_id: str) -> None:
             with work_slot(LLM_WORK_LOCK):
                 result = summarize_segment(title, text, model=refs.get("model"),
                     system_prompt=refs.get("system_prompt"),
+                    summary_style=refs.get("summary_style"),
+                    custom_summary_prompt=refs.get("custom_summary_prompt"),
                     processing_mode=refs.get("processing_mode", "slow"),
                     meeting_context=meeting_context_from_transcript(transcript),
                     source_lines=[format_line_for_summary(line, names) for line in lines])
@@ -2781,6 +2797,11 @@ def save_pipeline_session(
         state["current_step"] = current_step
     if skipped_assignment is not None:
         state["skipped_assignment"] = skipped_assignment
+    if ctx and ctx.payload.get('legacy_snapshot'):
+        options = ctx.payload['legacy_snapshot'].get('result_refs', {}).get('options', {})
+        for key in ('summary_style', 'custom_summary_prompt'):
+            if key in options:
+                state[key] = options[key]
     state.setdefault("speaker_names", {})
     state.setdefault("tops", [])
     state.setdefault("top_ids", [])
@@ -2958,7 +2979,9 @@ def summarize_pipeline_segments(
     model = options.get("summary_model") or options.get("model")
     from summarize import get_llm_config
     from gemma_summary import VERSION as gemma_version
-    summary_contract = gemma_version if get_llm_config(model).summary_style == 'gemma4-lora' else 'structured'
+    config = get_llm_config(model).with_summary_style(options.get('summary_style'), options.get('custom_summary_prompt'))
+    summary_contract = (gemma_version + ':' + config.for_protocol().public_snapshot()['config_id']
+                        if config.is_gemma_prose else 'structured')
     if summary_contract != 'structured' and prior.get('summary_contract') != summary_contract:
         summaries, summary_reviews = {}, {}
     system_prompt = options.get("summary_system_prompt")
@@ -2976,6 +2999,8 @@ def summarize_pipeline_segments(
                     source_lines=[format_line_for_summary(line, speaker_names) for line in transcript],
                     model=model,
                     system_prompt=system_prompt,
+                    summary_style=options.get("summary_style"),
+                    custom_summary_prompt=options.get("custom_summary_prompt"),
                     processing_mode=options.get("processing_mode", "slow"),
                 )
             review = build_summary_review(
@@ -3071,6 +3096,8 @@ def summarize_pipeline_segments(
                     source_lines=[format_line_for_summary(line, speaker_names) for line in lines],
                     model=model,
                     system_prompt=system_prompt,
+                    summary_style=options.get("summary_style"),
+                    custom_summary_prompt=options.get("custom_summary_prompt"),
                     processing_mode=options.get("processing_mode", "slow"),
                     meeting_context=meeting_context_from_transcript(transcript),
                 )
@@ -3284,8 +3311,10 @@ def _run_pipeline_job(
             from summarize import get_llm_config
             from gemma_summary import VERSION as gemma_version
             summary_step = 'pipeline:summaries'
-            if get_llm_config(options.get('summary_model') or options.get('model')).summary_style == 'gemma4-lora':
-                summary_step += ':' + gemma_version
+            config = get_llm_config(options.get('summary_model') or options.get('model')).with_summary_style(
+                options.get('summary_style'), options.get('custom_summary_prompt'))
+            if config.is_gemma_prose:
+                summary_step += ':' + gemma_version + ':' + config.for_protocol().public_snapshot()['config_id']
             summaries, summary_reviews = durable.draft_checkpoint(summary_step, lambda: summarize_pipeline_segments(
                 pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options,
                 source_session=dict(transcript=transcript, tops=tops, top_ids=top_ids,
@@ -3475,6 +3504,8 @@ async def start_pipeline(
     model: Optional[str] = Form(None),
     system_prompt: Optional[str] = Form(None),
     summary_system_prompt: Optional[str] = Form(None),
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = Form(None),
+    custom_summary_prompt: Optional[str] = Form(None),
     agenda_system_prompt: Optional[str] = Form(None),
     agenda_use_llm: Optional[bool] = Form(None),
     agenda_fresh: bool = Form(False),
@@ -3546,8 +3577,11 @@ async def start_pipeline(
         parsed_options["model"] = model
     if system_prompt:
         parsed_options["system_prompt"] = system_prompt
+    if summary_style is not None:
+        parsed_options["summary_style"] = summary_style
     form = await request.form()
     for key, prompt in (
+        ("custom_summary_prompt", custom_summary_prompt),
         ("summary_system_prompt", summary_system_prompt),
         ("agenda_system_prompt", agenda_system_prompt),
         ("pdf_system_prompt", pdf_system_prompt),
@@ -3841,6 +3875,9 @@ async def create_or_save_session(request: SessionSaveRequest):
     state = model_to_dict(request)
     state["session_id"] = session_id
     existing = load_session(session_id)
+    for key in ("summary_style", "custom_summary_prompt"):
+        if existing and key not in request.model_fields_set:
+            state[key] = existing.get(key)
     if existing and "enforce_top_order" not in request.model_fields_set:
         state["enforce_top_order"] = existing.get("enforce_top_order", False)
     if existing and state["enforce_top_order"] != existing.get("enforce_top_order", False):
@@ -3869,6 +3906,9 @@ async def save_existing_session(session_id: str, request: SessionSaveRequest):
     state = model_to_dict(request)
     state["session_id"] = session_id
     existing = load_session(session_id)
+    for key in ("summary_style", "custom_summary_prompt"):
+        if existing and key not in request.model_fields_set:
+            state[key] = existing.get(key)
     if existing and "enforce_top_order" not in request.model_fields_set:
         state["enforce_top_order"] = existing.get("enforce_top_order", False)
     if existing and state["enforce_top_order"] != existing.get("enforce_top_order", False):
@@ -4007,6 +4047,8 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
                 "model": request.model,
                 "processing_mode": session.get("processing_mode", "slow"),
                 "system_prompt": request.system_prompt,
+                "summary_style": request.summary_style,
+                "custom_summary_prompt": request.custom_summary_prompt,
                 "session_revision": saved.get("revision"),
                 "input_snapshot": saved,
             },
@@ -4715,6 +4757,8 @@ async def generate_summary(request: SummarizeRequest):
                     source_lines=[f"{line.speaker}: {line.text}" for line in request.lines],
                     model=request.model,
                     system_prompt=request.system_prompt,
+                    summary_style=request.summary_style,
+                    custom_summary_prompt=request.custom_summary_prompt,
                     processing_mode=request.processing_mode,
                 )
 

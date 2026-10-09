@@ -42,15 +42,15 @@ def response(text):
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
 
 
-def setup_model(monkeypatch, mode='slow', review=None, draft=DRAFT):
-    cfg = config(mode)
+def setup_model(monkeypatch, mode='slow', review=None, draft=DRAFT, style='gemma4-lora'):
+    cfg = config(mode).with_summary_style(style)
     calls = []
     monkeypatch.setattr(summarize, 'get_llm_config', lambda model=None: cfg)
     monkeypatch.setattr(summarize, '_load_openai_client', lambda _: None)
     monkeypatch.setattr(summarize, 'check_llm_availability', lambda **_: None)
     def complete(client, settings, **kwargs):
         calls.append((settings, kwargs))
-        if settings.lora_scale:
+        if 'response_format' not in kwargs:
             return response(draft if isinstance(draft, str) else draft(kwargs))
         body = json.loads(kwargs['messages'][1]['content'])
         return response(json.dumps(review(body) if review else dict(complete=True, issues=[FINDING])))
@@ -58,9 +58,9 @@ def setup_model(monkeypatch, mode='slow', review=None, draft=DRAFT):
     return calls
 
 
-def generate(mode='slow', lines=None):
+def generate(mode='slow', lines=None, **preferences):
     lines = ORIGINAL if lines is None else lines
-    return summarize.summarize_segment('2. Kosten', '\n'.join(lines), source_lines=lines, processing_mode=mode)
+    return summarize.summarize_segment('2. Kosten', '\n'.join(lines), source_lines=lines, processing_mode=mode, **preferences)
 
 
 @pytest.mark.parametrize('mode', ['fast', 'slow'])
@@ -104,20 +104,21 @@ def test_slow_without_findings_is_checked_but_does_not_invent_confirmation(monke
 
 
 @pytest.mark.parametrize('mode', ['fast', 'slow'])
-def test_long_top_retains_all_parts_and_all_original_characters(monkeypatch, mode):
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_long_top_retains_all_parts_and_all_original_characters(monkeypatch, style, mode):
     lines = ['Müller: ' + ('Satz mit Zahl 5. ' * 1500), 'B: Ende.']
     serial = []
     def draft(request):
         text = f'## Teil {len(serial)}\n\nUnveränderter Absatz.\n'
         serial.append((text, request['messages'][0]['content']))
         return text
-    calls = setup_model(monkeypatch, mode, draft=draft, review=lambda _: dict(complete=True, issues=[]))
+    calls = setup_model(monkeypatch, mode, style=style, draft=draft, review=lambda _: dict(complete=True, issues=[]))
     result = generate(mode, lines)
     assert len(serial) > 1
     assert result.summary == '\n\n'.join(text for text, _ in serial)
     assert result.chunks_processed == len(serial)
     assert len(calls) == len(serial) * (1 if mode == 'fast' else 3)
-    reviews = [json.loads(k['messages'][1]['content']) for c, k in calls if not c.lora_scale]
+    reviews = [json.loads(k['messages'][1]['content']) for c, k in calls if 'response_format' in k]
     if mode == 'slow':
         for phase in ('final_review', 'consolidated_review'):
             windows = [r for r in reviews if r['phase'] == phase]
@@ -126,14 +127,15 @@ def test_long_top_retains_all_parts_and_all_original_characters(monkeypatch, mod
             assert windows[-1]['original_transcript'].endswith('B: Ende.')
     # Internal identities account for every original byte; none are emitted as paragraph evidence.
     with processing_scope(mode):
-        w = gemma.GemmaWorkflow(None, config(mode), '2. Kosten', '', {})
+        w = gemma.GemmaWorkflow(None, config(mode).with_summary_style(style), '2. Kosten', '', {})
         w.run(lines)
     for index, line in enumerate(lines):
         assert ''.join(r['text'] for r in w.rows if r['line_index'] == index) == line
 
 
 @pytest.mark.parametrize('failure', ['timeout', 'incomplete', 'malformed', 'invented_excerpt'])
-def test_failed_second_review_retains_verbatim_draft_and_prior_findings(monkeypatch, failure):
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_failed_second_review_retains_verbatim_draft_and_prior_findings(monkeypatch, style, failure):
     def review(body):
         if body['phase'] == 'final_review':
             return dict(complete=True, issues=[FINDING])
@@ -144,7 +146,7 @@ def test_failed_second_review_retains_verbatim_draft_and_prior_findings(monkeypa
         if failure == 'invented_excerpt':
             return dict(complete=True, issues=[dict(FINDING, excerpts=['Erfundener Ausschnitt'])])
         return dict(issues=[])
-    setup_model(monkeypatch, review=review)
+    setup_model(monkeypatch, style=style, review=review)
     with pytest.raises((summarize.LLMCallError, summarize.StructuredOutputError)) as caught:
         generate()
     partial = caught.value.partial_result
@@ -159,9 +161,10 @@ def test_failed_second_review_retains_verbatim_draft_and_prior_findings(monkeypa
     assert [w.kind for w in review.warnings] == ['contradiction', 'technical_incomplete']
 
 
-def test_oversized_draft_is_retained_without_truncated_review(monkeypatch):
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_oversized_draft_is_retained_without_truncated_review(monkeypatch, style):
     text = 'Überschrift\n\n' + 'Wort ' * 4000
-    calls = setup_model(monkeypatch, draft=text)
+    calls = setup_model(monkeypatch, style=style, draft=text)
     with pytest.raises(gemma.ContextBudgetError) as caught:
         generate()
     assert caught.value.partial_result.summary == text
@@ -175,17 +178,18 @@ def test_partial_utterance_retains_speaker():
     assert w.source_text([{'line_index': 0, 'start_char': 15, 'text': 'Beitrag.'}]) == ['Müller: Beitrag.']
 
 
-def test_resume_reuses_draft_and_successful_review_only(monkeypatch):
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_resume_reuses_draft_and_successful_review_only(monkeypatch, style):
     import threading
     import durable_jobs as jobs
-    calls = setup_model(monkeypatch)
+    calls = setup_model(monkeypatch, style=style)
     job = jobs.submit('test', {})
     current = jobs.claim('test-worker', 60)
     token = jobs.CURRENT.set(jobs.Runtime(current, 'test-worker', threading.Event()))
     try:
         original_complete = gemma.complete
         def fail_second(client, cfg, **kwargs):
-            if not cfg.lora_scale and json.loads(kwargs['messages'][1]['content'])['phase'] == 'consolidated_review':
+            if 'response_format' in kwargs and json.loads(kwargs['messages'][1]['content'])['phase'] == 'consolidated_review':
                 raise TimeoutError()
             return original_complete(client, cfg, **kwargs)
         monkeypatch.setattr(gemma, 'complete', fail_second)
@@ -196,7 +200,7 @@ def test_resume_reuses_draft_and_successful_review_only(monkeypatch):
         result = generate()
         assert result.summary == DRAFT and result.llm_usage['review_complete'] is True
         assert len(calls) == 3
-        assert sum(c.lora_scale for c, _ in calls) == 1
+        assert sum('response_format' not in k for _, k in calls) == 1
         assert len(result.structured.verification['completed_checks']) == 2
     finally:
         jobs.CURRENT.reset(token)
@@ -238,21 +242,22 @@ def test_streaming_progress_preserves_actual_summary_phase():
         jobs.CURRENT.reset(token)
 
 
-def test_generation_failure_after_first_long_top_part_keeps_partial_draft(monkeypatch):
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_generation_failure_after_first_long_top_part_keeps_partial_draft(monkeypatch, style):
     generated = []
     def draft(_):
         if generated:
             raise TimeoutError()
         generated.append(DRAFT)
         return DRAFT
-    calls = setup_model(monkeypatch, draft=draft)
+    calls = setup_model(monkeypatch, style=style, draft=draft)
     with pytest.raises(summarize.LLMCallError) as caught:
         generate(lines=['A: ' + 'Langer Satz. ' * 2000])
     partial = caught.value.partial_result
     assert partial.summary == DRAFT
     assert partial.llm_usage['generation_complete'] is False
     assert partial.llm_usage['review_complete'] is False
-    assert all(c.lora_scale == 1 for c, _ in calls)
+    assert all('response_format' not in k for c, k in calls)
     review = summarize.build_summary_review(structured=partial.structured, summary=partial.summary,
         lines=[dict(speaker='A', text='Langer Satz. ' * 2000)])
     assert any('Protokollerzeugung' in w.message for w in review.warnings)

@@ -144,9 +144,12 @@ def version_snapshot(payload=None):
         refs = json.loads(refs)
     request = payload.get('request') or refs.get('options') or refs
     mode = request.get('processing_mode', payload.get('processing_mode', 'slow'))
+    summary = get_llm_config(request.get('summary_model') or request.get('model'), processing_mode=mode).with_summary_style(
+        request.get('summary_style'), request.get('custom_summary_prompt'))
     models = {name: get_llm_config(request.get(name), processing_mode=mode).public_snapshot()
               for name in ('model', 'agenda_model', 'summary_model') if request.get(name)}
-    return {"processing": {"mode": request.get("processing_mode", payload.get("processing_mode", "slow")),
+    return {"summary": (summary.for_protocol() if summary.is_gemma_prose else summary).public_snapshot(),
+            "processing": {"mode": request.get("processing_mode", payload.get("processing_mode", "slow")),
                            "version": processing_version}, "transcription": {
         "code": hashlib.sha256(Path(__file__).with_name('transcribe.py').read_bytes()).hexdigest(),
         "policy": {key: os.environ.get(key) for key in ('WHISPER_MODEL', 'WHISPER_DEVICE',

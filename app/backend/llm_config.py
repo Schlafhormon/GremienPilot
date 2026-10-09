@@ -16,6 +16,14 @@ LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DOCKER_OLLAMA_BASE_URL = "http://ollama:11434/v1"
 LOCAL_LLM_HOSTS = {"localhost", "127.0.0.1", "::1"}
 INTERNAL_LLM_HOSTS = {"ollama"}
+GEMMA_STYLES = {'gemma4-lora', 'gemma4-custom'}
+DEFAULT_CUSTOM_SUMMARY_PROMPT = """Erstelle ein sachliches, gut lesbares Sitzungsprotokoll auf Deutsch.
+Beginne mit einer Überschrift zum Tagesordnungspunkt. Fasse die wesentlichen
+Argumente in kurzen Absätzen zusammen. Stelle tatsächlich gefasste Beschlüsse
+und Abstimmungsergebnisse in einem eigenen Abschnitt dar. Nenne Aufgaben,
+Verantwortliche und Fristen, soweit sie genannt wurden, sowie offene Fragen.
+Verwende bei Bedarf Markdown-Überschriften, Listen oder übersichtliche Tabellen.
+Halte den Text so knapp wie möglich und so ausführlich wie fachlich nötig."""
 
 def _is_truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -132,6 +140,7 @@ class LLMConfig:
     model_revision: str = ''
     output_parameter: str = 'max_tokens'
     summary_style: str = 'structured'
+    custom_summary_prompt: str = DEFAULT_CUSTOM_SUMMARY_PROMPT
     lora_id: int = 0
     lora_scale: float = 0.0
     adapter_revision: str = ''
@@ -147,10 +156,12 @@ class LLMConfig:
             raise ModelConfigurationError('LLM_BASE_URL must be an HTTP(S) URL without credentials/query')
         if not self.model.strip() or self.provider not in {'ollama', 'openai-compatible', 'llama-cpp'}:
             raise ModelConfigurationError('Invalid LLM_MODEL or LLM_PROVIDER')
-        if self.summary_style not in {'structured', 'gemma4-lora'}:
+        if self.summary_style not in {'structured', *GEMMA_STYLES}:
             raise ModelConfigurationError('Invalid LLM_SUMMARY_STYLE')
-        if self.summary_style == 'gemma4-lora' and self.provider != 'llama-cpp':
-            raise ModelConfigurationError('gemma4-lora requires LLM_PROVIDER=llama-cpp')
+        if self.is_gemma_prose and self.provider != 'llama-cpp':
+            raise ModelConfigurationError('Gemma prose requires LLM_PROVIDER=llama-cpp')
+        if not isinstance(self.custom_summary_prompt, str):
+            raise ModelConfigurationError('Custom summary prompt must be text')
         if type(self.lora_id) is not int or self.lora_id < 0 or self.lora_scale not in {0.0, 1.0}:
             raise ModelConfigurationError('Invalid LoRA adapter selection')
         if self.reasoning_effort not in {None, 'none', 'low', 'medium', 'high', 'max'}:
@@ -199,11 +210,25 @@ class LLMConfig:
         return self.provider == 'llama-cpp' and _base_url_host(self.base_url) in (
             LOCAL_LLM_HOSTS | {'llama', 'host.docker.internal'})
 
+    @property
+    def is_gemma_prose(self):
+        return self.summary_style in GEMMA_STYLES
+
+    def with_summary_style(self, style=None, prompt=None):
+        """Copy request preferences without changing unrelated model profiles."""
+        if style is not None and style not in GEMMA_STYLES:
+            raise ModelConfigurationError('Invalid summary style')
+        if not self.is_gemma_prose:
+            return self
+        return replace(self, summary_style=style or self.summary_style,
+                       custom_summary_prompt=self.custom_summary_prompt if prompt is None else prompt,
+                       lora_scale=0.0)
+
     def for_protocol(self):
         """The adapter is enabled only for prose, never JSON/vision/review tasks."""
-        if self.summary_style != 'gemma4-lora':
+        if not self.is_gemma_prose:
             raise ModelConfigurationError('Protocol adapter is not configured')
-        return replace(self, lora_scale=1.0, reasoning_effort='none', thinking=None,
+        return replace(self, lora_scale=1.0 if self.summary_style == 'gemma4-lora' else 0.0, reasoning_effort='none', thinking=None,
                        thinking_tokens=0, temperature=0.3, top_p=0.9, top_k=0,
                        image_tokens=0)
 

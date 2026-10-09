@@ -488,7 +488,7 @@ def parse_structured_summary(content: str) -> StructuredSummary:
 
 def render_structured_summary(structured: StructuredSummary) -> str:
     """Render structured minutes into editable text for existing users."""
-    if structured.verification.get('summary_style') == 'gemma4-lora':
+    if structured.verification.get('summary_style') in {'gemma4-lora', 'gemma4-custom'}:
         from gemma_summary import render_protocol
         return render_protocol(structured)
 
@@ -690,14 +690,17 @@ def summarize_segment(
     meeting_context: Optional[str] = None,
     source_lines: list[str] | None = None,
     processing_mode: str | None = None,
+    summary_style: str | None = None,
+    custom_summary_prompt: str | None = None,
 ) -> SummarizationResult:
-    """Generate structured minutes; Slow independently verifies and reconciles them.
+    """Generate minutes using the selected profile and an immutable request config.
 
-    Fast retains source references with explicit unreviewed provenance. It never
-    inherits a Slow certificate; technical failures remain failures in both modes.
+    Gemma retains prose verbatim; Slow reviews each part against its full input.
+    Other profiles retain their structured workflow. Fast never inherits a Slow
+    certificate; technical failures remain failures in both modes.
     """
     from summary_grounding import Workflow, digest
-    config = get_llm_config(model)
+    config = get_llm_config(model).with_summary_style(summary_style, custom_summary_prompt)
     client = _load_openai_client(config)
     check_llm_availability(client=client, model=config.model)
     lines = source_lines if source_lines is not None else transcript_text.splitlines()
@@ -707,7 +710,7 @@ def summarize_segment(
         raise StructuredOutputError("Quellzeilen stimmen nicht mit Transkript überein")
     start = time.monotonic()
     usage = {'configuration': config.public_snapshot()}
-    if config.summary_style == 'gemma4-lora':
+    if config.is_gemma_prose:
         from gemma_summary import GemmaWorkflow, render_protocol
         workflow = GemmaWorkflow(client, config, top_title, meeting_context, usage)
         render = render_protocol
@@ -716,7 +719,7 @@ def summarize_segment(
                             + "\nTOP: " + top_title, meeting_context, usage)
         render = render_structured_summary
     def attach_partial(error):
-        if config.summary_style == 'gemma4-lora':
+        if config.is_gemma_prose:
             if workflow.protocol_parts:
                 error.partial_result = protocol_result(workflow.protocol_parts, workflow.issues,
                     list(workflow.partial_rows.values()), len(workflow.protocol_parts), incomplete=True)
@@ -743,7 +746,7 @@ def summarize_segment(
         from gemma_summary import CONTRACT, VERSION
         # Joining parts adds only a separator; no headings or paragraphs are removed.
         summary = '\n\n'.join(part['text'] for part in parts)
-        state = dict(**policy().snapshot(), summary_style='gemma4-lora',
+        state = dict(**policy().snapshot(), summary_style=config.summary_style,
             processing_complete=not incomplete, generation_complete=workflow.generation_complete,
             review_complete=not policy().fast and not incomplete,
             review_status='incomplete' if incomplete else 'skipped' if policy().fast else 'completed',
@@ -762,14 +765,14 @@ def summarize_segment(
     except ContextBudgetError as exc:
         raise attach_partial(exc)
     except ValueError as exc:
-        label = 'Inhaltsprüfung' if config.summary_style == 'gemma4-lora' else 'Quellenprüfung'
+        label = 'Inhaltsprüfung' if config.is_gemma_prose else 'Quellenprüfung'
         raise attach_partial(StructuredOutputError("Automatische " + label + " technisch unvollständig")) from exc
     except Exception as exc:
         info = classify_llm_error(exc)
-        label = 'Inhaltsprüfung' if config.summary_style == 'gemma4-lora' else 'Quellenprüfung'
+        label = 'Inhaltsprüfung' if config.is_gemma_prose else 'Quellenprüfung'
         raise attach_partial(LLMCallError("Automatische " + label + " fehlgeschlagen (" + info.category + ")",
                            category=info.category, transient=info.transient)) from exc
-    if config.summary_style == 'gemma4-lora':
+    if config.is_gemma_prose:
         return protocol_result(claims, issues, rows, count)
     structured = StructuredSummary()
     from source_contract import marked_text

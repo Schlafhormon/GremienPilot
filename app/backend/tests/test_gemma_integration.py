@@ -38,8 +38,9 @@ def session_state(result):
 
 @pytest.mark.parametrize('mode', ['fast', 'slow'])
 @pytest.mark.parametrize('discard_metadata', [True, False])
-def test_save_reopen_edit_keeps_prose_and_all_review_findings(monkeypatch, mode, discard_metadata):
-    setup_model(monkeypatch, mode)
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_save_reopen_edit_keeps_prose_and_all_review_findings(monkeypatch, style, mode, discard_metadata):
+    setup_model(monkeypatch, mode, style=style)
     result = generate(mode)
     first = persistence.save_session('gemma-session', main.reconcile_session_summaries(None, session_state(result)))
     reopened = persistence.load_session('gemma-session')
@@ -64,8 +65,9 @@ def test_save_reopen_edit_keeps_prose_and_all_review_findings(monkeypatch, mode,
 
 @pytest.mark.parametrize('mode', ['fast', 'slow'])
 @pytest.mark.parametrize('export_format', ['txt', 'docx', 'pdf'])
-def test_export_keeps_headings_paragraphs_and_separate_hints(monkeypatch, mode, export_format):
-    setup_model(monkeypatch, mode)
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_export_keeps_headings_paragraphs_and_separate_hints(monkeypatch, style, mode, export_format):
+    setup_model(monkeypatch, mode, style=style)
     result = generate(mode)
     document = build_protocol_document(metadata=ProtocolMetadata(title='Sitzung'), tops=['Kosten'],
         summaries={0: DRAFT}, summary_reviews={0: review_data(result)})
@@ -114,12 +116,13 @@ def test_changed_sources_invalidate_review_but_keep_findings(monkeypatch):
 
 
 @pytest.mark.parametrize('failure', [False, True])
-def test_direct_api_preserves_draft_and_truthful_status(monkeypatch, failure):
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_direct_api_preserves_draft_and_truthful_status(monkeypatch, style, failure):
     def review(body):
         if failure:
             raise TimeoutError()
         return dict(complete=True, issues=[FINDING])
-    setup_model(monkeypatch, review=review)
+    setup_model(monkeypatch, style=style, review=review)
     with TestClient(main.app) as client:
         response = client.post('/api/summarize', json={'top_title': 'Kosten', 'lines': review_lines(), 'processing_mode': 'slow'})
     assert response.status_code == 200
@@ -131,8 +134,9 @@ def test_direct_api_preserves_draft_and_truthful_status(monkeypatch, failure):
     assert any(w['kind'] == 'technical_incomplete' for w in body['review_warnings']) is failure
 
 
-def test_failed_regeneration_stores_new_draft_instead_of_losing_it(monkeypatch):
-    setup_model(monkeypatch)
+@pytest.mark.parametrize('style', ['gemma4-lora', 'gemma4-custom'])
+def test_failed_regeneration_stores_new_draft_instead_of_losing_it(monkeypatch, style):
+    setup_model(monkeypatch, style=style)
     result = generate()
     state = session_state(result)
     state['summaries'] = {0: 'Alter Entwurf'}
@@ -146,7 +150,7 @@ def test_failed_regeneration_stores_new_draft_instead_of_losing_it(monkeypatch):
         revision=session['revision'], top_ids=['costs'])))
     def fail(_):
         raise TimeoutError()
-    setup_model(monkeypatch, review=fail)
+    setup_model(monkeypatch, style=style, review=fail)
     main.run_summary_job(job.summary_job_id)
     saved = persistence.load_session('gemma-session')
     assert saved['summaries'][0] == DRAFT

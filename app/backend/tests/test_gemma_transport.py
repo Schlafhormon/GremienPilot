@@ -20,16 +20,17 @@ def test_protocol_configuration_is_isolated():
     assert prose.public_snapshot()['config_id'] != base.public_snapshot()['config_id']
 
 
-@pytest.mark.parametrize('adapter', [False, True])
-def test_request_local_adapter_and_thinking(monkeypatch, adapter):
+@pytest.mark.parametrize('style,adapter', [(None, False), ('gemma4-lora', True), ('gemma4-custom', False)])
+def test_request_local_adapter_and_thinking(monkeypatch, style, adapter):
     cfg = config()
-    if adapter:
-        cfg = cfg.for_protocol()
+    if style:
+        cfg = cfg.with_summary_style(style, 'Eigener Stil').for_protocol()
     payloads = []
     async def stream(client, settings, payload):
         payloads.append(payload)
         yield {'choices': [{'delta': {'content': 'Text'}, 'finish_reason': 'stop'}]}
     async def metadata(*args, **kwargs):
+        assert args[1] == 'GET'  # Never change the server's global adapter state.
         if args[2].endswith('/lora-adapters'):
             return [{'id': 0, 'path': '/models/gemma-4-31b-protokoll-f16.gguf'}]
         return {'default_generation_settings': {'n_ctx': 131072}}
@@ -38,6 +39,7 @@ def test_request_local_adapter_and_thinking(monkeypatch, adapter):
     result = transport.complete(None, cfg, messages=[{'role': 'user', 'content': 'Quelle'}], max_tokens=128)
     request = payloads[0]
     assert request['lora'] == [{'id': 0, 'scale': float(adapter)}]
+    assert request['model'] == 'gemma-4-31b'
     assert request['chat_template_kwargs'] == {'enable_thinking': False}
     assert 'reasoning_effort' not in request
     assert request['repeat_penalty'] == 1.0
