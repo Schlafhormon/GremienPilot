@@ -11,7 +11,8 @@ if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 # Load only the functions under test, without executing the setup entrypoint.
 foreach ($name in @("Test-Truthy", "Invoke-BuildLocalImages", "Remove-ExistingContainersForRebuild",
                     "Get-ProjectVolumeName", "Wait-ForServices", "Show-StartupProgress", "Show-FailureDiagnostics",
-                    "Initialize-Configuration", "Invoke-Start", "Get-ConfiguredPort")) {
+                    "Initialize-Configuration", "Invoke-Start", "Get-ConfiguredPort",
+                    "Confirm-ModelCacheHandling", "Test-VolumeExists")) {
     $definition = $ast.Find({ param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
@@ -108,19 +109,59 @@ if (-not $result[-1] -or $script:ModelProbes -lt 2) { throw 'Backend health bypa
 function docker {
     $global:LASTEXITCODE = 0
     if ($args -contains 'config') {
-        '{"volumes":{"ollama_data":{"name":"custom-project_ollama_data"}}}'
+        '{"volumes":{"backend_hf_cache":{"name":"custom-project_backend_hf_cache"}}}'
     } else {
         "ollama | pulling model: 38%$([char]27)[K"
         "ollama | [GIN] HEAD /"
     }
 }
-if ((Get-ProjectVolumeName "ollama_data") -ne 'custom-project_ollama_data') {
+if ((Get-ProjectVolumeName "backend_hf_cache") -ne 'custom-project_backend_hf_cache') {
     throw "Resolved Compose volume name was ignored"
 }
 $captured = @(Show-StartupProgress 6>&1)
 $messages = $captured | Out-String
 if ($messages -notmatch '38%' -or $messages.Contains([string][char]27)) {
     throw "Download progress is missing or still contains terminal escape sequences"
+}
+
+# Gemma has no ollama_data volume. Cache operations must use the resolved
+# Compose names and exclude both the session database and other instances.
+foreach ($scenario in @('keep', 'refresh', 'fresh', 'missing', 'invalid', 'compose_error')) {
+    $script:Calls = @()
+    $script:Prompted = $false
+    function Read-Host {
+        $script:Prompted = $true
+        if ($scenario -eq 'refresh') { return 'n' }
+        return '' # Default: keep models.
+    }
+    function docker {
+        $script:Calls += ,@($args)
+        $global:LASTEXITCODE = 0
+        if ($args -contains 'config') {
+            if ($scenario -eq 'invalid') { return 'not JSON' }
+            if ($scenario -eq 'compose_error') { $global:LASTEXITCODE = 1; return }
+            if ($scenario -eq 'missing') {
+                return '{"volumes":{"backend_hf_cache":{"name":"custom-project_hf"}}}'
+            }
+            return '{"volumes":{"backend_hf_cache":{"name":"custom-project_hf"},"backend_torch_cache":{"name":"custom-project_torch"},"backend_state":{"name":"custom-project_state"}}}'
+        }
+        if ($args -contains 'inspect' -and $scenario -eq 'fresh') { $global:LASTEXITCODE = 1 }
+        if ($args[-1] -notin @('custom-project_hf', 'custom-project_torch')) {
+            throw "Operation targeted a session, legacy or foreign volume: $args"
+        }
+    }
+    $result = @(Confirm-ModelCacheHandling)
+    $expected = $scenario -in @('keep', 'refresh', 'fresh')
+    if ($result.Count -ne 1 -or $result[0] -isnot [bool] -or $result[0] -ne $expected) {
+        throw "Incorrect Gemma cache handling result: $scenario"
+    }
+    $removals = @($script:Calls | Where-Object { $_ -contains 'rm' })
+    if ($removals.Count -ne $(if ($scenario -eq 'refresh') { 2 } else { 0 })) {
+        throw "Unexpected model cache deletion: $scenario"
+    }
+    if ($script:Prompted -ne ($scenario -in @('keep', 'refresh'))) {
+        throw "Unexpected cache prompt: $scenario"
+    }
 }
 function docker {
     $global:LASTEXITCODE = 0

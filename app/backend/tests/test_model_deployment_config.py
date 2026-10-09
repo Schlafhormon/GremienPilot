@@ -6,6 +6,23 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.mark.parametrize('script', ['setup.ps1', 'setup.sh'])
+def test_setup_model_caches_match_gemma_compose_volumes(script):
+    compose = (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
+    declared = set(re.findall(r'^  ([a-z_]+):', compose.rsplit('\nvolumes:\n', 1)[1], re.M))
+    source = (ROOT / script).read_text(encoding='utf-8')
+    if script.endswith('.ps1'):
+        cache_function = re.search(r'^function Confirm-ModelCacheHandling \{.*?^\}', source, re.M | re.S).group()
+        requested = set(re.findall(r'Get-ProjectVolumeName "([a-z_]+)"', cache_function))
+    else:
+        cache_function = re.search(r'^confirm_model_cache_handling\(\) \{.*?^\}', source, re.M | re.S).group()
+        requested = set(re.findall(r'project_volume_name ([a-z_]+)', cache_function))
+    assert requested <= declared
+    assert requested == {'backend_hf_cache', 'backend_torch_cache'}
+    assert 'backend_state' not in requested
+    assert './data/gemma4:/models:ro' in compose
+
+
 @pytest.mark.parametrize('mode', ['fast', 'slow'])
 def test_shared_context_default_reaches_both_modes_and_deployments(monkeypatch, mode):
     from llm_config import get_llm_config

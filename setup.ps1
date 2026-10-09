@@ -243,8 +243,9 @@ function Remove-ExistingContainersForRebuild {
 }
 
 function Confirm-ModelCacheHandling {
+    # Gemma weights are bind-mounted from data/gemma4; only these backend
+    # caches are named model volumes. Never include the session database.
     $volumeNames = @(
-        (Get-ProjectVolumeName "ollama_data"),
         (Get-ProjectVolumeName "backend_hf_cache"),
         (Get-ProjectVolumeName "backend_torch_cache")
     )

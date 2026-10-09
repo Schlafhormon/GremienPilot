@@ -237,8 +237,9 @@ remove_existing_containers_for_rebuild() {
 }
 
 confirm_model_cache_handling() {
+    # Gemma uses the data/gemma4 bind mount, not an Ollama model volume.
+    # Session data (backend_state) is not a disposable model cache.
     local volume_names=(
-        "$(project_volume_name ollama_data)"
         "$(project_volume_name backend_hf_cache)"
         "$(project_volume_name backend_torch_cache)"
     )
