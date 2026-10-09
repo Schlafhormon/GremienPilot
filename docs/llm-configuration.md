@@ -8,15 +8,38 @@ BNB-4bit-Trainingsbasis abweichen.
 
 ## Vorbereitung und Start
 
-`setup.ps1 build` bzw. `./setup.sh build` bereitet fehlende Gewichte mit Python
-3.11+ und Git vor. Separat: `python scripts/prepare_gemma4.py --bootstrap`.
+`setup.ps1 build` bzw. `./setup.sh build` stellt Python 3.12, Git und die gepinnten
+Konvertierungsabhängigkeiten automatisch in einem eigenen Docker-Image bereit.
+Python muss auf dem Host weder installiert noch umgestellt werden; vorhandenes
+Python 3.14 bleibt unverändert. Unter Windows und macOS wird wie für die übrige
+Anwendung Docker Desktop mit Linux-Containern verwendet.
 
-Das Skript erzeugt eine eigene Konvertierungsumgebung unter `data/gemma4/`,
-lädt feste Revisionen mit Prüfsummen, verwendet llama.cpp `b11429` und schreibt
-`checksums.sha256`. Teil-Downloads sind fortsetzbar. Die Dateien bleiben lokal
-und werden nicht eingecheckt. Beim Start prüft llama.cpp diese Prüfsummen.
-Ein vorhandenes Modellmanifest überspringt die Vorbereitung im Setup.
+Das Image `gremienpilot-gemma-converter:python3.12-b11429` wird aus
+`scripts/Dockerfile.gemma-converter` gebaut. Der Build installiert nur Werkzeuge,
+keine Modellgewichte, und erfolgt vor dem Stoppen bestehender App-Container.
+Beim ersten Build ist Internetzugang für das Python-Image, Debian-Pakete, GitHub
+und Python-Pakete nötig; der Docker-Cache wird bei weiteren Builds wiederverwendet.
+Die Speicherplanung berücksichtigt zusätzlich ungefähr 3 GB für den Konverter.
+Ein vorhandenes `.certs/custom-ca.crt` wird für Git-, Paket- und Modelldownloads
+in den Zertifikatsspeicher des Konverter-Images aufgenommen.
+
+Ein temporärer Container lädt anschließend feste Modellrevisionen mit Prüfsummen,
+verwendet llama.cpp `b11429` und schreibt die Gewichte und `checksums.sha256` nach
+`data/gemma4/`. Nur dieses Verzeichnis wird eingebunden; Python und Konverter
+bleiben im Image. Unter Linux/macOS entstehen Dateien mit der Benutzer-ID des
+Setup-Aufrufs. Teil-Downloads sind fortsetzbar; nach einem Fehler genügt erneut
+`setup build`. Frühere lokale Konvertierungsumgebungen bleiben unangetastet.
+Die Dateien bleiben lokal und werden nicht eingecheckt. Beim Start prüft llama.cpp
+diese Prüfsummen. Eine vorhandene, nicht leere `checksums.sha256` überspringt die
+Modellvorbereitung einschließlich des Konverter-Builds im Setup.
 Für das lokale Setup müssen die Anwendungimages lokal gebaut werden.
+
+Für die manuelle Vorbereitung ohne Docker bleibt
+`python scripts/prepare_gemma4.py --bootstrap` verfügbar. Dafür müssen Python
+3.11–3.13 und Git bereits installiert sein; die virtuelle Umgebung entsteht unter
+`data/gemma4/converter-venv/`. Das gepinnte
+[NumPy 2.2.6](https://numpy.org/doc/stable/release/2.2.6-notes.html) unterstützt
+Python 3.14 nicht. Das normale Setup übernimmt diese Versionswahl automatisch.
 
 Docker Compose startet den Alias `gemma-4-31b` unter `http://llama:8080/v1`.
 Der Hostport 8080 ist nur an Loopback gebunden. CPU-Betrieb verwendet das

@@ -198,9 +198,12 @@ chmod +x ./setup.sh
 
 Beim ersten Start prüft das Setup Docker, erkennt optional eine NVIDIA-GPU, baut lokale
 Docker-Images aus diesem Branch und startet Frontend, Backend und llama.cpp per
-Docker Compose. Python 3.11+ und Git bereiten Gemma 4 31B Q4_K_M, Bildprojektor
-und den [HPI-Protokoll-LoRA](https://huggingface.co/aihpi/gemma-4-31b-protokoll) vor
-(ca. 20 GB Download). Der passende Tokenizer wird beim Image-Bau mitgeliefert.
+Docker Compose. Für Gemma 4 31B Q4_K_M, Bildprojektor und den
+[HPI-Protokoll-LoRA](https://huggingface.co/aihpi/gemma-4-31b-protokoll) stellt es
+Python 3.12 und Git automatisch in einem separaten Docker-Image bereit.
+Eine Python-Installation auf dem Host ist nicht erforderlich. Die Modellgewichte
+umfassen ca. 20 GB Download; für das Konverter-Image sind zusätzlich ungefähr 3 GB
+Speicher eingeplant. Der passende Tokenizer wird beim Image-Bau mitgeliefert.
 Vorhandene Container werden mit `start` ohne Neubau gestartet. Nach Code- oder
 Konfigurationsänderungen baut `setup.ps1 build` beziehungsweise `./setup.sh build`
 neu; Modell-Volumes bleiben standardmäßig erhalten.
@@ -531,27 +534,18 @@ Prüfen Sie die LLM-Diagnose mit:
 curl http://localhost:8010/api/llm/diagnostics
 ```
 
-Wenn das Modell fehlt, laden Sie es nach:
+Wenn das Modell fehlt, bereitet das Setup es mit der passenden Python-Version vor
+und baut/startet anschließend die Anwendung:
 
 ```bash
-python scripts/prepare_gemma4.py --bootstrap
-docker compose logs llama
+./setup.sh build
 ```
+
+Unter Windows: `.\setup.ps1 build`. Bei der Modell-Volume-Frage die vorhandenen
+Bestände behalten. Details zur [Modellvorbereitung](docs/llm-configuration.md).
 
 Für lokale Backend-Entwicklung muss llama.cpp erreichbar und
 `LLM_BASE_URL=http://localhost:8080/v1` gesetzt sein.
-
-Danach neu starten:
-
-```bash
-./setup.sh restart
-```
-
-oder unter Windows:
-
-```powershell
-.\setup.ps1 restart
-```
 
 ### Anwendung ist langsam
 

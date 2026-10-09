@@ -51,6 +51,7 @@ fi
 BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
 LLAMA_IMAGE="${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-${LLAMA_IMAGE_TAG:-b11429}}"
 LLAMA_MODEL="${LLM_MODEL:-gemma-4-31b}"
+GEMMA_CONVERTER_IMAGE="gremienpilot-gemma-converter:python3.12-b11429"
 
 # Compose must still honor LLAMA_IMAGE from .env. A shell override remains
 # exported naturally; only an explicitly selected tag needs a new export.
@@ -365,6 +366,32 @@ gemma_model_exists() {
     [ -s "$SCRIPT_DIR/data/gemma4/checksums.sha256" ]
 }
 
+build_gemma_converter() {
+    info "Bereite Python 3.12 und Gemma-Konverter in Docker vor (System-Python bleibt unveraendert)..."
+    local build_args=()
+    if [ -f "$SCRIPT_DIR/.certs/custom-ca.crt" ]; then
+        build_args+=(--secret "id=custom_ca,src=$SCRIPT_DIR/.certs/custom-ca.crt")
+    fi
+    if truthy "$PROTOKOLL_BUILD_NO_CACHE"; then build_args+=(--no-cache); fi
+    if ! docker build "${build_args[@]}" -f "$SCRIPT_DIR/scripts/Dockerfile.gemma-converter" \
+        -t "$GEMMA_CONVERTER_IMAGE" "$SCRIPT_DIR/scripts"; then
+        error "Gemma-Konverter konnte nicht vorbereitet werden. Internetzugang und Docker-Speicher pruefen; danach setup build erneut ausfuehren."
+        return 1
+    fi
+}
+
+prepare_gemma_assets() {
+    local model_dir="$SCRIPT_DIR/data/gemma4"
+    mkdir -p "$model_dir" || return 1
+    info "Lade Gemma Q4_K_M und konvertiere den HPI-Adapter mit Python 3.12..."
+    # Host UID/GID keeps downloaded files writable without sudo on Linux/macOS.
+    if ! docker run --rm --user "$(id -u):$(id -g)" \
+        --mount "type=bind,source=$model_dir,target=/models" "$GEMMA_CONVERTER_IMAGE"; then
+        error "Modellvorbereitung fehlgeschlagen. Vorhandene Downloads bleiben erhalten; setup build kann erneut ausgefuehrt werden."
+        return 1
+    fi
+}
+
 ########################################
 # Smart disk space check
 ########################################
@@ -391,6 +418,10 @@ check_disk_space() {
     fi
 
     if ! gemma_model_exists; then
+        if ! image_exists "$GEMMA_CONVERTER_IMAGE"; then
+            required_gb=$((required_gb + 3))
+            MISSING_ITEMS+=("Python-/Gemma-Konverter-Image (~3GB)")
+        fi
         local model_disk_gb="${PROTOKOLL_MODEL_DISK_GB:-40}"
         if ! [[ "$model_disk_gb" =~ ^[1-9][0-9]*$ ]]; then
             error "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
@@ -919,8 +950,12 @@ do_build() {
     # Pre-flight checks
     check_docker || exit 1
     initialize_configuration || exit 1
-    remove_existing_containers_for_rebuild || exit 1
     check_disk_space || exit 1
+    # Resolve converter dependencies before stopping an existing installation.
+    if ! gemma_model_exists; then
+        build_gemma_converter || return 1
+    fi
+    remove_existing_containers_for_rebuild || exit 1
     check_ram
     check_ports || exit 1
     check_gpu
@@ -931,8 +966,7 @@ do_build() {
     mkdir -p uploads
 
     if ! gemma_model_exists; then
-        info "Lade Gemma-Gewichte und konvertiere den Protokoll-Adapter..."
-        python3 scripts/prepare_gemma4.py --bootstrap || return 1
+        prepare_gemma_assets || return 1
     fi
 
     # Start the application

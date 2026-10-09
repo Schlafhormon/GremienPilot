@@ -46,6 +46,7 @@ if ($PROTOKOLL_IMAGE_TAG) {
 $LLAMA_IMAGE_TAG = if ($env:LLAMA_IMAGE_TAG) { $env:LLAMA_IMAGE_TAG } else { "b11429" }
 $LLAMA_IMAGE = if ($env:LLAMA_IMAGE) { $env:LLAMA_IMAGE } else { "ghcr.io/ggml-org/llama.cpp:server-${LLAMA_IMAGE_TAG}" }
 $LLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "gemma-4-31b" }
+$GEMMA_CONVERTER_IMAGE = "gremienpilot-gemma-converter:python3.12-b11429"
 
 $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
 $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
@@ -413,7 +414,43 @@ function Test-ImageExists {
 # Check if llama.cpp model is downloaded
 #######################################
 function Test-GemmaModelExists {
-    return Test-Path -LiteralPath (Join-Path $ScriptDir 'data/gemma4/checksums.sha256')
+    $manifest = Get-Item -LiteralPath (Join-Path $ScriptDir 'data/gemma4/checksums.sha256') -ErrorAction SilentlyContinue
+    return ($null -ne $manifest -and -not $manifest.PSIsContainer -and $manifest.Length -gt 0)
+}
+
+function Build-GemmaConverter {
+    Write-Info "Bereite Python 3.12 und Gemma-Konverter in Docker vor (System-Python bleibt unveraendert)..."
+    $buildArgs = @('build')
+    $caCert = Join-Path $ScriptDir '.certs/custom-ca.crt'
+    if (Test-Path -LiteralPath $caCert -PathType Leaf) {
+        $buildArgs += @('--secret', "id=custom_ca,src=$caCert")
+    }
+    if (Test-Truthy $env:PROTOKOLL_BUILD_NO_CACHE) { $buildArgs += '--no-cache' }
+    $buildArgs += @('-f', (Join-Path $ScriptDir 'scripts/Dockerfile.gemma-converter'),
+                   '-t', $GEMMA_CONVERTER_IMAGE, (Join-Path $ScriptDir 'scripts'))
+    docker @buildArgs | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Gemma-Konverter konnte nicht vorbereitet werden. Internetzugang und Docker-Speicher pruefen; danach setup build erneut ausfuehren."
+        return $false
+    }
+    return $true
+}
+
+function Initialize-GemmaAssets {
+    $modelDir = Join-Path $ScriptDir 'data/gemma4'
+    try {
+        New-Item -ItemType Directory -Force -Path $modelDir -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Err "Modellverzeichnis konnte nicht angelegt werden: $_"
+        return $false
+    }
+    Write-Info "Lade Gemma Q4_K_M und konvertiere den HPI-Adapter mit Python 3.12..."
+    docker run --rm --mount "type=bind,source=$modelDir,target=/models" $GEMMA_CONVERTER_IMAGE | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Modellvorbereitung fehlgeschlagen. Vorhandene Downloads bleiben erhalten; setup build kann erneut ausgefuehrt werden."
+        return $false
+    }
+    return $true
 }
 
 #######################################
@@ -442,6 +479,10 @@ function Test-DiskSpace {
     }
 
     if (-not (Test-GemmaModelExists)) {
+        if (-not (Test-ImageExists $GEMMA_CONVERTER_IMAGE)) {
+            $requiredGB += 3
+            $script:MissingItems += "Python-/Gemma-Konverter-Image (~3GB)"
+        }
         $modelDiskGB = if ($env:PROTOKOLL_MODEL_DISK_GB) { $env:PROTOKOLL_MODEL_DISK_GB } else { "40" }
         if ($modelDiskGB -notmatch '^[1-9][0-9]*$') {
             Write-Err "PROTOKOLL_MODEL_DISK_GB muss eine positive ganze Zahl sein"
@@ -942,14 +983,16 @@ function Invoke-Build {
 
     if (-not (Initialize-Configuration)) { exit 1 }
 
-    if (-not (Remove-ExistingContainersForRebuild)) {
-        exit 1
-    }
-
     if (-not (Test-DiskSpace)) {
         Read-Host "Druecken Sie Enter zum Beenden"
         exit 1
     }
+
+    # Resolve converter dependencies before stopping an existing installation.
+    if (-not (Test-GemmaModelExists)) {
+        if (-not (Build-GemmaConverter)) { exit 1 }
+    }
+    if (-not (Remove-ExistingContainersForRebuild)) { exit 1 }
 
     Test-RAM | Out-Null
 
@@ -970,9 +1013,7 @@ function Invoke-Build {
     New-Item -ItemType Directory -Force -Path "uploads" | Out-Null
 
     if (-not (Test-GemmaModelExists)) {
-        Write-Info "Lade Gemma-Gewichte und konvertiere den Protokoll-Adapter..."
-        python scripts/prepare_gemma4.py --bootstrap
-        if ($LASTEXITCODE -ne 0) { Write-Err "Modellvorbereitung fehlgeschlagen."; exit 1 }
+        if (-not (Initialize-GemmaAssets)) { exit 1 }
     }
 
     # Start the application

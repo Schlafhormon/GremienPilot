@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+# Host Python is deliberately not used by setup. Keep converter dependencies
+# and the llama.cpp revision in prepare_gemma4.py as the single source of truth.
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HOME=/tmp
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=secret,id=custom_ca,required=false \
+    if [ -s /run/secrets/custom_ca ]; then \
+      cp /run/secrets/custom_ca /usr/local/share/ca-certificates/gremienpilot.crt && \
+      update-ca-certificates; \
+    fi
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+
+COPY prepare_gemma4.py /opt/gemma/scripts/prepare_gemma4.py
+RUN python /opt/gemma/scripts/prepare_gemma4.py --bootstrap --tools-only \
+    --directory /opt/gemma --llama-cpp /opt/gemma/llama.cpp \
+    && git config --system --add safe.directory /opt/gemma/llama.cpp
+
+# Only the model directory is mounted; the converter and Python stay in the image.
+WORKDIR /opt/gemma
+ENTRYPOINT ["/opt/gemma/converter-venv/bin/python", "/opt/gemma/scripts/prepare_gemma4.py", "--directory", "/models", "--llama-cpp", "/opt/gemma/llama.cpp"]

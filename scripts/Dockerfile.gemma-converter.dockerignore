@@ -1,0 +1,4 @@
+**
+!Dockerfile.gemma-converter
+!Dockerfile.gemma-converter.dockerignore
+!prepare_gemma4.py

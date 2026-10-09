@@ -151,14 +151,18 @@ def prepare(destination, llama, download_only=False):
 
 
 if __name__ == '__main__':
-    if sys.version_info < (3, 11):
-        sys.exit('Gemma asset preparation requires Python 3.11 or newer.')
+    if not (3, 11) <= sys.version_info[:2] < (3, 14):
+        sys.exit('Gemma asset preparation requires Python 3.11-3.13. '
+                 'Use setup build to provide Python 3.12 automatically via Docker.')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory', type=Path, default=ROOT / 'data' / 'gemma4')
     parser.add_argument('--llama-cpp', type=Path, default=ROOT / 'data' / 'gemma4' / 'llama.cpp')
     parser.add_argument('--download-only', action='store_true')
     parser.add_argument('--bootstrap', action='store_true', help='Create an isolated converter venv and pinned llama.cpp checkout')
+    parser.add_argument('--tools-only', action='store_true', help='With --bootstrap: install converter tools without downloading model assets')
     args = parser.parse_args()
+    if args.tools_only and not args.bootstrap:
+        parser.error('--tools-only requires --bootstrap')
     if args.bootstrap:
         import venv
         directory = args.directory.resolve()
@@ -176,6 +180,8 @@ if __name__ == '__main__':
         subprocess.run([str(python), '-m', 'pip', 'install', '--use-feature=truststore',
                         'transformers==4.57.6', 'sentencepiece==0.2.2', 'protobuf==4.25.9',
                         'safetensors==0.8.0', 'gguf==0.19.0', 'numpy==2.2.6'], check=True)
+        if args.tools_only:
+            sys.exit(0)
         subprocess.run([str(python), str(Path(__file__).resolve()), '--directory', str(directory),
                         '--llama-cpp', str(llama)] + (['--download-only'] if args.download_only else []), check=True)
         sys.exit(0)
