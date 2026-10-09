@@ -34,6 +34,13 @@ diese Prüfsummen. Eine vorhandene, nicht leere `checksums.sha256` überspringt 
 Modellvorbereitung einschließlich des Konverter-Builds im Setup.
 Für das lokale Setup müssen die Anwendungimages lokal gebaut werden.
 
+Falls eine ältere Konverter-Version mit `getpwuid(): uid not found: 1000`
+abbricht, das aktualisierte `setup build` erneut ausführen. Das Konverter-Image
+setzt nun `LOGNAME`/`USER` auch für Benutzer-IDs ohne `/etc/passwd`-Eintrag und
+legt den PyTorch-Inductor-Cache unter `/tmp` ab. Die tatsächliche Benutzer-ID
+und die Eigentümer der Modelldateien bleiben unverändert. Bereits vollständig
+heruntergeladene Dateien werden anhand ihrer Prüfsummen wiederverwendet.
+
 Für die manuelle Vorbereitung ohne Docker bleibt
 `python scripts/prepare_gemma4.py --bootstrap` verfügbar. Dafür müssen Python
 3.11–3.13 und Git bereits installiert sein; die virtuelle Umgebung entsteht unter

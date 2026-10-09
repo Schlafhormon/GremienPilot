@@ -26,6 +26,14 @@ RUN python /opt/gemma/scripts/prepare_gemma4.py --bootstrap --tools-only \
     --directory /opt/gemma --llama-cpp /opt/gemma/llama.cpp \
     && git config --system --add safe.directory /opt/gemma/llama.cpp
 
+# setup.sh uses the host UID/GID, which need not exist in /etc/passwd.
+# getpass.getuser() (used by PyTorch) needs a name even with HOME set.
+# Runtime caches belong in the writable container, not in /opt or /models.
+# Keep these settings after tool installation to reuse its existing build layer.
+ENV LOGNAME=gemma-converter \
+    USER=gemma-converter \
+    TORCHINDUCTOR_CACHE_DIR=/tmp/gemma-torchinductor
+
 # Only the model directory is mounted; the converter and Python stay in the image.
 WORKDIR /opt/gemma
 ENTRYPOINT ["/opt/gemma/converter-venv/bin/python", "/opt/gemma/scripts/prepare_gemma4.py", "--directory", "/models", "--llama-cpp", "/opt/gemma/llama.cpp"]
