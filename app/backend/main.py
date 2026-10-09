@@ -5,6 +5,7 @@ FastAPI Backend for Meeting Minutes Generator
 import os
 import re
 import json
+from copy import deepcopy
 import uuid
 import time
 import logging
@@ -643,6 +644,7 @@ class PipelineStatusResponse(BaseModel):
 
 
 class SummaryJobResponse(BaseModel):
+    llm_progress: Dict[str, Any] = Field(default_factory=dict)
     execution: Optional[Dict[str, Any]] = None
     summary_job_id: str
     session_id: str
@@ -860,6 +862,7 @@ class SummarizeRequest(BaseModel):
 
 
 class StructuredSummaryResponse(BaseModel):
+    protocol_text: Optional[str] = None
     rejected_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     evidence: List[Dict[str, Any]] = Field(default_factory=list)
     review_questions: List[Dict[str, Any]] = Field(default_factory=list)
@@ -1233,6 +1236,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
 def build_summary_job_response(job: dict[str, Any]) -> SummaryJobResponse:
     refs = dict(job.get("refs") or {})
     return SummaryJobResponse(
+        llm_progress=refs.get('llm_progress') or {},
         execution=durable.public(work) if (work := durable.load(job["summary_job_id"])) else None,
         summary_job_id=job["summary_job_id"],
         session_id=job["session_id"],
@@ -2094,6 +2098,11 @@ def preserve_assignment_questions(result, session, source_indices):
     if not open_rows or not result.structured:
         return
     question = 'Gehören diese Originalbeiträge tatsächlich zu diesem TOP, einschließlich gemeinsamer Beratung oder Wiederaufnahme?'
+    if result.structured.verification.get('source_contract') == 'gemma-prose-review-v1':
+        if not any(q.get('kind') == 'assignment_open' for q in result.structured.review_questions):
+            result.structured.review_questions.append(dict(kind='assignment_open', question=question, excerpts=[]))
+        result.llm_usage.update(review_required=True, assignment_review_required=True)
+        return
     for item in result.structured.evidence:
         g = item.get('grounding') or {'reference_status': 'exact', 'source_ids': [r['source_id'] for r in item['sources']]}
         item['grounding'] = ({**g, 'content_status': 'unreviewed'}
@@ -2292,7 +2301,19 @@ def reconcile_session_summaries(
         )
         fast_manual = (manually_edited and (old_review.get('llm_usage') or {}).get('processing_mode') == 'fast'
                        and (old_review.get('llm_usage') or {}).get('processing_complete') is True)
-        if fast_manual:
+        gemma_prose = (review.get('structured') or {}).get('verification', {}).get('source_contract') == 'gemma-prose-review-v1'
+        if not gemma_prose and (old_review.get('structured') or {}).get('verification', {}).get('source_contract') == 'gemma-prose-review-v1':
+            # Older clients may discard review metadata while editing. Keep the
+            # historical findings; only a new generation replaces that result.
+            review = expected_review
+            gemma_prose = True
+        if gemma_prose:
+            # Preserve review findings and their historical text; editing cannot
+            # inherit completed checks, remove findings or rewrite the new prose.
+            review = deepcopy(review)
+            review['structured']['protocol_text'] = summary
+            review['source_links'] = []
+        elif fast_manual:
             from export_protocol import parse_summary_sections
             from summarize import StructuredSummary
             from processing_mode import FAST_NOTICE
@@ -2338,12 +2359,15 @@ def reconcile_session_summaries(
             names = state.get('speaker_names') or {}
             source_lines = [format_line_for_summary(line_to_dict(state['transcript'][i]), names)
                             for i in summary_line_indices(state, index)]
-            if fast_manual:
+            if fast_manual and not gemma_prose:
                 proof.update(summary_sha256=digest(summary), source_sha256=digest(source_lines))
             if proof.get('summary_sha256') != digest(summary) or proof.get('source_sha256') != digest(source_lines):
                 review['source_links'] = []
                 review['structured']['verification']['processing_complete'] = False
                 review['llm_usage'] = {**review.get('llm_usage', {}), 'processing_complete': False}
+                if gemma_prose:
+                    proof.update(review_complete=False, review_status='stale')
+                    review['llm_usage'].update(review_complete=False, review_status='stale', review_required=True)
                 review['llm_usage'].pop('original_line_indices', None)
                 review['review_warnings'] = [*[w for w in review.get('review_warnings', []) if w.get('kind') != 'verification_required'], {
                     'kind': 'verification_required', 'severity': 'warning', 'line_indices': [], 'excerpt': '',
@@ -2637,8 +2661,10 @@ def _run_summary_job(summary_job_id: str) -> None:
             finalize_summary_job_cancellation(summary_job_id, job)
             return
         except Exception as exc:
-            durable.raise_if_transient(exc)
             # Retain successful TOPs and continue the same serial job after a failure.
+            partial = getattr(exc, 'partial_result', None)
+            if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
+                durable.raise_if_transient(exc)
             message = str(exc) if isinstance(exc, SummaryJobInputChanged) else safe_exception_label(exc)
             outcomes[top_id] = {"status": "failed", "error": message}
             def mark_failed(latest):
@@ -2650,6 +2676,23 @@ def _run_summary_job(summary_job_id: str) -> None:
                 if state.get("status") not in {"queued", "running"}:
                     return False  # A manual edit already established a newer state.
                 state.update(status="failed", updated_at=time.time())
+                partial = getattr(exc, 'partial_result', None)
+                if partial and partial.structured and not isinstance(exc, SummaryJobInputChanged):
+                    # Retain a newly generated draft only while its original input
+                    # is still current; never overwrite a concurrent manual edit.
+                    if (current_summary_input(latest, target)[1] != input_hash or
+                            (refs.get('edit_fingerprints', {}).get(top_id) and
+                             summary_edit_fingerprint(latest, target) != refs['edit_fingerprints'][top_id])):
+                        return False
+                    preserve_assignment_questions(partial, latest, source_indices)
+                    partial_review = build_summary_review(structured=partial.structured, summary=partial.summary,
+                        lines=[{**line, 'speaker': names.get(line['speaker'], line['speaker'])} for line in lines])
+                    latest.setdefault('summaries', {})[target] = partial.summary
+                    latest.setdefault('summary_reviews', {})[target] = dict(
+                        structured=partial.structured.to_dict(), source_links=[],
+                        review_warnings=[w.to_dict() for w in partial_review.warnings],
+                        llm_usage={**partial.llm_usage, 'original_line_indices': source_indices},
+                        error=message)
                 review = latest.setdefault("summary_reviews", {}).setdefault(target, {})
                 review["review_warnings"] = [*review.get("review_warnings", []), {
                     "kind": "summary_failed", "message": message, "severity": "error",
@@ -2913,6 +2956,11 @@ def summarize_pipeline_segments(
     summaries = {int(k): v for k, v in (prior.get("summaries") or {}).items()}
     summary_reviews = {int(k): v for k, v in (prior.get("summary_reviews") or {}).items()}
     model = options.get("summary_model") or options.get("model")
+    from summarize import get_llm_config
+    from gemma_summary import VERSION as gemma_version
+    summary_contract = gemma_version if get_llm_config(model).summary_style == 'gemma4-lora' else 'structured'
+    if summary_contract != 'structured' and prior.get('summary_contract') != summary_contract:
+        summaries, summary_reviews = {}, {}
     system_prompt = options.get("summary_system_prompt")
     if system_prompt is None:
         system_prompt = options.get("system_prompt")
@@ -2953,7 +3001,9 @@ def summarize_pipeline_segments(
         except LLMCancelledError:
             raise
         except Exception as exc:
-            durable.raise_if_transient(exc)
+            partial = getattr(exc, 'partial_result', None)
+            if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
+                durable.raise_if_transient(exc)
             if isinstance(exc, LLMCallError):
                 message = str(exc)
             else:
@@ -3046,7 +3096,9 @@ def summarize_pipeline_segments(
         except LLMCancelledError:
             raise
         except Exception as exc:
-            durable.raise_if_transient(exc)
+            partial = getattr(exc, 'partial_result', None)
+            if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
+                durable.raise_if_transient(exc)
             if isinstance(exc, LLMCallError):
                 message = str(exc)
             else:
@@ -3082,6 +3134,7 @@ def summarize_pipeline_segments(
 
         save_pipeline_state(pipeline_id, result_refs={
             "summary_progress": {"completed_tops": top_index + 1, "total_tops": len(tops),
+                                 "summary_contract": summary_contract,
                                  "summaries": summaries, "summary_reviews": summary_reviews}})
 
     return summaries, summary_reviews
@@ -3228,7 +3281,12 @@ def _run_pipeline_job(
             summaries, summary_reviews = {}, {}
             append_pipeline_warning(pipeline_id, 'Keine belegte Agenda; keine automatische Ersatz-Zusammenfassung.')
         else:
-            summaries, summary_reviews = durable.draft_checkpoint("pipeline:summaries", lambda: summarize_pipeline_segments(
+            from summarize import get_llm_config
+            from gemma_summary import VERSION as gemma_version
+            summary_step = 'pipeline:summaries'
+            if get_llm_config(options.get('summary_model') or options.get('model')).summary_style == 'gemma4-lora':
+                summary_step += ':' + gemma_version
+            summaries, summary_reviews = durable.draft_checkpoint(summary_step, lambda: summarize_pipeline_segments(
                 pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options,
                 source_session=dict(transcript=transcript, tops=tops, top_ids=top_ids,
                                     assignments=assignments, agenda_proposals=agenda_proposals)),
@@ -4004,8 +4062,8 @@ async def accept_existing_summary(
     if top_id not in effective_ids:
         raise HTTPException(status_code=404, detail="TOP nicht gefunden")
     top_index = effective_ids.index(top_id)
-    summary = str((session.get("summaries") or {}).get(top_index) or "").strip()
-    if not summary:
+    summary = str((session.get("summaries") or {}).get(top_index) or "")
+    if not summary.strip():
         raise HTTPException(status_code=400, detail="Keine Zusammenfassung zum Übernehmen")
 
     snapshot, input_hash = current_summary_input(session, top_index)
@@ -4396,6 +4454,7 @@ async def export_protocol_endpoint(request: ProtocolExportRequest):
                                 questions.append(dict(kind='assignment_open',message=message,line_indices=[row['index']]))
                 review['review_warnings'] = questions
     if any((review.get('llm_usage') or {}).get('processing_complete') is False
+           and (review.get('structured') or {}).get('verification', {}).get('source_contract') != 'gemma-prose-review-v1'
            for review in request.summary_reviews.values() if isinstance(review, dict)):
         raise HTTPException(409, 'Technisch unvollständige Zusammenfassungen sind nicht exportierbar')
     export_format = request.format.lower().strip()
@@ -4659,7 +4718,13 @@ async def generate_summary(request: SummarizeRequest):
                     processing_mode=request.processing_mode,
                 )
 
-        result = await loop.run_in_executor(None, run_guarded_summary)
+        try:
+            result = await loop.run_in_executor(None, run_guarded_summary)
+        except Exception as exc:
+            partial = getattr(exc, 'partial_result', None)
+            if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
+                raise
+            result = partial  # Explicit incomplete flags and warning accompany the retained draft.
         review = build_summary_review(
             structured=result.structured,
             summary=result.summary,

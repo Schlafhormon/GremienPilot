@@ -165,7 +165,7 @@ export default function LLMSettingsPanel({
             />
             <p className="mt-2 text-xs text-gray-500">
               {protocolStyle
-                ? 'Gemma 4 verwendet den festen Protokollstil des HPI-Adapters. PDF-Auswertung, TOP-Zuordnung und Quellenprüfung verwenden das Basismodell.'
+                ? 'Gemma 4 erzeugt den Protokolltext mit dem HPI-Adapter, ohne Absatzquellen oder automatische Kategorien. Fast übernimmt ihn ungeprüft; Slow prüft ihn zweimal unabhängig gegen das Originaltranskript. PDF-Auswertung und TOP-Zuordnung verwenden weiterhin das Basismodell.'
                 : 'Der System-Prompt definiert, wie die KI die Zusammenfassungen erstellt.'}
             </p>
           </div>

@@ -65,6 +65,8 @@ class ProtocolTop:
     uncertainties: list[str] = field(default_factory=list)
     review_questions: list[str] = field(default_factory=list)
     combined_action_heading: bool = False
+    protocol_text: str | None = None
+    review_status: str = ''
 
 
 @dataclass
@@ -182,7 +184,11 @@ def build_protocol_document(
     for index, title in enumerate(agenda):
         editable_summary = summaries.get(index)
         structured = (summary_reviews.get(index) or {}).get("structured")
-        if editable_summary and editable_summary.strip():
+        prose = bool(structured and structured.get('verification', {}).get('source_contract') == 'gemma-prose-review-v1')
+        protocol_text = (editable_summary if editable_summary is not None else structured.get('protocol_text', '')) if prose else None
+        if prose:
+            sections = {key: [] for key in STRUCTURED_KEYS}
+        elif editable_summary and editable_summary.strip():
             sections = parse_summary_sections(editable_summary)
         elif structured:
             sections = {
@@ -195,6 +201,42 @@ def build_protocol_document(
         if structured and structured.get('verification', {}).get('processing_mode') == 'fast':
             if 'Fast – ohne automatische Inhaltsprüfung' not in metadata.title:
                 metadata.title = (metadata.title or 'Sitzungsprotokoll') + ' – Fast – ohne automatische Inhaltsprüfung'
+
+        review_status = ''
+        warnings = (summary_reviews.get(index) or {}).get('review_warnings', [])
+        review_questions = [str(w['message']) for w in warnings if w.get('message')]
+        if prose:
+            from source_contract import digest
+            verification = structured['verification']
+            source_changed = False
+            if transcript:
+                source_indices = (summary_reviews.get(index) or {}).get('llm_usage', {}).get('original_line_indices')
+                if source_indices is None:
+                    source_indices = [i for i in range(len(transcript)) if i < len(assignments) and assignments[i] == index]
+                if not all(type(i) is int and 0 <= i < len(transcript) for i in source_indices):
+                    source_changed = True
+                else:
+                    source_changed = verification.get('source_sha256') != digest([
+                        f'{speaker_names.get(transcript[i].speaker, transcript[i].speaker)}: {transcript[i].text}'
+                        for i in source_indices])
+            if verification.get('summary_sha256') != digest(protocol_text):
+                review_status = 'Bearbeiteter Entwurf; Inhaltsprüfung gilt für die frühere Fassung.'
+            elif source_changed or verification.get('review_status') == 'stale':
+                review_status = 'Entwurf; Inhaltsprüfung gilt für die frühere Text- oder Transkriptfassung.'
+            elif verification.get('generation_complete') is False:
+                review_status = 'Entwurf; Protokollerzeugung und Inhaltsprüfung unvollständig.'
+            elif verification.get('review_status') == 'skipped':
+                review_status = 'Ungeprüfter Entwurf – Fast ohne automatische Inhaltsprüfung.'
+            elif not verification.get('review_complete'):
+                review_status = 'Entwurf; Inhaltsprüfung fehlgeschlagen oder unvollständig.'
+            else:
+                review_status = 'Verarbeitung und zwei unabhängige Inhaltsprüfungen abgeschlossen; keine Garantie für Fehlerfreiheit.'
+            if 'Entwurf' in review_status and 'Prüfentwurf' not in metadata.title:
+                metadata.title = (metadata.title or 'Sitzungsprotokoll') + ' – Prüfentwurf'
+            review_questions = list(dict.fromkeys([
+                *[w['message'] + ('\n' + w['excerpt'] if w.get('excerpt') else '') for w in warnings if w.get('message')],
+                *[q['question'] + ('\n' + ' … '.join(q['excerpts']) if q.get('excerpts') else '')
+                  for q in structured.get('review_questions', []) if q.get('question')]]))
 
         if structured and structured.get('verification', {}).get('source_contract') == 'graded-sources-v1':
             from source_contract import marked_text, digest
@@ -219,10 +261,11 @@ def build_protocol_document(
                 action_items=sections["action_items"],
                 open_points=sections["open_points"],
                 uncertainties=sections["uncertainties"],
-                review_questions=[str(w['message']) for w in
-                    (summary_reviews.get(index) or {}).get('review_warnings', []) if w.get('message')],
+                review_questions=review_questions,
                 combined_action_heading=bool(re.search(
                     r'^\s*Ma(?:ß|ss)nahmen/offene Punkte:', editable_summary or '', re.I | re.M)),
+                protocol_text=protocol_text,
+                review_status=review_status,
             )
         )
 
@@ -266,6 +309,11 @@ def render_txt(document: ProtocolDocument) -> str:
     for top in document.tops:
         lines.append(top.title)
         lines.append("-" * 60)
+        if top.protocol_text is not None:
+            lines.extend([top.review_status, '', top.protocol_text, ''])
+            if top.review_questions:
+                _append_text_section(lines, 'Prüfhinweise', top.review_questions)
+            continue
         _append_text_section(lines, "Diskussion", top.discussion)
         _append_text_section(lines, "Beschluss", top.decisions)
         _append_text_section(lines, "Abstimmung", top.votes)
@@ -313,6 +361,13 @@ def render_docx(document: ProtocolDocument) -> bytes:
 
     for top in document.tops:
         doc.add_heading(top.title, level=1)
+        if top.protocol_text is not None:
+            doc.add_paragraph(top.review_status)
+            for paragraph in top.protocol_text.split('\n\n'):
+                doc.add_paragraph(paragraph)
+            if top.review_questions:
+                _add_docx_section(doc, 'Prüfhinweise', top.review_questions)
+            continue
         _add_docx_section(doc, "Diskussion", top.discussion)
         _add_docx_section(doc, "Beschluss", top.decisions)
         _add_docx_section(doc, "Abstimmung", top.votes)
@@ -373,6 +428,13 @@ def render_pdf(document: ProtocolDocument) -> bytes:
 
     for top in document.tops:
         story.append(Paragraph(_pdf_text(top.title), styles["TopTitle"]))
+        if top.protocol_text is not None:
+            story.append(Paragraph(_pdf_text(top.review_status), styles['Small']))
+            for paragraph in top.protocol_text.split('\n\n'):
+                story.extend([Paragraph(_pdf_text(paragraph), styles['BodyText']), Spacer(1, 8)])
+            if top.review_questions:
+                _append_pdf_section(story, styles, 'Prüfhinweise', top.review_questions)
+            continue
         _append_pdf_section(story, styles, "Diskussion", top.discussion)
         _append_pdf_section(story, styles, "Beschluss", top.decisions)
         _append_pdf_section(story, styles, "Abstimmung", top.votes)

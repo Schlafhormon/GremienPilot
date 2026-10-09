@@ -234,6 +234,9 @@ export interface SummarizeRequest {
 }
 
 export interface StructuredSummary {
+  protocol_text?: string | null;
+  verification?: Record<string, unknown>;
+  review_questions?: { kind: string; question: string; excerpts?: string[] }[];
   discussion: string[];
   decisions: string[];
   votes: string[];
@@ -315,6 +318,7 @@ export interface SummaryState {
 }
 
 export interface SummaryJob {
+  llm_progress?: { phase?: string };
   execution?: import('./api').ModelJob | null;
   summary_job_id: string;
   session_id: string;

@@ -283,6 +283,9 @@ def progress(value):
                 previous = json.loads(row[0]) if row and row[0] else {}
                 if previous.get('agenda_phase'):
                     value = {**{k: previous[k] for k in ('agenda_phase', 'processed_lines', 'total_lines', 'model_calls') if k in previous}, **value}
+                summary_phase = previous.get('summary_phase', previous.get('phase', ''))
+                if summary_phase.startswith('summary_'):
+                    value = {**value, 'summary_phase': summary_phase}
                 phase = previous.get('pdf_phase', previous.get('phase', ''))
                 if phase.startswith('pdf_') and phase != 'pdf_verified':
                     value = {**{k: previous[k] for k in ('page', 'total_pages', 'round') if k in previous},

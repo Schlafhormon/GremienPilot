@@ -535,6 +535,7 @@ export interface SummarizeOptions {
  * Result from summary generation including timing.
  */
 export interface SummarizeResult {
+  llmUsage?: Record<string, unknown>;
   summary: string;
   durationSeconds: number;
   structured?: StructuredSummary | null;
@@ -582,6 +583,7 @@ export async function generateSummary(
     reviewWarnings: data.review_warnings ?? [],
     fallbackUsed: Boolean(data.fallback_used),
     chunksProcessed: data.chunks_processed ?? 1,
+    llmUsage: data.llm_usage ?? {},
   };
 }
 
@@ -620,7 +622,7 @@ export interface ModelJob {
   state: 'queued' | 'running' | 'retry_wait' | 'review_required' | 'failed' | 'completed' | 'cancelled' | 'superseded';
   created_at?: number;
   updated_at?: number;
-  progress?: { phase?: string; agenda_phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number; processed_lines?: number; total_lines?: number; model_calls?: number; elapsed_seconds?: number };
+  progress?: { phase?: string; agenda_phase?: string; summary_phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number; processed_lines?: number; total_lines?: number; model_calls?: number; elapsed_seconds?: number };
   source?: { enforce_top_order?: boolean; tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; processing_mode?: ProcessingMode };
   error?: string | null;
   result?: unknown;

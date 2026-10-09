@@ -24,6 +24,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from copy import deepcopy
 from typing import Any, Optional
 from urllib.parse import urlparse
 from processing_mode import policy, FAST_NOTICE
@@ -80,6 +81,8 @@ class StructuredSummary:
     review_questions: list[dict] = field(default_factory=list)
     verification: dict = field(default_factory=dict)
     rejected_candidates: list[dict] = field(default_factory=list)
+    # Gemma prose is stored verbatim, independently of legacy categorized items.
+    protocol_text: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -565,6 +568,29 @@ def build_summary_review(
     from summary_grounding import digest
     review = SummaryReview()
     verification = structured.verification if structured else {}
+    if verification.get('source_contract') == 'gemma-prose-review-v1':
+        seen = set()
+        for issue in structured.review_questions:
+            identity = digest([issue['kind'], issue['question'], issue.get('excerpts', [])])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            review.warnings.append(SummaryReviewWarning(kind=issue['kind'], message=issue['question'],
+                excerpt=' … '.join(issue.get('excerpts', []))))
+        valid = (verification.get('source_sha256') == digest([_line_text(line) for line in lines])
+                 and verification.get('summary_sha256') == digest(summary))
+        if not valid:
+            review.warnings.append(SummaryReviewWarning(kind='verification_required',
+                message='Text oder Originaltranskript geändert; Prüfhinweise beziehen sich auf die frühere Fassung.'))
+        elif verification.get('review_status') == 'skipped':
+            review.warnings.append(SummaryReviewWarning(kind='review_skipped',
+                message='Ungeprüfter Entwurf. ' + FAST_NOTICE, severity='info'))
+        elif not verification.get('review_complete'):
+            review.warnings.append(SummaryReviewWarning(kind='technical_incomplete', severity='error',
+                message=('Teilentwurf erhalten; Protokollerzeugung und Inhaltsprüfung sind unvollständig.'
+                         if verification.get('generation_complete') is False else
+                         'Entwurf erhalten; die Inhaltsprüfung ist fehlgeschlagen oder unvollständig.')))
+        return review
     valid = bool(verification.get('source_sha256') == digest([_line_text(line) for line in lines])
                  and verification.get('summary_sha256') == digest(summary))
     if not valid:
@@ -690,6 +716,11 @@ def summarize_segment(
                             + "\nTOP: " + top_title, meeting_context, usage)
         render = render_structured_summary
     def attach_partial(error):
+        if config.summary_style == 'gemma4-lora':
+            if workflow.protocol_parts:
+                error.partial_result = protocol_result(workflow.protocol_parts, workflow.issues,
+                    list(workflow.partial_rows.values()), len(workflow.protocol_parts), incomplete=True)
+            return error
         if not workflow.latest_claims:
             return error
         from source_contract import reviewed, marked_text
@@ -708,6 +739,22 @@ def summarize_segment(
         error.partial_result = SummarizationResult(summary=text,structured=partial,duration_seconds=time.monotonic()-start,
             llm_usage={**usage,'processing_complete':False,'grounding_incomplete':True,'review_required':True})
         return error
+    def protocol_result(parts, issues, rows, count, *, incomplete=False):
+        from gemma_summary import CONTRACT, VERSION
+        # Joining parts adds only a separator; no headings or paragraphs are removed.
+        summary = '\n\n'.join(part['text'] for part in parts)
+        state = dict(**policy().snapshot(), summary_style='gemma4-lora',
+            processing_complete=not incomplete, generation_complete=workflow.generation_complete,
+            review_complete=not policy().fast and not incomplete,
+            review_status='incomplete' if incomplete else 'skipped' if policy().fast else 'completed',
+            review_required=policy().fast or incomplete or bool(issues), grounding_incomplete=incomplete)
+        usage.update(state)
+        structured = StructuredSummary(protocol_text=summary, review_questions=deepcopy(issues))
+        structured.verification = dict(state, source_contract=CONTRACT, prompt_version=VERSION,
+            source_sha256=digest(lines), summary_sha256=digest(summary),
+            checks=usage.get('required_checks', []), completed_checks=deepcopy(usage.get('completed_checks', [])))
+        return SummarizationResult(summary=summary, structured=structured,
+            duration_seconds=time.monotonic()-start, chunks_processed=count, llm_usage=deepcopy(usage))
     try:
         claims, issues, rows, count = workflow.run(lines)
     except LLMCancelledError:
@@ -715,11 +762,15 @@ def summarize_segment(
     except ContextBudgetError as exc:
         raise attach_partial(exc)
     except ValueError as exc:
-        raise attach_partial(StructuredOutputError("Automatische Quellenprüfung technisch unvollständig")) from exc
+        label = 'Inhaltsprüfung' if config.summary_style == 'gemma4-lora' else 'Quellenprüfung'
+        raise attach_partial(StructuredOutputError("Automatische " + label + " technisch unvollständig")) from exc
     except Exception as exc:
         info = classify_llm_error(exc)
-        raise attach_partial(LLMCallError("Automatische Quellenprüfung fehlgeschlagen (" + info.category + ")",
+        label = 'Inhaltsprüfung' if config.summary_style == 'gemma4-lora' else 'Quellenprüfung'
+        raise attach_partial(LLMCallError("Automatische " + label + " fehlgeschlagen (" + info.category + ")",
                            category=info.category, transient=info.transient)) from exc
+    if config.summary_style == 'gemma4-lora':
+        return protocol_result(claims, issues, rows, count)
     structured = StructuredSummary()
     from source_contract import marked_text
     for claim in claims:

@@ -1939,7 +1939,18 @@ export default function App() {
             const states = { ...effectiveSummaryStates };
             Object.keys(next).map(Number).forEach(index => {
               if (next[index] === summaries[index]) return;
-              delete reviews[index]; // Generated evidence no longer describes manual text.
+              if (reviews[index]?.structured?.verification?.source_contract === 'gemma-prose-review-v1') {
+                const previous = reviews[index]!;
+                reviews[index] = { ...previous, source_links: [],
+                  structured: { ...previous.structured!, protocol_text: next[index],
+                    verification: { ...previous.structured!.verification, review_complete: false, review_status: 'stale' } },
+                  llm_usage: { ...previous.llm_usage, review_complete: false, review_status: 'stale', review_required: true },
+                  review_warnings: [...previous.review_warnings.filter(w => w.kind !== 'verification_required'), {
+                    kind: 'verification_required', severity: 'warning', line_indices: [], excerpt: '',
+                    message: 'Text bearbeitet; Prüfhinweise beziehen sich auf die frühere Fassung.' }] };
+              } else {
+                delete reviews[index]; // Generated evidence no longer describes manual text.
+              }
               if (states[index]) states[index] = { ...states[index]!, status: 'ready', origin: 'manual' };
             });
             setSummaries(next);
