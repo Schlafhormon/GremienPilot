@@ -305,12 +305,64 @@ describe('App pipeline flow', () => {
     expect(options).not.toHaveProperty('pdfSystemPrompt');
   });
 
+  it('restores custom preferences from localStorage for new pipelines', async () => {
+    localStorage.setItem('llm-settings', JSON.stringify({ model: '', summaryStyle: 'gemma4-custom', customSummaryPrompt: 'LOCAL_STYLE' }));
+    await uploadAndStart();
+    await waitFor(() => expect(startPipeline).toHaveBeenCalled());
+    expect(vi.mocked(startPipeline).mock.calls[0]![1]).toMatchObject({
+      summaryStyle: 'gemma4-custom', customSummaryPrompt: 'LOCAL_STYLE',
+    });
+  });
+
+  it('keeps new preferences when a pipeline with older settings completes', async () => {
+    const user = userEvent.setup();
+    let finish!: (value: PipelineJob) => void;
+    vi.mocked(pollPipeline).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    vi.mocked(getPipelineResult).mockResolvedValue(pipelineResult({ summary_style: 'gemma4-lora' }));
+    await uploadAndStart();
+    await waitFor(() => expect(finish).toBeDefined());
+    const submitted = { ...vi.mocked(startPipeline).mock.calls[0]![1] };
+    await user.click(screen.getByRole('button', { name: 'KI-Einstellungen' }));
+    fireEvent.change(screen.getByLabelText('Zusammenfassungsstil'), { target: { value: 'gemma4-custom' } });
+    fireEvent.change(screen.getByLabelText('System-Prompt'), { target: { value: 'NEXT_JOB_STYLE' } });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await act(async () => { finish(completedPipeline); });
+    await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.');
+    expect(vi.mocked(startPipeline).mock.calls[0]![1]).toEqual(submitted);
+    expect(submitted.summaryStyle).toBe('gemma4-lora');
+    expect(JSON.parse(localStorage.getItem('llm-settings')!)).toMatchObject({
+      summaryStyle: 'gemma4-custom', customSummaryPrompt: 'NEXT_JOB_STYLE',
+    });
+  });
+
+  it('reopens session preferences and snapshots them for TOP regeneration', async () => {
+    const user = userEvent.setup();
+    const original = pipelineResult({ summary_style: 'gemma4-custom', custom_summary_prompt: 'SESSION_STYLE' }).session;
+    vi.mocked(loadSession).mockResolvedValue(original);
+    vi.mocked(saveSession).mockImplementation(async payload => ({ ...payload, session_id: 'session-1', revision: payload.revision ?? 1 }));
+    window.history.replaceState(null, '', '/sessions/session-1');
+    render(<App />);
+    await screen.findByText(original.summaries[0]!);
+    await user.click(screen.getByRole('button', { name: 'Neu generieren' }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+    await waitFor(() => expect(startSummaryJob).toHaveBeenCalledWith('session-1', expect.objectContaining({
+      summaryStyle: 'gemma4-custom', customSummaryPrompt: 'SESSION_STYLE',
+    })));
+    expect(saveSession).toHaveBeenCalledWith(expect.objectContaining({
+      summary_style: 'gemma4-custom', custom_summary_prompt: 'SESSION_STYLE',
+    }));
+    expect(JSON.parse(localStorage.getItem('llm-settings')!)).toMatchObject({
+      summaryStyle: 'gemma4-custom', customSummaryPrompt: 'SESSION_STYLE',
+    });
+  });
+
   it('keeps a saved legacy prompt as the summary preference', async () => {
     localStorage.setItem('llm-settings', JSON.stringify({ model: 'saved-model', systemPrompt: 'Gespeicherte Fachvorgabe' }));
     await uploadAndStart();
     await waitFor(() => expect(startPipeline).toHaveBeenCalled());
     const options = vi.mocked(startPipeline).mock.calls[0]![1]!;
     expect(options.summarySystemPrompt).toBe('Gespeicherte Fachvorgabe');
+    expect(options.summaryStyle).toBe('gemma4-lora');
     expect(options.model).toBe('saved-model');
     expect(options).not.toHaveProperty('systemPrompt');
     expect(options).not.toHaveProperty('agendaSystemPrompt');

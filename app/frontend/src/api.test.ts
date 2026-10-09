@@ -25,6 +25,7 @@ import {
   loadSession,
   saveSession,
   startPipeline,
+  startSummaryJob,
   startTranscription,
   unassignSpeakerObservation,
   updateSpeakerProfile,
@@ -853,4 +854,20 @@ it('does not accept an unverified PDF result', async () => {
   }) }));
   await expect(extractAgendaDataFromPDF(new File(['pdf'], 'agenda.pdf')))
     .rejects.toThrow(/nicht vollständig geprüft/);
+});
+
+
+it('sends Gemma preferences for pipeline, TOP jobs and direct generation', async () => {
+  const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ summary: 'Text' }) });
+  vi.stubGlobal('fetch', fetchMock);
+  const preferences = { summaryStyle: 'gemma4-custom' as const, customSummaryPrompt: 'Meine Tabelle' };
+  await startPipeline(new File(['audio'], 'meeting.mp3'), preferences);
+  const form = fetchMock.mock.calls[0]![1].body as FormData;
+  expect(form.get('summary_style')).toBe('gemma4-custom');
+  expect(form.get('custom_summary_prompt')).toBe('Meine Tabelle');
+  await startSummaryJob('session', { topIds: ['a'], ...preferences });
+  await generateSummary('TOP 1', [{ speaker: 'A', text: 'Beitrag', start: 0, end: 1 }], preferences);
+  for (const [, request] of fetchMock.mock.calls.slice(1)) {
+    expect(JSON.parse(request.body)).toMatchObject({ summary_style: 'gemma4-custom', custom_summary_prompt: 'Meine Tabelle' });
+  }
 });

@@ -24,25 +24,51 @@ Der Hostport 8080 ist nur an Loopback gebunden. CPU-Betrieb verwendet das
 
 ## Aufgaben und Prompts
 
-- **Protokolltext:** Adapter 0 mit Stärke 1, fester HPI-Trainingsprompt,
+- **Landtags-Stil mit LoRA:** Adapter 0 mit Stärke 1, unveränderter HPI-Trainingsprompt,
   `Name: Wortbeitrag` ohne Zeitstempel/Quellen-IDs, benachbarte Beiträge derselben
   Person zusammengeführt. System- und Nutzervorgabe stehen gemeinsam im
   Nutzerturn, entsprechend dem Unsloth-Produktionsvertrag. Temperatur 0,3,
   top_p 0,9, kein Thinking und keine Wiederholungsstrafe; `<turn|>` beendet die Ausgabe.
+- **Eigener Stil ohne LoRA:** dasselbe Gemma-Modell mit Adapterstärke 0.
+  In den KI-Einstellungen ist ein eigener Prompt für Gliederung, Umfang, Sprachton
+  und Beschlussdarstellung bearbeitbar. Fachliche Treue bleibt verbindlich;
+  erfundene Aussagen und Beschlüsse sind auch bei eigenen Stilvorgaben untersagt.
+  Der eigene Stil verwendet denselben Protokolltext-Ablauf, keinen strukturierten
+  JSON-Zusammenfassungspfad. Beide Stile nutzen dieselbe Markdown-Leseansicht
+  und dieselben TXT-, DOCX- und PDF-Exporte.
 - **Inhaltsprüfung, PDF und TOP-Zuordnung:** derselbe Modellbestand mit Adapterstärke 0.
   JSON-Schemata und bestehende Quellenverträge bleiben erhalten. PDF-Seiten
   verwenden den F16-Bildprojektor; maximal 1.120 Bildtokens je Seite.
-- **Fast:** ausschließlich LoRA-Protokolltext, als ungeprüfter Entwurf.
+- **Fast:** ausschließlich Protokolltext im gewählten Stil, als ungeprüfter Entwurf.
   **Slow:** zwei unabhängige Prüfungen je Teiltext gegen dessen vollständiges
   Originaltranskript; konkrete Hinweise separat. Beide Modi verzichten auf eine
   Quellen- und Kategorienzuordnung der Absätze. Text und Überschriften bleiben
   unverändert. Lange TOPs werden ohne stilles Abschneiden geteilt; bei nicht
   durchführbarer Prüfung bleibt der Entwurf ausdrücklich unvollständig geprüft.
 
-Eigene Zusammenfassungsprompts werden bei `LLM_SUMMARY_STYLE=gemma4-lora` nicht
-angewandt; das Frontend zeigt den festen Prompt. `structured` aktiviert den
+Ohne Stilauswahl bleibt `LLM_SUMMARY_STYLE=gemma4-lora` der bisherige Standard;
+das Frontend zeigt dafür den festen Prompt nur lesbar. Auswahl und eigener Prompt
+werden im Browser und in der Sitzung gespeichert. Ein Wechsel erhält den eigenen
+Prompt, vorhandene Texte und Prüfstände und wirkt erst auf neue Generierungen.
+Pipeline und einzelne TOP-Aufträge speichern eigene Kopien der Einstellungen.
+Die API-Felder `summary_style` (`gemma4-lora`/`gemma4-custom`) und
+`custom_summary_prompt` gelten nur für Gemma-Protokollprofile. Der bestehende
+`system_prompt`/`summary_system_prompt` bleibt für andere Profile erhalten.
+Adapterstärke, Stil und Prompt sind Teil der Cache- und Checkpointkennung;
+die Umschaltung erfolgt pro Anfrage, ohne globale llama.cpp-Änderung.
+Eigene Stilvorgaben gelangen nicht in die fachlichen Inhaltsprüfungen.
+
+`structured` aktiviert den
 bisherigen JSON-Zusammenfassungspfad. Explizite andere Modellnamen benötigen
 einen passenden Server und verwenden nicht automatisch den Adapter.
+
+Zur Aktivierung nach dem Update Backend und Frontend dieses Branches im gewohnten
+Deployment aktualisieren, sobald laufende Aufträge beendet sind. Es sind keine neuen
+Modellgewichte oder Änderungen am llama.cpp-Dienst nötig. Die Sitzungsdatenbank
+erhält beim Backendstart ausschließlich zusätzliche Einstellungsspalten. Anschließend
+die Seite neu laden und den Zusammenfassungsstil in den KI-Einstellungen wählen.
+Jobs aus älteren Codeversionen unterliegen weiterhin der vorhandenen Versionsprüfung;
+gespeicherte Texte und Prüfhinweise bleiben lesbar. Ein echter Sitzungstest folgt manuell.
 
 ## Speicher und Transport
 

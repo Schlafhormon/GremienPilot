@@ -1,4 +1,4 @@
-import type { ProcessingMode } from './types';
+import type { ProcessingMode, SummaryStyle } from './types';
 /**
  * API client for the GremienPilot backend
  */
@@ -177,6 +177,8 @@ export async function startPipeline(
   }
   for (const [field, prompt] of [
     ["summary_system_prompt", options.summarySystemPrompt],
+    ["summary_style", options.summaryStyle],
+    ["custom_summary_prompt", options.customSummaryPrompt],
     ["agenda_system_prompt", options.agendaSystemPrompt],
     ["pdf_system_prompt", options.pdfSystemPrompt],
   ] as const) {
@@ -387,6 +389,8 @@ export async function startSummaryJob(
   payload: {
     revision?: number | null;
     topIds: string[];
+    summaryStyle?: SummaryStyle;
+    customSummaryPrompt?: string;
     model?: string;
     systemPrompt?: string;
   }
@@ -399,6 +403,8 @@ export async function startSummaryJob(
       top_ids: payload.topIds,
       model: payload.model,
       system_prompt: payload.systemPrompt,
+      summary_style: payload.summaryStyle,
+      custom_summary_prompt: payload.customSummaryPrompt,
     }),
   });
   if (response.status === 409) {
@@ -526,6 +532,8 @@ export async function pollTranscription(
  * Options for summary generation.
  */
 export interface SummarizeOptions {
+  summaryStyle?: SummaryStyle;
+  customSummaryPrompt?: string;
   processingMode?: ProcessingMode;
   model?: string;
   systemPrompt?: string;
@@ -565,6 +573,8 @@ export async function generateSummary(
       lines: lines,
       model: options?.model,
       system_prompt: options?.systemPrompt,
+      summary_style: options?.summaryStyle,
+      custom_summary_prompt: options?.customSummaryPrompt,
       processing_mode: options?.processingMode ?? "slow",
     }),
   });
