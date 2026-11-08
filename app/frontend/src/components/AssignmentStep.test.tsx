@@ -327,6 +327,80 @@ describe('AssignmentStep', () => {
     expect(setAssignments).toHaveBeenCalledWith([0, 1]);
   });
 
+  it('disables the undo button when there is no assignment history yet', () => {
+    renderAssignmentStep();
+
+    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeDisabled();
+  });
+
+  it('undoes the last bulk assignment change', async () => {
+    const user = userEvent.setup();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ assignments: [0, 1], setAssignments });
+
+    // Select the first line, then shift-click the second to bulk-assign both
+    // to the currently selected TOP - the scenario that previously had no
+    // way back once it overwrote a good per-line distribution.
+    fireEvent.click(screen.getByText('Hallo zusammen'));
+    fireEvent.click(screen.getByText('Wir beraten den Haushalt'), { shiftKey: true });
+
+    const undoButton = screen.getByRole('button', { name: /^rückgängig/i });
+    expect(undoButton).toBeEnabled();
+
+    await user.click(undoButton);
+
+    expect(setAssignments).toHaveBeenLastCalledWith([0, 1]);
+  });
+
+  it('undoes the last bulk assignment change via Strg+Z', () => {
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ assignments: [0, 1], setAssignments });
+
+    fireEvent.click(screen.getByText('Hallo zusammen'));
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+
+    expect(setAssignments).toHaveBeenLastCalledWith([0, 1]);
+  });
+
+  it('leaves Strg+Z to a focused text field instead of undoing assignments', () => {
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ assignments: [0, 1], setAssignments });
+
+    fireEvent.click(screen.getByText('Hallo zusammen'));
+    setAssignments.mockClear();
+    fireEvent.keyDown(screen.getByLabelText(/ausgewählter top/i), { key: 'z', ctrlKey: true });
+
+    expect(setAssignments).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeEnabled();
+  });
+
+  it('forgets the undo history when the transcript lines change', () => {
+    const props = { ...defaultProps, assignments: [0, 1], setAssignments: vi.fn() };
+    const { rerender } = render(<AssignmentStep {...props} />);
+
+    fireEvent.click(screen.getByText('Hallo zusammen'));
+    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeEnabled();
+
+    // E.g. a transcript line was split, so old snapshots no longer line up.
+    rerender(<AssignmentStep {...props} transcript={[...props.transcript, { ...props.transcript[1]!, text: 'Neue Zeile' }]}
+      assignments={[0, 1, 1]} />);
+
+    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeDisabled();
+  });
+
+  it('forgets the undo history when the TOP list is replaced', () => {
+    const props = { ...defaultProps, assignments: [0, 1], setAssignments: vi.fn(), topIds: ['a', 'b'] };
+    const { rerender } = render(<AssignmentStep {...props} />);
+
+    fireEvent.click(screen.getByText('Hallo zusammen'));
+    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeEnabled();
+
+    // E.g. a re-extracted PDF agenda applied from outside this step.
+    rerender(<AssignmentStep {...props} tops={['Neu', 'Haushalt']} topIds={['c', 'b']} />);
+
+    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeDisabled();
+  });
+
   it('renames, adds, deletes and merges TOPs while preserving manual correction', async () => {
     const user = userEvent.setup();
     const setTops = vi.fn();
