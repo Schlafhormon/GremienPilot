@@ -1105,6 +1105,73 @@ def test_shared_session_history_and_conflict_response(tmp_path, monkeypatch):
         assert conflict_response.json()["detail"]["actual_revision"] > saved["revision"]
 
 
+def test_delete_session_endpoint_removes_session_job_and_uploaded_audio_file(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch)
+    audio_path = tmp_path / "delete-me.mp3"
+    audio_path.write_bytes(b"audio")
+
+    with TestClient(main.app) as client:
+        persistence.save_job(
+            "delete-session-job",
+            {
+                "session_id": "delete-session",
+                "status": "completed",
+                "progress": 100,
+                "message": "Transkription abgeschlossen",
+                "file_path": str(audio_path),
+                "audio_path": str(audio_path),
+            },
+        )
+        main.jobs["delete-session-job"] = persistence.load_job("delete-session-job")
+
+        response = client.delete("/api/sessions/delete-session")
+
+    assert response.status_code == 200
+    assert response.json() == {"session_id": "delete-session", "deleted": True}
+    assert persistence.load_session("delete-session") is None
+    assert persistence.load_job("delete-session-job") is None
+    assert "delete-session-job" not in main.jobs
+    assert not audio_path.exists()
+
+
+def test_delete_session_endpoint_returns_404_for_unknown_session(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch)
+
+    with TestClient(main.app) as client:
+        response = client.delete("/api/sessions/does-not-exist")
+
+    assert response.status_code == 404
+
+
+def test_delete_session_endpoint_rejects_deletion_while_job_is_processing(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch)
+    audio_path = tmp_path / "in-progress.mp3"
+    audio_path.write_bytes(b"audio")
+
+    with TestClient(main.app) as client:
+        persistence.save_job(
+            "processing-job",
+            {
+                "session_id": "processing-session",
+                "status": "processing",
+                "progress": 40,
+                "message": "läuft",
+                "file_path": str(audio_path),
+                "audio_path": str(audio_path),
+            },
+        )
+
+        response = client.delete("/api/sessions/processing-session")
+
+    assert response.status_code == 409
+    assert persistence.load_session("processing-session") is not None
+    assert audio_path.exists()
+
+
 def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypatch, agenda_model):
     agenda_model.labels = {0: ['agenda:0'], 1: ['agenda:1']}
     configure_test_app(tmp_path, monkeypatch, concurrency=1)

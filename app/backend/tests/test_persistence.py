@@ -738,3 +738,61 @@ def test_fork_and_later_publication_preserve_original_recording_owner():
     persistence.save_session('fork', {'job_id': 'shared-audio', 'tops': ['Final'], 'summaries': {0: 'Result'}})
     assert persistence.load_job('shared-audio') == original
     assert persistence.load_session('fork')['job_id'] == 'shared-audio'
+
+
+def _save_completed_job(job_id, session_id, audio_path):
+    persistence.save_job(job_id, {
+        'session_id': session_id, 'status': 'completed', 'progress': 100,
+        'message': 'Transkription abgeschlossen',
+        'file_path': str(audio_path), 'audio_path': str(audio_path)})
+
+
+def _finish_durable_job(job_id):
+    with persistence.connect() as db:
+        db.execute("UPDATE durable_jobs SET state='completed' WHERE job_id=?", (job_id,))
+
+
+def test_delete_session_removes_its_model_jobs_and_their_checkpoints(tmp_path):
+    import durable_jobs
+    pdf_path = tmp_path / 'einladung.pdf'
+    pdf_path.write_bytes(b'%PDF')
+    _save_completed_job('delete-model-job', 'delete-model-session', tmp_path / 'audio.mp3')
+    agenda = durable_jobs.submit('agenda', {'session_id': 'delete-model-session', 'request': {}})
+    pdf = durable_jobs.submit('pdf', {'path': str(pdf_path)}, documents=[durable_jobs.document(pdf_path)])
+    other = durable_jobs.submit('agenda', {'session_id': 'other-session', 'request': {}})
+    for job in (agenda, pdf, other):
+        _finish_durable_job(job['job_id'])
+    with persistence.connect() as db:
+        db.execute("UPDATE sessions SET pdf_source_job_id=? WHERE session_id=?",
+                   (pdf['job_id'], 'delete-model-session'))
+        db.execute("INSERT INTO durable_steps VALUES (?, 'step', '{}', 0)", (agenda['job_id'],))
+
+    result = persistence.delete_session('delete-model-session')
+
+    assert str(pdf_path.resolve()) in result['upload_paths']
+    assert durable_jobs.load(agenda['job_id']) is None
+    assert durable_jobs.load(pdf['job_id']) is None
+    assert durable_jobs.load(other['job_id']) is not None
+    with persistence.connect() as db:
+        assert db.execute("SELECT 1 FROM durable_steps WHERE job_id=?", (agenda['job_id'],)).fetchone() is None
+
+
+def test_delete_session_keeps_upload_files_a_forked_session_still_uses(tmp_path):
+    audio_path = tmp_path / 'shared.mp3'
+    _save_completed_job('original-job', 'original-session', audio_path)
+    _save_completed_job('fork-job', 'fork-session', audio_path)
+
+    assert persistence.delete_session('original-session') == {'upload_paths': []}
+    assert persistence.delete_session('fork-session') == {'upload_paths': [str(audio_path)]}
+
+
+def test_delete_session_rejects_deletion_while_a_model_job_is_active(tmp_path):
+    import durable_jobs
+    _save_completed_job('busy-job', 'busy-session', tmp_path / 'audio.mp3')
+    job = durable_jobs.submit('agenda', {'session_id': 'busy-session', 'request': {}})
+
+    with pytest.raises(persistence.SessionBusyError):
+        persistence.delete_session('busy-session')
+
+    assert persistence.load_session('busy-session') is not None
+    assert durable_jobs.load(job['job_id']) is not None

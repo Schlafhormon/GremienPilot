@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { listSessions } from '../api';
+import { deleteSession, listSessions } from '../api';
 import type { SessionHistoryItem, SessionHistoryStatus } from '../types';
 
 interface SessionHistoryProps {
@@ -60,6 +60,8 @@ export default function SessionHistory({ onOpen, onNewSession }: SessionHistoryP
   const [status, setStatus] = useState<'' | SessionHistoryStatus>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const loadHistory = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
@@ -99,6 +101,27 @@ export default function SessionHistory({ onOpen, onNewSession }: SessionHistoryP
     event.preventDefault();
     setOffset(0);
     setQuery(queryInput.trim());
+  };
+
+  const handleDelete = async (session: SessionHistoryItem) => {
+    const confirmed = window.confirm(
+      `Sitzung "${session.title}" inklusive hochgeladener Dateien unwiderruflich löschen?`
+    );
+    if (!confirmed) return;
+
+    setDeleteError(null);
+    setDeletingId(session.session_id);
+    try {
+      await deleteSession(session.session_id);
+      setItems((current) => current.filter((item) => item.session_id !== session.session_id));
+      setTotal((current) => Math.max(0, current - 1));
+    } catch (deleteErr) {
+      setDeleteError(
+        deleteErr instanceof Error ? deleteErr.message : 'Sitzung konnte nicht gelöscht werden'
+      );
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const firstVisible = total === 0 ? 0 : offset + 1;
@@ -167,6 +190,12 @@ export default function SessionHistory({ onOpen, onNewSession }: SessionHistoryP
         </div>
       )}
 
+      {deleteError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-800">
+          <p>{deleteError}</p>
+        </div>
+      )}
+
       {loading ? (
         <div className="rounded-lg border border-gray-200 bg-white p-8 text-center text-gray-500">
           Sitzungen werden geladen…
@@ -216,13 +245,23 @@ export default function SessionHistory({ onOpen, onNewSession }: SessionHistoryP
                     </div>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => onOpen(session.session_id)}
-                  className="shrink-0 rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700"
-                >
-                  Öffnen
-                </button>
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onOpen(session.session_id)}
+                    className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700"
+                  >
+                    Öffnen
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDelete(session)}
+                    disabled={deletingId === session.session_id}
+                    className="rounded-lg border border-red-300 px-4 py-2 font-medium text-red-700 hover:bg-red-50 disabled:opacity-40"
+                  >
+                    {deletingId === session.session_id ? 'Löscht…' : 'Löschen'}
+                  </button>
+                </div>
               </div>
             </article>
           ))}
