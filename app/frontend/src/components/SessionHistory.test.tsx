@@ -1,11 +1,12 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { listSessions } from '../api';
+import { deleteSession, listSessions } from '../api';
 import SessionHistory from './SessionHistory';
 
 vi.mock('../api', () => ({
   listSessions: vi.fn(),
+  deleteSession: vi.fn(),
 }));
 
 describe('SessionHistory', () => {
@@ -62,6 +63,51 @@ describe('SessionHistory', () => {
     expect(listSessions).toHaveBeenLastCalledWith(
       expect.objectContaining({ query: 'Finanzen' })
     );
+  });
+
+  it('deletes a session after confirmation and removes it from the list', async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.mocked(deleteSession).mockResolvedValue(undefined);
+    render(<SessionHistory onOpen={vi.fn()} onNewSession={vi.fn()} />);
+    await screen.findByText('Haushaltsausschuss');
+
+    await user.click(screen.getByRole('button', { name: 'Löschen' }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Haushaltsausschuss'));
+    expect(deleteSession).toHaveBeenCalledExactlyOnceWith('session-1');
+    await waitFor(() => expect(screen.queryByText('Haushaltsausschuss')).not.toBeInTheDocument());
+    confirm.mockRestore();
+  });
+
+  it('keeps the session when the deletion is not confirmed', async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<SessionHistory onOpen={vi.fn()} onNewSession={vi.fn()} />);
+    await screen.findByText('Haushaltsausschuss');
+
+    await user.click(screen.getByRole('button', { name: 'Löschen' }));
+
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(screen.getByText('Haushaltsausschuss')).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it('shows the server error and keeps the session when deletion fails', async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.mocked(deleteSession).mockRejectedValue(
+      new Error('Sitzung wird noch verarbeitet. Bitte zuerst abbrechen.')
+    );
+    render(<SessionHistory onOpen={vi.fn()} onNewSession={vi.fn()} />);
+    await screen.findByText('Haushaltsausschuss');
+
+    await user.click(screen.getByRole('button', { name: 'Löschen' }));
+
+    expect(await screen.findByText('Sitzung wird noch verarbeitet. Bitte zuerst abbrechen.')).toBeInTheDocument();
+    expect(screen.getByText('Haushaltsausschuss')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Löschen' })).toBeEnabled();
+    confirm.mockRestore();
   });
 });
 
