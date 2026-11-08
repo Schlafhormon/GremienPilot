@@ -30,6 +30,9 @@ const topColors: TopColor[] = [
   { bg: 'bg-orange-100', border: 'border-orange-300', text: 'text-orange-700', dot: 'bg-orange-500' },
 ];
 
+// How many past assignment states to keep for the "Rückgängig" undo button.
+const MAX_ASSIGNMENT_HISTORY = 20;
+
 export default function AssignmentStep({
   onNext,
   onBack,
@@ -70,6 +73,7 @@ export default function AssignmentStep({
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [topTitleDraft, setTopTitleDraft] = useState(tops[0] ?? '');
+  const [assignmentHistory, setAssignmentHistory] = useState<(number | null)[][]>([]);
 
   const stableTopIds = tops.map((_, index) => topIds[index] ?? `top-${index}`);
   const updateTops = (nextTops: string[], nextTopIds = stableTopIds) => {
@@ -126,6 +130,50 @@ export default function AssignmentStep({
 
   const counts = getAssignmentCounts();
 
+  // Apply a new assignments array while remembering the previous one, so an
+  // accidental bulk re-assignment (e.g. a wide shift-click) can be undone.
+  const applyAssignments = (next: (number | null)[]) => {
+    setAssignmentHistory((history) => [
+      ...history.slice(-(MAX_ASSIGNMENT_HISTORY - 1)),
+      assignments,
+    ]);
+    setAssignments(next);
+  };
+
+  // A snapshot taken before the TOP list or the transcript lines changed could
+  // reference TOPs or lines that no longer exist. This also covers changes made
+  // outside this step, such as applying a re-extracted PDF agenda.
+  const topIdentity = stableTopIds.join('\u0000');
+  useEffect(() => {
+    setAssignmentHistory([]);
+  }, [topIdentity, transcript.length]);
+
+  const undoLastAssignmentChange = () => {
+    const previous = assignmentHistory[assignmentHistory.length - 1];
+    if (!previous) return;
+    setAssignmentHistory((history) => history.slice(0, -1));
+    if (previous.length === assignments.length) {
+      setAssignments(previous);
+    }
+  };
+
+  // Re-registered on every render so the handler always sees current state.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const isUndoShortcut =
+        (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z';
+      if (!isUndoShortcut || editingLine !== null) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      event.preventDefault();
+      undoLastAssignmentChange();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
+
   const handleLineClick = (lineIndex: number, event: Pick<MouseEvent, 'detail' | 'shiftKey'>) => {
     if (editingLine === lineIndex) {
       return;
@@ -149,7 +197,7 @@ export default function AssignmentStep({
       for (let i = start; i <= end; i++) {
         newAssignments[i] = selectedTop;
       }
-      setAssignments(newAssignments);
+      applyAssignments(newAssignments);
       setSelectionStart(null);
     } else {
       // Single click - toggle or set
@@ -159,7 +207,7 @@ export default function AssignmentStep({
       } else {
         newAssignments[lineIndex] = selectedTop;
       }
-      setAssignments(newAssignments);
+      applyAssignments(newAssignments);
       setSelectionStart(lineIndex);
     }
   };
@@ -172,7 +220,7 @@ export default function AssignmentStep({
         newAssignments[i] = segment.top_index;
       }
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
     setSelectedTop(segment.top_index);
     setSelectedLineIndex(segment.start_index);
   };
@@ -204,14 +252,14 @@ export default function AssignmentStep({
           }
         }
       });
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const applyAllSuggestions = () => {
     if (!agendaDetection || agendaDetectionStale) {
       return;
     }
-    setAssignments(agendaDetection.assignments);
+    applyAssignments(agendaDetection.assignments);
   };
 
   const renameSelectedTop = () => {
@@ -300,7 +348,7 @@ export default function AssignmentStep({
     for (let i = start; i <= end; i++) {
       newAssignments[i] = selectedTop;
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const splitCurrentSegmentAtSelectedLine = () => {
@@ -312,7 +360,7 @@ export default function AssignmentStep({
     for (let i = selectedLineIndex; i <= end; i++) {
       newAssignments[i] = selectedTop;
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const mergeCurrentSegmentWithPrevious = () => {
@@ -328,7 +376,7 @@ export default function AssignmentStep({
     for (let i = start; i <= end; i++) {
       newAssignments[i] = previousAssignment;
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const mergeCurrentSegmentWithNext = () => {
@@ -344,7 +392,7 @@ export default function AssignmentStep({
     for (let i = start; i <= end; i++) {
       newAssignments[i] = nextAssignment;
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const startLineEdit = (lineIndex: number, text: string) => {
@@ -731,6 +779,16 @@ export default function AssignmentStep({
         <div className="review-pane bg-white rounded-lg border border-gray-200 flex flex-col">
           <div className="shrink-0 bg-gray-50 border-b border-gray-200 p-3 flex flex-wrap items-center gap-2 text-sm">
             <span className="mr-1 font-medium text-gray-900">Korrektur</span>
+            <button
+              type="button"
+              onClick={undoLastAssignmentChange}
+              disabled={assignmentHistory.length === 0}
+              title="Letzte TOP-Zuordnungsänderung rückgängig machen (Strg+Z)"
+              className="px-3 py-1.5 bg-amber-100 border border-amber-300 text-amber-900 rounded hover:bg-amber-200 disabled:opacity-50 disabled:bg-white disabled:text-gray-400 disabled:border-gray-300"
+            >
+              Rückgängig{assignmentHistory.length > 0 ? ` (${assignmentHistory.length})` : ''}
+            </button>
+            <span className="w-px h-6 bg-gray-300 mx-1" />
             <span className="text-gray-700">
               {selectedLineIndex === null
                 ? 'Keine Zeile ausgewählt'
