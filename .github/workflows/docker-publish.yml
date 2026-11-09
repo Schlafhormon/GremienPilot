@@ -63,7 +63,10 @@ jobs:
       - name: Install backend test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install fastapi httpx pydantic pytest python-multipart
+          # Everything the tests import except the transcription stack
+          # (torch, torchaudio, whisperx), which the tests replace with fakes.
+          python -m pip install fastapi httpx pydantic pytest python-multipart \
+            openai python-docx reportlab "markdown-it-py>=4,<5" pdfplumber numpy
 
       - name: Test backend
         working-directory: app/backend
@@ -100,7 +103,26 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pip-audit uv
           uv export --format requirements-txt --no-hashes --output-file /tmp/backend-requirements.txt
-          pip-audit --progress-spinner off -r /tmp/backend-requirements.txt
+          # Known issues that cannot be fixed by a lock update alone:
+          # - torch is pinned to <2.8 in pyproject.toml (torchaudio/whisperx/
+          #   pyannote compatibility); fixes need torch 2.8 - 2.13, and
+          #   PYSEC-2026-139 has no fix yet.
+          # - transformers is held at 4.x by whisperx 3.7; fixes need
+          #   transformers 5.x, and PYSEC-2025-217 / PYSEC-2026-4174 have no
+          #   fix for 4.x.
+          # The affected code paths (loading untrusted checkpoints or model
+          # repositories, training) are not used: only the pinned WhisperX,
+          # alignment and pyannote models are loaded. Drop these entries when
+          # upgrading the transcription stack.
+          pip-audit --progress-spinner off -r /tmp/backend-requirements.txt \
+            --ignore-vuln PYSEC-2025-193 --ignore-vuln PYSEC-2025-194 \
+            --ignore-vuln PYSEC-2025-195 --ignore-vuln PYSEC-2025-203 \
+            --ignore-vuln PYSEC-2025-204 --ignore-vuln PYSEC-2025-206 \
+            --ignore-vuln PYSEC-2026-139 --ignore-vuln PYSEC-2026-1856 \
+            --ignore-vuln PYSEC-2026-1970 --ignore-vuln PYSEC-2026-2286 \
+            --ignore-vuln PYSEC-2025-217 --ignore-vuln PYSEC-2026-2288 \
+            --ignore-vuln PYSEC-2026-2289 --ignore-vuln PYSEC-2026-2290 \
+            --ignore-vuln PYSEC-2026-3929 --ignore-vuln PYSEC-2026-4174
 
   build-frontend:
     needs: [test-frontend, dependency-security]
