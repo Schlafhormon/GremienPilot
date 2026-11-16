@@ -343,6 +343,48 @@ def transcribe_audio(
         return _transcribe_audio(file_path, models, progress_callback)
 
 
+@contextmanager
+def transcription_batch_progress(pipeline, progress_callback):
+    """Check cancellation between WhisperX batches, without splitting the audio.
+
+    WhisperX's public transcribe call processes the entire recording and has no
+    callback argument. Its forward method runs once per inference batch. The
+    durable worker owns this pipeline exclusively, so a temporary instance hook
+    lets cancellation unwind the call before another batch starts.
+    """
+    if progress_callback is None:
+        yield
+        return
+
+    forward = pipeline._forward
+    had_override = "_forward" in vars(pipeline)
+    override = vars(pipeline).get("_forward")
+    tokenizer, options = pipeline.tokenizer, pipeline.options
+    completed = 0
+
+    def checked_forward(*args, **kwargs):
+        nonlocal completed
+        progress_callback(15, f"Transkription läuft... (Batch {completed + 1})")
+        result = forward(*args, **kwargs)
+        completed += 1
+        progress_callback(15, f"Transkription läuft... ({completed} Batches verarbeitet)")
+        return result
+
+    pipeline._forward = checked_forward
+    try:
+        yield
+    except BaseException:
+        # WhisperX restores these only on successful return. A cancelled call
+        # must not leave numeral suppression/language state on the shared model.
+        pipeline.tokenizer, pipeline.options = tokenizer, options
+        raise
+    finally:
+        if had_override:
+            pipeline._forward = override
+        else:
+            del pipeline._forward
+
+
 def _transcribe_audio(
     file_path: str,
     models: TranscriptionModels,
@@ -383,11 +425,12 @@ def _transcribe_audio(
 
         # Transcribe using pre-loaded model
         logger.info(f"Starting transcription with batch_size={WHISPER_BATCH_SIZE}...")
-        result = models.whisper_model.transcribe(
-            audio,
-            batch_size=WHISPER_BATCH_SIZE,
-            language=WHISPER_LANGUAGE,
-        )
+        with transcription_batch_progress(models.whisper_model, progress_callback):
+            result = models.whisper_model.transcribe(
+                audio,
+                batch_size=WHISPER_BATCH_SIZE,
+                language=WHISPER_LANGUAGE,
+            )
         logger.info(f"Transcription complete, found {len(result.get('segments', []))} segments")
 
         if progress_callback:

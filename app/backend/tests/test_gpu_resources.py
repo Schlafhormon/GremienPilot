@@ -155,6 +155,74 @@ class FakeGPUModel:
     pass
 
 
+def test_transcription_cancel_after_batch_stops_before_next_batch(real_transcribe, monkeypatch):
+    from llm_transport import LLMCancelledError
+
+    module = real_transcribe
+    cancelled = False
+    batches = []
+    original_tokenizer, original_options = object(), object()
+
+    class Pipeline:
+        tokenizer = original_tokenizer
+        options = original_options
+
+        def _forward(self, batch):
+            nonlocal cancelled
+            batches.append(batch)
+            self.tokenizer, self.options = object(), object()
+            cancelled = True  # A user cancels while native inference runs.
+            return batch
+
+        def transcribe(self, audio, **kwargs):
+            return [self._forward(batch) for batch in range(3)]
+
+    pipeline = Pipeline()
+    models = module.TranscriptionModels(pipeline, None, {}, None, "cpu")
+    monkeypatch.setattr(sys.modules["whisperx"], "load_audio", lambda path: [0] * 16000, raising=False)
+    monkeypatch.setattr(module, "_cleanup_memory", lambda device: None)
+
+    def progress(*args):
+        if cancelled:
+            raise LLMCancelledError("User cancelled")
+
+    with pytest.raises(LLMCancelledError):
+        module.transcribe_audio("meeting.mp3", models, progress)
+    assert batches == [0]
+    assert "_forward" not in vars(pipeline)
+    assert pipeline.tokenizer is original_tokenizer
+    assert pipeline.options is original_options
+
+    # Reusing the same eagerly loaded model must not retain the cancellation hook.
+    cancelled = False
+    assert pipeline.transcribe(None) == [0, 1, 2]
+
+
+def test_transcription_cancel_before_batch_skips_native_inference(real_transcribe):
+    from llm_transport import LLMCancelledError
+
+    forward = lambda batch: pytest.fail("Cancelled job reached native inference")
+    pipeline = SimpleNamespace(_forward=forward, tokenizer=None, options=None)
+
+    def cancel(*args):
+        raise LLMCancelledError("User cancelled")
+
+    with pytest.raises(LLMCancelledError):
+        with real_transcribe.transcription_batch_progress(pipeline, cancel):
+            pipeline._forward(0)
+    assert pipeline._forward is forward
+
+
+def test_transcription_batch_progress_preserves_results(real_transcribe):
+    forward = lambda batch, *, scale: batch * scale
+    pipeline = SimpleNamespace(_forward=forward, tokenizer=None, options=None)
+    progress = []
+    with real_transcribe.transcription_batch_progress(pipeline, lambda *args: progress.append(args)):
+        assert [pipeline._forward(batch, scale=2) for batch in range(3)] == [0, 2, 4]
+    assert pipeline._forward is forward
+    assert len(progress) == 6
+
+
 def install_loader(module, monkeypatch, events):
     refs = []
     def load():
