@@ -21,7 +21,8 @@ COPY . .
 RUN npm run build
 
 # Production stage
-FROM nginx:alpine
+# Pin the security release and multi-platform image digest for reproducible builds.
+FROM nginx:1.31.9-alpine@sha256:90b6bd2aec278b16b98221d64deb1d6d35d164567f507ab0716e6053878315aa
 
 # Copy built files to nginx
 COPY --from=builder /app/dist /usr/share/nginx/html
