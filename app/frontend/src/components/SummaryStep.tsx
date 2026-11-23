@@ -260,6 +260,13 @@ export default function SummaryStep({
     const index = tops.findIndex((_, i) => topIdAt(i) === id);
     return index >= 0 ? tops[index] : id.startsWith('whole-session:') ? 'Gesamtes Gespräch' : id;
   };
+  // TOPs whose summary no longer matches its input - what the yellow
+  // "changed" banner is asking the user to deal with.
+  const regenerableIndexes = tops.map((_, index) => index).filter(index =>
+    ['review_required', 'missing', 'failed'].includes(summaryStates[index]?.status ?? ''));
+  const regenerationDisabledHint = busy
+    ? 'Es läuft bereits eine Neugenerierung. Warten Sie, bis der Auftrag abgeschlossen ist, oder brechen Sie ihn ab.'
+    : undefined;
   const selectedSummaryIndex = hasTops ? selectedTop : 0;
   const topLines = hasTops ? getTranscriptForTop(selectedTop) : transcript;
   const selectedReview = summaryReviews[selectedSummaryIndex];
@@ -301,8 +308,19 @@ export default function SummaryStep({
   return (
     <div className="space-y-3">
       {!summariesAreFresh && (
-        <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
-          Geänderte TOPs prüfen: Zusammenfassung übernehmen, bearbeiten oder neu generieren.
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
+          <div>Geänderte TOPs prüfen: Zusammenfassung übernehmen, bearbeiten oder neu generieren.</div>
+          {onRegenerateSummaries && regenerableIndexes.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setRegenerationCandidate(regenerableIndexes)}
+              disabled={busy || editingTop !== null}
+              title={regenerationDisabledHint}
+              className="shrink-0 rounded border border-yellow-400 bg-white px-3 py-1.5 text-sm font-medium text-yellow-900 hover:bg-yellow-100 disabled:opacity-50"
+            >
+              Alle {regenerableIndexes.length} geänderten neu generieren
+            </button>
+          )}
         </div>
       )}
 
@@ -392,6 +410,7 @@ export default function SummaryStep({
               </div>
               <button type="button" disabled={busy || !selectedIndexes.length || editingTop !== null}
                 onClick={() => setRegenerationCandidate(selectedIndexes)}
+                title={regenerationDisabledHint}
                 className="rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-50">
                 Auswahl neu generieren ({selectedIndexes.length})
               </button>
@@ -515,6 +534,7 @@ export default function SummaryStep({
                     <button
                       onClick={() => setRegenerationCandidate([selectedSummaryIndex])}
                       disabled={busy}
+                      title={regenerationDisabledHint}
                       className="rounded border border-blue-300 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
                     >
                       Neu generieren

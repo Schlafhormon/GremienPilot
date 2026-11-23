@@ -91,6 +91,51 @@ describe('SummaryStep', () => {
     expect(regenerate).toHaveBeenCalledExactlyOnceWith([0, 1]);
   });
 
+  it('regenerates every changed TOP from the change banner in one job', async () => {
+    const user = userEvent.setup();
+    const regenerate = vi.fn().mockResolvedValue(undefined);
+    renderSummaryStep({
+      tops: ['Begruessung', 'Haushalt', 'Verschiedenes'],
+      summariesAreFresh: false,
+      summaryStates: {
+        0: { top_id: 'a', status: 'review_required' },
+        1: { top_id: 'b', status: 'current' },
+        2: { top_id: 'c', status: 'missing' },
+      } as SummaryStepProps['summaryStates'],
+      onRegenerateSummaries: regenerate,
+    });
+    await user.click(screen.getByRole('button', { name: 'Alle 2 geänderten neu generieren' }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+    expect(regenerate).toHaveBeenCalledExactlyOnceWith([0, 2]);
+  });
+
+  it('offers no bulk regeneration when only one TOP changed', () => {
+    renderSummaryStep({
+      summariesAreFresh: false,
+      summaryStates: {
+        0: { top_id: 'a', status: 'review_required' },
+        1: { top_id: 'b', status: 'current' },
+      } as SummaryStepProps['summaryStates'],
+      onRegenerateSummaries: vi.fn(),
+    });
+    expect(screen.queryByRole('button', { name: /geänderten neu generieren/ })).not.toBeInTheDocument();
+  });
+
+  it('explains why regeneration is disabled while a job is running', () => {
+    renderSummaryStep({
+      summariesAreFresh: false,
+      isGenerating: true,
+      summaryStates: {
+        0: { top_id: 'a', status: 'review_required' },
+        1: { top_id: 'b', status: 'failed' },
+      } as SummaryStepProps['summaryStates'],
+      onRegenerateSummaries: vi.fn(),
+    });
+    const button = screen.getByRole('button', { name: 'Alle 2 geänderten neu generieren' });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', expect.stringMatching(/läuft bereits/));
+  });
+
   it('shows real aggregate progress, the current TOP and the immutable job selection', () => {
     renderSummaryStep({
       onRegenerateSummaries: vi.fn(), topIds: ['a', 'b'],
