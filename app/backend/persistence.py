@@ -1911,3 +1911,157 @@ def list_sessions(
 
     total = len(entries)
     return entries[offset : offset + limit], total
+
+
+class SessionBusyError(RuntimeError):
+    """A job still works on the session, so it cannot be deleted."""
+
+
+_ACTIVE_JOB_STATUSES = ("pending", "processing", "cancelling")
+_ACTIVE_DURABLE_STATES = ("queued", "running", "retry_wait")
+_DURABLE_CHILD_TABLES = (
+    "durable_steps",
+    "durable_step_integrity",
+    "durable_metrics",
+    "durable_artifacts",
+)
+
+
+def _resolved(path: str) -> str:
+    return str(Path(path).resolve())
+
+
+def _referenced_upload_paths(db: sqlite3.Connection) -> set[str]:
+    """Every upload path some remaining job still needs."""
+    paths: set[str] = set()
+    for row in db.execute("SELECT audio_path, file_path FROM transcription_jobs"):
+        paths.update(path for path in (row["audio_path"], row["file_path"]) if path)
+    for row in db.execute("SELECT result_refs_json FROM pipeline_jobs"):
+        refs = _from_json(row["result_refs_json"]) or {}
+        paths.update(refs[key] for key in ("audio_path", "pdf_path") if refs.get(key))
+    for row in db.execute("SELECT documents FROM durable_jobs"):
+        for document in _from_json(row["documents"]) or []:
+            if document.get("path") and not document.get("deleted_at"):
+                paths.add(document["path"])
+    return paths
+
+
+def delete_session(
+    session_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """
+    Permanently delete a session and everything scoped to it (jobs, TOPs,
+    transcript, summaries, speaker observations, model-job checkpoints).
+    Returns the upload file paths (audio/PDF) the caller should remove from
+    disk, or None if the session did not exist. Raises SessionBusyError while
+    any job still works on the session.
+
+    transcription_jobs.session_id and pipeline_jobs.session_id use
+    ON DELETE SET NULL, and durable_jobs only name the session in their
+    payload, so those rows are deleted explicitly here instead of relying on
+    the sessions cascade, which would otherwise just orphan them.
+
+    A forked session can share upload files with the session it was forked
+    from, so files still referenced by any remaining job are kept.
+    """
+    with connect(db_path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        session = db.execute(
+            "SELECT pdf_source_job_id FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if session is None:
+            return None
+
+        status_marks = ", ".join("?" * len(_ACTIVE_JOB_STATUSES))
+        for table in ("transcription_jobs", "pipeline_jobs", "summary_jobs"):
+            if db.execute(
+                f"SELECT 1 FROM {table} WHERE session_id = ? AND status IN ({status_marks})",
+                (session_id, *_ACTIVE_JOB_STATUSES),
+            ).fetchone():
+                raise SessionBusyError(session_id)
+
+        job_rows = db.execute(
+            "SELECT audio_path, file_path FROM transcription_jobs WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        pipeline_rows = db.execute(
+            "SELECT pipeline_job_id, result_refs_json FROM pipeline_jobs WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+
+        durable_ids = {
+            row["job_id"]
+            for row in db.execute(
+                """
+                SELECT job_id FROM durable_jobs
+                WHERE json_extract(payload, '$.session_id') = ?
+                   OR json_extract(payload, '$.legacy_snapshot.session_id') = ?
+                """,
+                (session_id, session_id),
+            )
+        }
+        # The PDF extraction started at upload time does not name the session.
+        pdf_source_ids = {session["pdf_source_job_id"]} - {None}
+        upload_paths: set[str] = set()
+        for row in job_rows:
+            upload_paths.update(
+                path for path in (row["audio_path"], row["file_path"]) if path
+            )
+        for row in pipeline_rows:
+            refs = _from_json(row["result_refs_json"]) or {}
+            upload_paths.update(
+                refs[key] for key in ("audio_path", "pdf_path") if refs.get(key)
+            )
+            document = (refs.get("pdf_extraction") or {}).get("document") or {}
+            if document.get("job_id"):
+                pdf_source_ids.add(document["job_id"])
+        pipeline_ids = [row["pipeline_job_id"] for row in pipeline_rows]
+        for source_id in pdf_source_ids:
+            # Keep an extraction another session (e.g. a fork) still uses.
+            shared = db.execute(
+                "SELECT 1 FROM sessions WHERE session_id != ? AND pdf_source_job_id = ?",
+                (session_id, source_id),
+            ).fetchone() or any(
+                source_id in (row["result_refs_json"] or "")
+                for row in db.execute(
+                    "SELECT pipeline_job_id, result_refs_json FROM pipeline_jobs"
+                )
+                if row["pipeline_job_id"] not in pipeline_ids
+            )
+            if not shared:
+                durable_ids.add(source_id)
+
+        durable_ids = sorted(durable_ids)
+        id_marks = ", ".join("?" * len(durable_ids))
+        state_marks = ", ".join("?" * len(_ACTIVE_DURABLE_STATES))
+        if durable_ids:
+            if db.execute(
+                f"SELECT 1 FROM durable_jobs WHERE job_id IN ({id_marks}) AND state IN ({state_marks})",
+                (*durable_ids, *_ACTIVE_DURABLE_STATES),
+            ).fetchone():
+                raise SessionBusyError(session_id)
+            for row in db.execute(
+                f"SELECT documents FROM durable_jobs WHERE job_id IN ({id_marks})",
+                durable_ids,
+            ):
+                for document in _from_json(row["documents"]) or []:
+                    if document.get("path") and not document.get("deleted_at"):
+                        upload_paths.add(document["path"])
+            for table in _DURABLE_CHILD_TABLES:
+                db.execute(f"DELETE FROM {table} WHERE job_id IN ({id_marks})", durable_ids)
+            db.execute(f"DELETE FROM durable_jobs WHERE job_id IN ({id_marks})", durable_ids)
+
+        db.execute("DELETE FROM transcription_jobs WHERE session_id = ?", (session_id,))
+        db.execute("DELETE FROM pipeline_jobs WHERE session_id = ?", (session_id,))
+        db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
+        # Durable jobs store resolved paths, the job tables may store relative ones.
+        referenced = {_resolved(path) for path in _referenced_upload_paths(db)}
+
+    return {
+        "upload_paths": sorted(
+            path for path in upload_paths if _resolved(path) not in referenced
+        )
+    }
